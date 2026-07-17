@@ -1,0 +1,226 @@
+## Few-shot示例1: 装甲集群推进 (坦克+IFV协同)
+
+### 战场状态
+屏幕尺寸: 1280x720
+己方总兵力: 8 | 敌方总兵力: 6(估)
+资金: 500 | 人口: 8/30
+
+### 己方单位
+| ID | 类型 | 位置(x,y) | 血量% | 备注 |
+| 1 | tank | 0.15,0.70 | 100 | M1A2主战坦克(120mm) |
+| 2 | tank | 0.12,0.68 | 100 | Leopard 2A6(120mm) |
+| 3 | ifv | 0.20,0.72 | 100 | M2 Bradley(25mm+TOW) |
+| 4 | ifv | 0.16,0.71 | 100 | BMP-2(30mm+Konkurs) |
+| 5 | infantry | 0.18,0.75 | 100 | 步兵班(SCAR+M67) |
+| 6 | infantry | 0.22,0.76 | 100 | 步兵班(M4+M203) |
+| 7 | infantry | 0.20,0.74 | 100 | ATGM班组(TOW-2) |
+| 8 | infantry | 0.25,0.78 | 100 | 侦察班(RS) |
+
+### 敌方单位
+| ID | 类型 | 位置(x,y) | 血量% | 威胁 |
+| 101 | tank | 0.80,0.30 | 100 | ★★★★★ |
+| 102 | ifv | 0.75,0.35 | 100 | ★★★★ |
+| 103 | infantry | 0.78,0.38 | 100 | ★★ |
+
+### 输出
+{
+  "analysis": "开局阶段,敌方在屏幕上方部署1辆坦克+1辆IFV+1个步兵班。我方兵力占优,应以坦克双前出吸引火力,IFV侧翼支援,ATGM班组寻找射击位置。",
+  "commands": [
+    {
+      "action": "move",
+      "unit_ids": [1, 2],
+      "target_enemy_id": null,
+      "target": [0.50, 0.45],
+      "reason": "两辆坦克作为先锋向中央推进,利用120mm主炮正面压制敌方坦克"
+    },
+    {
+      "action": "move",
+      "unit_ids": [3, 4],
+      "target_enemy_id": null,
+      "target": [0.60, 0.50],
+      "reason": "IFV向侧翼移动,利用ATGM(Bradley的TOW/BMP的Konkurs)从侧翼打击敌方坦克"
+    },
+    {
+      "action": "move",
+      "unit_ids": [5, 6],
+      "target_enemy_id": null,
+      "target": [0.48, 0.55],
+      "reason": "步兵班跟随坦克推进,保持装甲与步兵协同,防止敌方步兵伏击"
+    },
+    {
+      "action": "move",
+      "unit_ids": [7],
+      "target_enemy_id": null,
+      "target": [0.55, 0.52],
+      "reason": "ATGM班组前出寻找射击位置,TOW-2可在远距离打击敌方坦克"
+    },
+    {
+      "action": "move",
+      "unit_ids": [8],
+      "target_enemy_id": null,
+      "target": [0.65, 0.40],
+      "reason": "侦察班向侧翼侦察,探测敌方可能的增援方向"
+    }
+  ]
+}
+
+---
+
+## Few-shot示例2: 遭遇敌方装甲集群 (防守反击)
+
+### 战场状态
+屏幕尺寸: 1280x720
+己方总兵力: 7 | 敌方总兵力: 5(估)
+资金: 300 | 人口: 7/30
+
+### 己方单位
+| ID | 类型 | 位置(x,y) | 血量% | 备注 |
+| 1 | tank | 0.45,0.55 | 60 | M1A2已接敌,120mm主炮 |
+| 2 | tank | 0.40,0.52 | 90 | T-90(125mm) |
+| 3 | ifv | 0.50,0.58 | 85 | Bradley(TOW待发) |
+| 4 | infantry | 0.48,0.60 | 55 | 步兵班减员中 |
+| 5 | infantry | 0.52,0.62 | 90 | HMG班组(M2HB 12.7mm) |
+| 6 | infantry | 0.42,0.65 | 100 | ATGM班组(Konkurs) |
+| 7 | infantry | 0.38,0.68 | 100 | 迫击炮班组(120mm) |
+
+### 敌方单位
+| ID | 类型 | 位置(x,y) | 血量% | 威胁 |
+| 101 | tank | 0.55,0.40 | 35 | ★★★★★ |
+| 102 | tank | 0.60,0.38 | 100 | ★★★★★ |
+| 103 | ifv | 0.58,0.42 | 80 | ★★★★ |
+| 104 | infantry | 0.52,0.45 | 100 | ★★ (ATGM) |
+
+### 输出
+{
+  "analysis": "敌方双坦克+IFV+ATGM班组威胁极大。我方前线坦克已残血,需优先集火消灭残血坦克(101),同时ATGM班组和IFV的TOW导弹从侧翼打击满血坦克(102)。",
+  "commands": [
+    {
+      "action": "attack",
+      "unit_ids": [1, 2],
+      "target_enemy_id": 101,
+      "reason": "两辆坦克优先集火消灭敌方残血坦克(101),先减员敌方装甲力量"
+    },
+    {
+      "action": "attack",
+      "unit_ids": [3],
+      "target_enemy_id": 102,
+      "reason": "Bradley的TOW导弹从侧翼攻击敌方满血坦克(102),ATGM对坦克2-3发可击毁"
+    },
+    {
+      "action": "attack",
+      "unit_ids": [6],
+      "target_enemy_id": 102,
+      "reason": "ATGM班组(Konkurs)与Bradley协同集火敌方坦克(102),确保击毁"
+    },
+    {
+      "action": "attack",
+      "unit_ids": [5],
+      "target_enemy_id": 104,
+      "reason": "HMG班组用12.7mm重机枪压制敌方ATGM班组,保护己方装甲免受反坦克火力"
+    },
+    {
+      "action": "attack_ground",
+      "unit_ids": [7],
+      "target_enemy_id": null,
+      "target": [0.55, 0.42],
+      "reason": "120mm迫击炮对敌方IFV和步兵位置进行火力覆盖,压制敌方支援火力"
+    },
+    {
+      "action": "move",
+      "unit_ids": [4],
+      "target_enemy_id": null,
+      "target": [0.48, 0.58],
+      "reason": "残血步兵班后撤至掩体,避免被敌方坦克炮火消灭"
+    }
+  ]
+}
+
+---
+
+## Few-shot示例3: 步兵伏击装甲 (ATGM反坦克作战)
+
+### 战场状态
+屏幕尺寸: 1280x720
+己方总兵力: 6 | 敌方总兵力: 4(估)
+资金: 200 | 人口: 6/30
+
+### 己方单位
+| ID | 类型 | 位置(x,y) | 血量% | 备注 |
+| 1 | ifv | 0.35,0.55 | 50 | BMP-2残血,30mm机炮 |
+| 2 | infantry | 0.38,0.60 | 90 | 步兵班(AK-74+GP-25) |
+| 3 | infantry | 0.42,0.62 | 95 | 步兵班(HK416+AG36) |
+| 4 | infantry | 0.30,0.58 | 100 | ATGM班组(Spike) |
+| 5 | infantry | 0.32,0.65 | 100 | AT班组(RPG-7+AT4) |
+| 6 | infantry | 0.28,0.70 | 100 | 狙击手(M82 .50cal) |
+
+### 敌方单位
+| ID | 类型 | 位置(x,y) | 血量% | 威胁 |
+| 101 | tank | 0.65,0.35 | 100 | ★★★★★ |
+| 102 | ifv | 0.68,0.38 | 100 | ★★★★ |
+| 103 | infantry | 0.70,0.40 | 100 | ★★ |
+
+### 输出
+{
+  "analysis": "敌方坦克+IFV推进,我方IFV残血无力正面对抗。应采取伏击战术:狙击手和ATGM班组在侧翼隐蔽,AT班组前出近距离侧击,步兵班吸引火力。",
+  "commands": [
+    {
+      "action": "move",
+      "unit_ids": [1],
+      "target_enemy_id": null,
+      "target": [0.35, 0.58],
+      "reason": "残血BMP-2后撤至掩体后方,避免被敌方坦克120mm主炮一击摧毁"
+    },
+    {
+      "action": "move",
+      "unit_ids": [4],
+      "target_enemy_id": null,
+      "target": [0.50, 0.48],
+      "reason": "ATGM班组(Spike)向侧翼移动,寻找射击位置,Spike导弹可远距离打击敌方坦克"
+    },
+    {
+      "action": "move",
+      "unit_ids": [5],
+      "target_enemy_id": null,
+      "target": [0.55, 0.50],
+      "reason": "AT班组(RPG-7+AT4)前出至近距离,等待敌方坦克靠近后侧后攻击,侧后装甲薄弱"
+    },
+    {
+      "action": "move",
+      "unit_ids": [6],
+      "target_enemy_id": null,
+      "target": [0.45, 0.45],
+      "reason": "狙击手(M82)向侧翼高地移动,远程压制敌方步兵(103),为AT班组创造伏击条件"
+    },
+    {
+      "action": "attack_ground",
+      "unit_ids": [2, 3],
+      "target_enemy_id": null,
+      "target": [0.67, 0.38],
+      "reason": "步兵班向敌方位置火力压制,吸引敌方注意力,掩护AT班组侧翼伏击"
+    }
+  ]
+}
+
+---
+
+## AI学习自玩家会话: learn_tank_01
+## 学习时间: 2026-07-18T05:35:46.901372
+## 玩家风格: 防守型
+## 进攻性: 0%
+## 微操强度: 0%
+
+### 玩家操作习惯
+- visual_change: 144次
+
+### 常见战术模式
+- visual_change -> visual_change (出现143次)
+- visual_change -> visual_change -> visual_change (出现142次)
+
+### 偏好操作区域
+- 网格1,3: 49次
+- 网格3,3: 29次
+- 网格2,3: 28次
+
+### 学习建议
+AI应参考以上玩家的操作习惯和战术偏好，
+在决策时模仿玩家的风格和战术模式。
