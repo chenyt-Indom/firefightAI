@@ -50,6 +50,8 @@ class TacticalCommander:
         self._fallback_client: Optional[OpenAI] = None
         self._system_prompt: str = ""
         self._few_shot_examples: str = ""
+        self._tactics_rules: str = ""       # L2 提炼的持久化规则
+        self._learned_examples: str = ""    # L1 当前轮注入的动态示例
         self._decision_count = 0
         self._total_decision_time = 0.0
 
@@ -78,6 +80,32 @@ class TacticalCommander:
             learned_content = learned_path.read_text(encoding="utf-8")
             self._few_shot_examples += "\n\n---\n\n" + learned_content
             logger.info(f"学习到的模式加载成功: {len(learned_content)}字符")
+
+        # 加载 L2 提炼的战术规则
+        self._tactics_rules = ""
+        self.reload_tactics_rules()
+
+    def reload_tactics_rules(self) -> None:
+        """重新加载 L2 提炼的战术规则 (策略提炼后调用)"""
+        from src.learning.strategy_compressor import StrategyCompressor
+        self._tactics_rules = StrategyCompressor.load_rules()
+        if self._tactics_rules:
+            logger.info(f"战术规则加载成功: {len(self._tactics_rules)}字符")
+
+    def set_learned_examples(
+        self,
+        memory_retriever,
+        state_hash: str,
+        ally_count: int,
+        enemy_count: int,
+    ) -> None:
+        """设置动态学习的 few-shot 示例 (每轮 LLM 调用前由 controller 调用)
+
+        从经验库检索相似案例, 格式化为 few-shot, 注入到 prompt 中。
+        """
+        self._learned_examples = memory_retriever.format_as_few_shot(
+            memory_retriever.retrieve(state_hash, ally_count, enemy_count)
+        )
 
     def decide(self, game_state: GameState) -> Optional[LLMResponse]:
         """主决策入口: 调用LLM进行战术决策
@@ -112,8 +140,13 @@ class TacticalCommander:
         state_text = game_state.to_llm_text()
         user_message = self._build_user_message(state_text)
 
+        # 拼接 system prompt: 基础 prompt + L2 战术规则
+        system_content = self._system_prompt
+        if self._tactics_rules:
+            system_content += self._tactics_rules
+
         messages = [
-            {"role": "system", "content": self._system_prompt},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": user_message},
         ]
 
@@ -170,7 +203,7 @@ class TacticalCommander:
         return None
 
     def _build_user_message(self, state_text: str) -> str:
-        """构建用户消息"""
+        """构建用户消息: 状态 + 静态few-shot + 动态学习示例"""
         parts = [state_text]
 
         if self._few_shot_examples:
@@ -178,8 +211,16 @@ class TacticalCommander:
             parts.append("## 参考示例(Few-shot)")
             parts.append(self._few_shot_examples)
 
+        # L1 动态注入: 本轮检索到的相似成功案例
+        if self._learned_examples:
+            parts.append("\n---\n")
+            parts.append(self._learned_examples)
+
         parts.append("\n---\n")
         parts.append("请根据以上战场状态,输出你的战术决策(JSON格式)。")
+
+        # 每轮调用后清空动态示例 (避免累积)
+        self._learned_examples = ""
 
         return "\n".join(parts)
 

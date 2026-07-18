@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -11,6 +12,7 @@ from loguru import logger
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.execution.adb_utils import ADBUtils
+from src.execution.mumu_manager import MuMuManagerTouch
 from src.screen.capture import ScreenCapture
 from src.vision.detector import UnitDetector
 from src.vision.ocr_reader import UIReader
@@ -19,6 +21,10 @@ from src.decision.commander import TacticalCommander
 from src.decision.parser import CommandParser
 from src.execution.executor import CommandExecutor
 from src.controller.game_controller import GameController
+from src.learning.battle_memory import BattleMemory
+from src.learning.outcome_eval import OutcomeEvaluator
+from src.learning.memory_retriever import MemoryRetriever
+from src.learning.strategy_compressor import StrategyCompressor
 from src.utils.logger import setup_logger
 from src.utils.replay import print_replay_summary
 
@@ -80,6 +86,9 @@ def build_components(cfg: dict) -> dict:
         iou_threshold=yolo_cfg["iou_threshold"],
         image_size=yolo_cfg["image_size"],
         device=yolo_cfg["device"],
+        # 颜色检测配置 (来自 team_detection)
+        color_roi_ratio=team_cfg.get("color_roi_ratio", 0.3),
+        color_match_threshold=team_cfg.get("color_match_threshold", 0.15),
     )
 
     # 4. OCR
@@ -116,32 +125,79 @@ def build_components(cfg: dict) -> dict:
     # 7. 指令解析器
     parser = CommandParser(screen_size=screen_size)
 
-    # 8. 指令执行器
+    # ── 学习系统 ──
+    learn_cfg = cfg.get("learning", {})
+    battle_memory = None
+    outcome_eval = None
+    memory_retriever = None
+    strategy_compressor = None
+    game_session = str(int(time.time()))
+
+    if learn_cfg.get("enabled", True):
+        logger.info("初始化学习系统...")
+
+        # 经验库
+        battle_memory = BattleMemory()
+        logger.info(f"  经验库: {battle_memory.db_path} (已有{battle_memory.count()}条)")
+
+        # 结果评估器
+        outcome_eval = OutcomeEvaluator()
+
+        # 记忆检索器
+        memory_retriever = MemoryRetriever(battle_memory)
+
+        # 策略提炼器
+        strategy_compressor = StrategyCompressor(
+            battle_memory=battle_memory,
+            api_key=llm_cfg["api_key"],
+            api_base=llm_cfg["api_base"],
+            model=llm_cfg["model"],
+        )
+        strategy_compressor._compress_interval = learn_cfg.get("compress_interval", 15)
+        logger.info("  学习系统就绪")
+    else:
+        logger.info("学习系统已禁用 (learning.enabled=false)")
+
+    # 8. MuMuManager 触控控制器 (优先于 ADB)
+    mumu_cfg = cfg.get("mumu_manager", {})
+    touch = MuMuManagerTouch(
+        exe_path=mumu_cfg.get("exe_path", r"D:\MuMuPlayer\nx_main\MuMuManager.exe"),
+        verbosity=mumu_cfg.get("verbosity", 0),
+        timeout=mumu_cfg.get("timeout", 5.0),
+    )
+    if not touch.is_connected:
+        logger.warning("MuMuManager.exe 不存在, 将使用 ADB input 回退方案")
+        touch = None
+
+    # 9. 指令执行器
     pause_x = int(loop_cfg["pause_button_x"] * screen_size[0])
     pause_y = int(loop_cfg["pause_button_y"] * screen_size[1])
     executor = CommandExecutor(
         adb=adb,
         screen_size=screen_size,
+        touch=touch,
         pause_button=(pause_x, pause_y),
     )
 
-    # 9. 主控制器
+    # 9. 主控制器 (快速实时 + 学习模式)
     controller = GameController(
         adb=adb,
         capture=capture,
         detector=detector,
-        ocr=ocr,
         state_manager=state_manager,
         commander=commander,
         parser=parser,
         executor=executor,
-        cycle_interval=loop_cfg["cycle_interval"],
         max_cycles=loop_cfg["max_cycles"],
         game_over_timeout=loop_cfg["game_over_timeout"],
-        step_by_step=debug_cfg["step_by_step"],
-        show_detection_window=debug_cfg["show_detection_window"],
         save_screenshots=log_cfg["save_screenshots"],
         save_replay=log_cfg["save_replay"],
+        # 学习系统
+        battle_memory=battle_memory,
+        outcome_eval=outcome_eval,
+        memory_retriever=memory_retriever,
+        strategy_compressor=strategy_compressor,
+        game_session=game_session,
     )
 
     return {

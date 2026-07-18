@@ -26,6 +26,7 @@ class UnitType(str, Enum):
 class Team(str, Enum):
     ALLY = "ally"
     ENEMY = "enemy"
+    UNKNOWN = "unknown"  # 颜色检测无法判定时使用
 
 
 # 单位类型中文名映射
@@ -182,46 +183,63 @@ class GameState:
             "is_victory": self.is_victory,
         }
 
-    def to_llm_text(self) -> str:
-        """序列化为LLM可读的文本格式"""
+    def to_llm_text(self, compact: bool = True) -> str:
+        """序列化为LLM可读的文本格式
+
+        compact=True: 精简格式 (少tokens, 快响应, 用于实时模式)
+        compact=False: 完整表格格式 (用于调试和分析)
+        """
         screen_w, screen_h = self.screen_size
+
+        if compact:
+            return self._to_compact_text(screen_w, screen_h)
+        return self._to_full_text(screen_w, screen_h)
+
+    def _to_compact_text(self, sw: int, sh: int) -> str:
+        """精简文本格式 — 最小token开销"""
+        lines = [f"友{self.ally_count}vs敌{self.enemy_count}"]
+
+        if self.allies:
+            # 只列前20个友军 (按x坐标分组, 取代表)
+            sample = self.allies[:min(len(self.allies), 20)]
+            ally_strs = []
+            for u in sample:
+                nx, ny = u.to_normalized(sw, sh)
+                ally_strs.append(f"({nx:.2f},{ny:.2f})")
+            lines.append(f"A:{','.join(ally_strs)}")
+
+        if self.enemies:
+            sample = self.enemies[:min(len(self.enemies), 20)]
+            enemy_strs = []
+            for u in sample:
+                nx, ny = u.to_normalized(sw, sh)
+                enemy_strs.append(f"({nx:.2f},{ny:.2f})")
+            lines.append(f"E:{','.join(enemy_strs)}")
+
+        return "\n".join(lines)
+
+    def _to_full_text(self, sw: int, sh: int) -> str:
+        """完整格式 (调试用)"""
         lines = [
-            "## 当前战场状态",
-            f"屏幕尺寸: {screen_w}x{screen_h}",
-            f"己方总兵力: {self.ally_count} | 敌方总兵力: {self.enemy_count}(估)",
-            f"资金: {self.credits} | 人口: {self.population}/{self.max_population}",
-            "",
+            "## 战场状态",
+            f"己方={self.ally_count} 敌方={self.enemy_count}",
+            f"资金={self.credits} 人口={self.population}/{self.max_population}",
         ]
 
         if self.allies:
-            lines.append("### 己方单位")
-            lines.append("| ID | 类型 | 位置(x,y) | 血量% | 备注 |")
-            lines.append("|---|---|---|---|---|")
+            lines.append("### 己方")
             for u in self.allies:
-                nx, ny = u.to_normalized(screen_w, screen_h)
+                nx, ny = u.to_normalized(sw, sh)
                 cn = UNIT_TYPE_CN.get(u.unit_type, u.unit_type.value)
-                hp = f"{u.health}%" if u.health is not None else "?"
-                stale = " [陈旧]" if u.stale else ""
-                lines.append(
-                    f"| {u.track_id} | {cn} | ({nx:.2f},{ny:.2f}) | {hp} | "
-                    f"置信度:{u.confidence:.2f}{stale} |"
-                )
+                lines.append(f"| {u.track_id} | {cn} | ({nx:.2f},{ny:.2f})")
 
         if self.enemies:
-            lines.append("")
-            lines.append("### 敌方单位")
-            lines.append("| ID | 类型 | 位置(x,y) | 血量% | 威胁 |")
-            lines.append("|---|---|---|---|---|")
+            lines.append("### 敌方")
             for u in self.enemies:
-                nx, ny = u.to_normalized(screen_w, screen_h)
+                nx, ny = u.to_normalized(sw, sh)
                 cn = UNIT_TYPE_CN.get(u.unit_type, u.unit_type.value)
-                hp = f"{u.health}%" if u.health is not None else "?"
                 threat = UNIT_THREAT_LEVEL.get(u.unit_type, 1)
-                stale = " [陈旧]" if u.stale else ""
-                lines.append(
-                    f"| {u.track_id} | {cn} | ({nx:.2f},{ny:.2f}) | {hp} | "
-                    f"{'★' * threat}{stale} |"
-                )
+                lines.append(f"| {u.track_id} | {cn} | ({nx:.2f},{ny:.2f}) {'★'*threat}")
 
         return "\n".join(lines)
 
@@ -231,6 +249,7 @@ class GameState:
 # ============================================================
 
 class ActionType(str, Enum):
+    SELECT = "select"      # tap选中=自动接敌 (唯一可用指令)
     MOVE = "move"
     ATTACK = "attack"
     ATTACK_GROUND = "attack_ground"

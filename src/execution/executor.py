@@ -1,4 +1,9 @@
-"""指令执行器 - 将解析后的指令通过ADB执行到游戏"""
+"""指令执行器 - 将解析后的指令通过 MuMuManager 触控执行到游戏
+
+触控注入方式:
+  优先: MuMuManager (MuMuManager.exe tool cmd) — 绕过 SDL2 反作弊, 已验证可用
+  回退: ADB input — 兼容非 MuMu 设备
+"""
 from __future__ import annotations
 
 import time
@@ -7,33 +12,66 @@ from typing import Optional
 from loguru import logger
 
 from src.execution.adb_utils import ADBUtils
+from src.execution.mumu_manager import MuMuManagerTouch
 from src.decision.parser import ParsedCommand
 from src.state.models import ActionType
 from src.utils.logger import log_execution
 
 
 class CommandExecutor:
-    """ADB指令执行器,将逻辑指令转换为屏幕操作"""
+    """指令执行器,将逻辑指令转换为屏幕操作
+
+    支持两种触控注入后端:
+    - MuMuManager: 通过 MuMuManager.exe 直驱触控 (SDL2 游戏可响应)
+    - ADB input: 兼容模式, 回退方案
+    """
 
     def __init__(
         self,
         adb: ADBUtils,
-        screen_size: tuple[int, int] = (1280, 720),
+        screen_size: tuple[int, int] = (1920, 1080),
+        touch: Optional[MuMuManagerTouch] = None,
         # UI坐标(像素,需通过校准工具获取)
-        pause_button: tuple[int, int] = (1216, 36),
+        # 横屏: 暂停按钮在右上角
+        pause_button: tuple[int, int] = (1824, 54),  # 1920x1080 的 95%x5%
         command_buttons: Optional[dict[str, tuple[int, int]]] = None,
     ):
         self.adb = adb
+        self.touch = touch  # MuMu IPC 触控(优先)
         self.screen_size = screen_size
         self.pause_button = pause_button
+
+        # 命令按钮坐标 - 基于 1920x1080 横屏
+        # 实际游戏中命令按钮在控制面板区域
+        # 这里使用相对屏幕的比例位置
+        sw, sh = screen_size
         self.command_buttons = command_buttons or {
-            "move": (int(110 * screen_size[0] / 1280), int(680 * screen_size[1] / 720)),
-            "attack": (int(240 * screen_size[0] / 1280), int(680 * screen_size[1] / 720)),
-            "stop": (int(370 * screen_size[0] / 1280), int(680 * screen_size[1] / 720)),
-            "retreat": (int(500 * screen_size[0] / 1280), int(680 * screen_size[1] / 720)),
-            "attack_ground": (int(630 * screen_size[0] / 1280), int(680 * screen_size[1] / 720)),
+            "move":          (int(sw * 0.05), int(sh * 0.89)),
+            "attack":        (int(sw * 0.10), int(sh * 0.89)),
+            "stop":          (int(sw * 0.15), int(sh * 0.89)),
+            "retreat":       (int(sw * 0.20), int(sh * 0.89)),
+            "attack_ground": (int(sw * 0.25), int(sh * 0.89)),
         }
         self._execution_count = 0
+
+    # -----------------------------------------------------------
+    # 触控底层
+    # -----------------------------------------------------------
+
+    def _tap(self, x: int, y: int, delay_ms: int = 50) -> bool:
+        """点击屏幕 - MuMuManager 优先, ADB 回退"""
+        if self.touch and self.touch.is_connected:
+            return self.touch.tap(x, y, delay_ms=delay_ms)
+        return self.adb.tap(x, y)
+
+    def _swipe(
+        self, x1: int, y1: int, x2: int, y2: int,
+        duration_ms: int = 300,
+    ) -> bool:
+        """滑动屏幕"""
+        if self.touch and self.touch.is_connected:
+            return self.touch.swipe(x1, y1, x2, y2, duration_ms)
+        return self.adb.swipe(x1, y1, x2, y2, duration_ms)
 
     def execute(self, commands: list[ParsedCommand]) -> bool:
         """执行指令列表
@@ -110,67 +148,68 @@ class CommandExecutor:
     def _select_units(self, unit_ids: list[int]) -> bool:
         """选中单位
 
-        注意: 由于通过ADB无法直接按track_id选中单位,
-        这里采用简化策略: 点击屏幕中央偏下进行框选,
-        或通过多次点击逐个选中。实际使用中需要根据游戏
-        具体UI调整选中策略。
-        """
-        # 策略1: 如果只有少量单位,逐个点击
-        if len(unit_ids) <= 2:
-            for uid in unit_ids:
-                # 点击单位位置(需要从状态中获取,此处简化)
-                # 实际应传入单位坐标,此处使用屏幕中央作为默认
-                pass
+        策略:
+        1. 少量单位: 逐个点击单位像素位置
+        2. 大量单位: 框选(左下滑到右上)
 
-        # 策略2: 框选 - 从屏幕左下滑到右上(选择前方区域)
+        注意: 由于 executor 不直接持有单位坐标,
+        这里使用框选作为默认策略。当传入 unit_pixels 时,
+        可以逐个点击。
+        """
+        if len(unit_ids) <= 2:
+            # 少量单位逐个点击 -- 需要外部传入像素坐标
+            # TODO: 从 StateManager 获取单位坐标
+            pass
+
+        # 框选: 从战场左下滑到右上来选中前线单位
         sw, sh = self.screen_size
         x1 = int(sw * 0.1)
-        y1 = int(sh * 0.85)
+        y1 = int(sh * 0.90)
         x2 = int(sw * 0.7)
-        y2 = int(sh * 0.55)
-        return self.adb.swipe(x1, y1, x2, y2, duration_ms=200)
+        y2 = int(sh * 0.50)
+        return self._swipe(x1, y1, x2, y2, duration_ms=200)
 
     def _execute_move(self, target: tuple[int, int]) -> bool:
         """执行移动指令: 点击移动按钮,然后点击目标位置"""
         tx, ty = target
         # 点击移动按钮
-        btn = self.command_buttons.get("move", (110, 680))
-        if not self.adb.tap(btn[0], btn[1]):
+        btn = self.command_buttons.get("move")
+        if not self._tap(btn[0], btn[1]):
             return False
         time.sleep(0.1)
         # 点击目标位置
-        return self.adb.tap(tx, ty)
+        return self._tap(tx, ty)
 
     def _execute_attack(self, target: tuple[int, int]) -> bool:
         """执行攻击指令: 点击攻击按钮,然后点击敌方单位"""
         tx, ty = target
-        btn = self.command_buttons.get("attack", (240, 680))
-        if not self.adb.tap(btn[0], btn[1]):
+        btn = self.command_buttons.get("attack")
+        if not self._tap(btn[0], btn[1]):
             return False
         time.sleep(0.1)
-        return self.adb.tap(tx, ty)
+        return self._tap(tx, ty)
 
     def _execute_attack_ground(self, target: tuple[int, int]) -> bool:
         """执行地面攻击指令"""
         tx, ty = target
-        btn = self.command_buttons.get("attack_ground", (630, 680))
-        if not self.adb.tap(btn[0], btn[1]):
+        btn = self.command_buttons.get("attack_ground")
+        if not self._tap(btn[0], btn[1]):
             return False
         time.sleep(0.1)
-        return self.adb.tap(tx, ty)
+        return self._tap(tx, ty)
 
     def _execute_stop(self) -> bool:
         """执行停止指令"""
-        btn = self.command_buttons.get("stop", (370, 680))
-        return self.adb.tap(btn[0], btn[1])
+        btn = self.command_buttons.get("stop")
+        return self._tap(btn[0], btn[1])
 
     def pause(self) -> bool:
         """点击暂停按钮"""
-        return self.adb.tap(self.pause_button[0], self.pause_button[1])
+        return self._tap(self.pause_button[0], self.pause_button[1])
 
     def resume(self) -> bool:
         """点击暂停按钮(恢复)"""
-        return self.adb.tap(self.pause_button[0], self.pause_button[1])
+        return self._tap(self.pause_button[0], self.pause_button[1])
 
     @property
     def execution_count(self) -> int:

@@ -54,12 +54,15 @@ class StateManager:
             if len(history) > self._max_history:
                 history.pop(0)
 
-        # 敌我识别优化:结合位置和历史
+        # 敌我识别优化: 颜色无法判定时回退到位置启发式
         for unit in detected_units:
-            if unit.team == Team.ALLY:
-                # 检查是否穿越到了敌方区域
+            if unit.team == Team.UNKNOWN:
+                unit.team = Team.ALLY if unit.y > self.screen_size[1] * 0.55 else Team.ENEMY
+                unit.track_id += 100 if unit.team == Team.ENEMY else 0
+
+            elif unit.team == Team.ALLY:
+                # 检查是否穿越到了敌方区域(颜色检测的二次确认)
                 if unit.y < self.screen_size[1] * 0.45:
-                    # 可能是误判,检查历史
                     history = self._unit_history.get(unit.track_id, [])
                     if history:
                         ally_count = sum(1 for u in history if u.team == Team.ALLY)

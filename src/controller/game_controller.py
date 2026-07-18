@@ -1,62 +1,96 @@
-"""主控状态机 - 核心游戏循环: PAUSE→CAPTURE→DETECT→OCR→DECIDE→EXECUTE→RESUME"""
+"""快速实时AI指挥循环 — 截图→检测→决策→执行→学习, 全程≤3秒
+
+特性:
+  - 实时模式 (不暂停游戏)
+  - 纯颜色检测 (skip YOLO/OCR, ~20ms)
+  - MuMuManager 命令批处理
+  - LLM响应缓存 (状态不变时跳过)
+  - piped screencap (无文件IO)
+  - L1 经验回放: 每轮自动评估效果 + 记录经验 + 检索注入
+  - L2 策略提炼: 每15轮/每局后自动总结战术规则
+"""
 from __future__ import annotations
 
 import time
+import hashlib
 from typing import Optional
 
+import cv2
+import numpy as np
 from loguru import logger
 
 from src.screen.capture import ScreenCapture
 from src.vision.detector import UnitDetector
-from src.vision.ocr_reader import UIReader
 from src.state.manager import StateManager
-from src.state.models import GameState
+from src.state.models import GameState, Unit, UnitType, Team
 from src.decision.commander import TacticalCommander
 from src.decision.parser import CommandParser, ParsedCommand
 from src.execution.executor import CommandExecutor
 from src.execution.adb_utils import ADBUtils
-from src.utils.logger import log_decision, log_execution, log_state
+from src.learning.battle_memory import BattleMemory
+from src.learning.outcome_eval import OutcomeEvaluator
+from src.learning.memory_retriever import MemoryRetriever
+from src.learning.strategy_compressor import StrategyCompressor
+from src.utils.logger import log_decision, log_state
 
 
 class GameController:
-    """主控状态机,实现完整的AI指挥循环"""
+    """快速实时AI指挥循环 (target: ≤3s/cycle)"""
+
+    # 颜色检测 HSV 范围 (与 detector.py 保持一致)
+    ALLY_HSV_LOW  = np.array([95, 100, 100], dtype=np.uint8)
+    ALLY_HSV_HIGH = np.array([115, 255, 255], dtype=np.uint8)
+    ENEMY_HSV_LOW_1  = np.array([0, 100, 180], dtype=np.uint8)     # 提高V下限过滤深色等高线
+    ENEMY_HSV_HIGH_1 = np.array([10, 255, 255], dtype=np.uint8)
+    ENEMY_HSV_LOW_2  = np.array([170, 100, 180], dtype=np.uint8)
+    ENEMY_HSV_HIGH_2 = np.array([180, 255, 255], dtype=np.uint8)
+
+    # 触控参数 (双击中圈拖拽, 已验证有效 2026-07-19)
+    CLUSTER_EPS = 50         # 聚类
+    CIRCLE_OFFSET = 40       # 中圈在单位下方40px
+    SELECT_WAIT = 0.7        # 选中等候
+    DRAG_DURATION = 2000     # 拖拽时长ms
+    MUMU_EXE = r"D:\MuMuPlayer\nx_main\MuMuManager.exe"
 
     def __init__(
         self,
         adb: ADBUtils,
         capture: ScreenCapture,
         detector: UnitDetector,
-        ocr: UIReader,
         state_manager: StateManager,
         commander: TacticalCommander,
         parser: CommandParser,
         executor: CommandExecutor,
-        # 循环参数
-        cycle_interval: float = 3.0,
-        max_cycles: int = 200,
+        max_cycles: int = 500,
         game_over_timeout: int = 600,
-        # 调试参数
-        step_by_step: bool = False,
-        show_detection_window: bool = False,
         save_screenshots: bool = True,
         save_replay: bool = True,
+        # ── 学习系统 (可选, 不传则禁用) ──
+        battle_memory: Optional[BattleMemory] = None,
+        outcome_eval: Optional[OutcomeEvaluator] = None,
+        memory_retriever: Optional[MemoryRetriever] = None,
+        strategy_compressor: Optional[StrategyCompressor] = None,
+        game_session: str = "",
     ):
         self.adb = adb
         self.capture = capture
         self.detector = detector
-        self.ocr = ocr
         self.state_manager = state_manager
         self.commander = commander
         self.parser = parser
         self.executor = executor
 
-        self.cycle_interval = cycle_interval
         self.max_cycles = max_cycles
         self.game_over_timeout = game_over_timeout
-        self.step_by_step = step_by_step
-        self.show_detection_window = show_detection_window
         self.save_screenshots = save_screenshots
         self.save_replay = save_replay
+
+        # 学习系统
+        self.battle_memory = battle_memory
+        self.outcome_eval = outcome_eval
+        self.memory_retriever = memory_retriever
+        self.strategy_compressor = strategy_compressor
+        self.game_session = game_session or str(int(time.time()))
 
         self._cycle_count = 0
         self._start_time = 0.0
@@ -65,10 +99,37 @@ class GameController:
         self._victory = False
         self._replay_data: list[dict] = []
 
+        # LLM 缓存
+        self._state_hash: str = ""
+        self._cached_commands: list[ParsedCommand] = []
+        self._cache_hit_count = 0
+        self._cache_max_age = 2  # 最多缓存2轮
+
+        # 学习: 缓存上一轮数据用于延迟评估
+        self._prev_frame: Optional[np.ndarray] = None
+        self._prev_ally_count: int = 0
+        self._prev_enemy_count: int = 0
+        self._prev_decision: dict = {}
+        self._learning_enabled: bool = battle_memory is not None and outcome_eval is not None
+
+    # ================================================================
+    # 主循环
+    # ================================================================
+
     def run(self) -> bool:
-        """运行主循环"""
+        """运行主循环 — 实时模式, 含学习反馈
+
+        每轮流程:
+          1. 截图 → 2. 评估上轮效果(L1) → 3. 颜色检测 → 4. 构建状态
+          → 5. LLM决策(含few-shot注入) → 6. 批量执行 → 7. 记录经验
+          → 8. (每15轮)策略提炼(L2)
+        """
         logger.info("=" * 60)
-        logger.info("Firefight AI 指挥系统启动")
+        logger.info("Firefight AI 指挥系统启动 (快速实时 + 学习模式)")
+        if self._learning_enabled:
+            logger.info(f"学习系统: 启用 | 场次: {self.game_session}")
+        else:
+            logger.info("学习系统: 禁用 (未配置)")
         logger.info("=" * 60)
 
         self._running = True
@@ -78,226 +139,569 @@ class GameController:
         try:
             while self._running and self._cycle_count < self.max_cycles:
                 self._cycle_count += 1
-                cycle_start = time.time()
+                t_start = time.time()
 
-                logger.info(f"\n{'='*40}\n  第 {self._cycle_count} 轮决策\n{'='*40}")
+                # ── 1. 截图 (piped, 无文件IO) ──
+                frame, t_capture = self._fast_capture()
 
-                # === 步骤1: 暂停游戏 ===
-                if not self._step_pause():
-                    break
+                # ── 1.5. 评估上一轮决策效果 (L1: 延迟评估) ──
+                outcome = None
+                if self._learning_enabled and self._prev_frame is not None and frame is not None:
+                    outcome = self._evaluate_previous_cycle(frame)
 
-                # === 步骤2: 捕获画面 ===
-                frame = self._step_capture()
-                if frame is None:
-                    logger.warning("帧捕获失败,跳过本轮")
-                    self._step_resume()
-                    continue
+                # ── 2. 颜色检测 (纯HSV, ~20ms) ──
+                allies, enemies, t_detect = self._fast_detect(frame)
 
-                # === 步骤3: YOLO检测 ===
-                units = self._step_detect(frame)
+                # 缓存当前帧 + 计数 (供下一轮评估使用)
+                self._prev_frame = frame
+                self._prev_ally_count = len(allies)
+                self._prev_enemy_count = len(enemies)
 
-                # === 步骤4: OCR读取UI ===
-                ui_data = self._step_ocr(frame)
+                # ── 3. 构建精简状态 ──
+                state = self._fast_build_state(allies, enemies, frame.shape)
 
-                # === 步骤5: 构建状态 ===
-                game_state = self._step_build_state(units, ui_data, frame)
-
-                # 检查游戏是否结束
-                if self._check_game_over(game_state):
+                # 游戏结束检查
+                if self._check_game_over(state):
                     self._game_over = True
                     break
 
-                # === 步骤6: LLM决策 ===
-                llm_response = self._step_decide(game_state)
+                # ── 4. LLM决策 (带缓存 + few-shot注入) ──
+                commands, t_llm = self._fast_decide(state)
 
-                # === 步骤7: 解析指令 ===
-                if llm_response is not None:
-                    commands = self._step_parse(llm_response, game_state)
-                else:
-                    # LLM失败,使用降级策略
-                    logger.warning("LLM决策失败,使用降级保守防御指令")
-                    commands = self.parser.generate_fallback_commands(game_state)
+                if commands is None:
+                    commands = self.parser.generate_fallback_commands(state)
 
-                # === 步骤8: 执行指令 ===
-                if not self._step_execute(commands):
-                    logger.warning("部分指令执行失败")
+                # 缓存当前决策 (供下一轮评估使用)
+                self._prev_decision = self._decision_to_dict(commands, state)
 
-                # === 步骤9: 恢复游戏 ===
-                self._step_resume()
+                # ── 5. 批量执行指令 ──
+                t_exec = self._fast_execute(commands, state)
 
-                # === 步骤10: 等待指令生效 ===
-                self._step_wait()
+                # ── 6. 记录 (含学习) ──
+                self._record_cycle(state, outcome, commands)
 
-                # 记录本轮数据
-                self._record_cycle(game_state, llm_response, commands)
+                # ── 7. 策略提炼 (L2: 每15轮) ──
+                if self._learning_enabled and self.strategy_compressor:
+                    self._maybe_compress()
 
-                cycle_elapsed = time.time() - cycle_start
+                total = (time.time() - t_start) * 1000
+                learn_tags = ""
+                if outcome:
+                    learn_tags = f"评分{outcome['score']:+.0f} "
+                    if outcome['score'] > 10:
+                        learn_tags += "✅"
+                    elif outcome['score'] < -5:
+                        learn_tags += "⚠️"
+
                 logger.info(
-                    f"第{self._cycle_count}轮完成, "
-                    f"耗时{cycle_elapsed:.1f}s, "
-                    f"总计{time.time() - self._start_time:.0f}s"
+                    f"#{self._cycle_count} | "
+                    f"截图={t_capture:.0f}ms 检测={t_detect:.0f}ms "
+                    f"LLM={t_llm:.0f}ms 执行={t_exec:.0f}ms | "
+                    f"总计={total:.0f}ms {learn_tags}"
+                    f"{'⚡缓存' if self._cache_hit_count > 0 and t_llm < 50 else ''}"
                 )
 
-                # 逐步模式
-                if self.step_by_step:
-                    input("按Enter继续下一轮...")
+                if total > 3000:
+                    logger.warning(f"⚠️ 本轮超时 {total:.0f}ms > 3000ms!")
 
         except KeyboardInterrupt:
             logger.info("用户中断")
         except Exception as e:
             logger.exception(f"主循环异常: {e}")
         finally:
+            # 游戏结束时执行最终策略提炼
+            if self._learning_enabled and self.strategy_compressor:
+                try:
+                    self.strategy_compressor.compress_on_game_over(
+                        self._cycle_count, self.game_session
+                    )
+                except Exception as e:
+                    logger.error(f"最终策略提炼失败: {e}")
             self._cleanup()
 
         return self._victory
 
-    # ---- 各步骤实现 ----
+    # ================================================================
+    # 快速截图 (piped screencap, 无文件IO)
+    # ================================================================
 
-    def _step_pause(self) -> bool:
-        """暂停游戏"""
-        logger.debug("→ 暂停游戏")
-        self.executor.pause()
-        time.sleep(0.15)  # 等待暂停生效
-        return True
+    def _fast_capture(self):
+        """直接管道截图, 避免文件IO"""
+        import subprocess
 
-    def _step_capture(self):
-        """捕获画面"""
-        logger.debug("→ 捕获画面")
-        from src.utils.logger import log_vision
-        frame = self.capture.grab_latest_frame()
-        if frame is not None:
-            log_vision(f"帧捕获: {frame.shape}, FPS={self.capture.fps:.1f}")
-        return frame
+        t0 = time.time()
 
-    def _step_detect(self, frame):
-        """YOLO检测"""
-        logger.debug("→ 单位检测")
-        units = self.detector.predict(frame)
-        return units
+        try:
+            result = subprocess.run(
+                [r"D:\MuMuPlayer\nx_device\12.0\shell\adb.exe",
+                 "-s", "127.0.0.1:7555",
+                 "exec-out", "screencap", "-p"],
+                capture_output=True,
+                timeout=8,
+            )
+            if result.returncode != 0 or not result.stdout:
+                logger.warning("ADB截图失败")
+                return None, 0
 
-    def _step_ocr(self, frame):
-        """OCR读取UI"""
-        logger.debug("→ OCR读取UI")
-        # 从配置读取UI区域,此处使用默认值
-        ui_regions = {
-            "resource_bar": (0.05, 0.02, 0.95, 0.08),
-            "unit_info": (0.02, 0.08, 0.30, 0.25),
-        }
-        if self.ocr.is_loaded:
-            return self.ocr.read_ui(frame, ui_regions)
-        return {}
+            # 直接从内存解码
+            img_array = np.frombuffer(result.stdout, dtype=np.uint8)
+            frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
 
-    def _step_build_state(self, units, ui_data, frame):
-        """构建游戏状态"""
-        logger.debug("→ 构建状态")
-        return self.state_manager.build(units, ui_data, frame)
+            elapsed = (time.time() - t0) * 1000
+            if frame is not None:
+                logger.debug(f"截图 {frame.shape[1]}x{frame.shape[0]} {elapsed:.0f}ms")
+            return frame, elapsed
 
-    def _step_decide(self, game_state: GameState):
-        """LLM决策"""
-        logger.debug("→ AI战术决策")
-        return self.commander.decide(game_state)
+        except Exception as e:
+            logger.error(f"截图异常: {e}")
+            return None, 0
 
-    def _step_parse(self, llm_response, game_state: GameState) -> list[ParsedCommand]:
-        """解析指令"""
-        logger.debug("→ 解析指令")
-        return self.parser.parse(llm_response, game_state)
+    # ================================================================
+    # 距离聚类 — 把同一班组的士兵合并为一个单位
+    # ================================================================
 
-    def _step_execute(self, commands: list[ParsedCommand]) -> bool:
-        """执行指令"""
-        logger.debug("→ 执行指令")
-        return self.executor.execute(commands)
+    @staticmethod
+    def _cluster_units(points: list[dict], eps: int = 50) -> list[dict]:
+        """距离聚类: 将距离 < eps 的检测点合并为一个单位
 
-    def _step_resume(self) -> None:
-        """恢复游戏"""
-        logger.debug("→ 恢复游戏")
-        self.executor.resume()
-        time.sleep(0.1)
+        每个步兵班组有3-8个士兵, 颜色检测会把每个士兵当成独立点。
+        聚类后用"离中心最近的蓝点"作为选中目标, 保证点击命中。
+        """
+        if len(points) <= 1:
+            return points
 
-    def _step_wait(self) -> None:
-        """等待指令生效"""
-        wait_time = self.cycle_interval
-        logger.debug(f"→ 等待{wait_time:.1f}s让指令生效...")
-        time.sleep(wait_time)
+        clusters: list[list[dict]] = []
+        used: set[int] = set()
 
-    def _check_game_over(self, game_state: GameState) -> bool:
-        """检查游戏是否结束"""
-        # 检查是否超时
+        for i, p1 in enumerate(points):
+            if i in used:
+                continue
+            cluster = [p1]
+            used.add(i)
+            for j, p2 in enumerate(points):
+                if j in used:
+                    continue
+                dx = p1["x"] - p2["x"]
+                dy = p1["y"] - p2["y"]
+                if dx * dx + dy * dy < eps * eps:
+                    cluster.append(p2)
+                    used.add(j)
+            clusters.append(cluster)
+
+        # 每个聚类取"离几何中心最近的蓝点"作为选中坐标
+        result = []
+        for cluster in clusters:
+            cx = sum(p["x"] for p in cluster) / len(cluster)
+            cy = sum(p["y"] for p in cluster) / len(cluster)
+            best = min(cluster, key=lambda p: (p["x"] - cx) ** 2 + (p["y"] - cy) ** 2)
+            result.append({
+                "x": best["x"],
+                "y": best["y"],
+                "area": sum(p["area"] for p in cluster),
+                "w": best.get("w", 30),
+                "h": best.get("h", 30),
+                "member_count": len(cluster),
+            })
+        return result
+
+    # ================================================================
+    # 快速颜色检测 (纯HSV + 聚类)
+    # ================================================================
+
+    def _fast_detect(self, frame: np.ndarray):
+        """纯颜色检测: 从HSV蒙版中提取友军/敌军单位坐标
+
+        Returns:
+            (allies: list[dict], enemies: list[dict], elapsed_ms)
+            每个单位: {x, y, area, w, h}
+        """
+        if frame is None:
+            return [], [], 0
+
+        t0 = time.time()
+        h, w = frame.shape[:2]
+
+        # 缩小到一半加速 (对标记检测不影响)
+        small = cv2.resize(frame, (w // 2, h // 2))
+        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+
+        # 颜色蒙版
+        ally_mask = cv2.inRange(hsv, self.ALLY_HSV_LOW, self.ALLY_HSV_HIGH)
+        enemy_1 = cv2.inRange(hsv, self.ENEMY_HSV_LOW_1, self.ENEMY_HSV_HIGH_1)
+        enemy_2 = cv2.inRange(hsv, self.ENEMY_HSV_LOW_2, self.ENEMY_HSV_HIGH_2)
+        enemy_mask = cv2.bitwise_or(enemy_1, enemy_2)
+
+        def extract_units(mask, scale=2):
+            n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+            units = []
+            for i in range(1, n):
+                area = stats[i, 4]
+                if area < 10:  # 缩略图阈值
+                    continue
+                units.append({
+                    "x": int(centroids[i, 0] * scale),
+                    "y": int(centroids[i, 1] * scale),
+                    "area": area,
+                    "w": int(stats[i, 2] * scale),
+                    "h": int(stats[i, 3] * scale),
+                })
+            return sorted(units, key=lambda u: u["area"], reverse=True)
+
+        allies = extract_units(ally_mask)
+        enemies = extract_units(enemy_mask)
+
+        # 距离聚类: 把同一班组的士兵合并为一个可指挥单位
+        raw_ally, raw_enemy = len(allies), len(enemies)
+        allies = self._cluster_units(allies, eps=self.CLUSTER_EPS)
+        enemies = self._cluster_units(enemies, eps=self.CLUSTER_EPS)
+
+        elapsed = (time.time() - t0) * 1000
+        logger.debug(
+            f"检测: 友{raw_ally}→{len(allies)}聚类 | "
+            f"敌{raw_enemy}→{len(enemies)}聚类 | {elapsed:.0f}ms"
+        )
+        return allies, enemies, elapsed
+
+    # ================================================================
+    # 构建精简状态
+    # ================================================================
+
+    def _fast_build_state(
+        self, allies: list[dict], enemies: list[dict], frame_shape: tuple
+    ) -> GameState:
+        """构建精简状态 (不含YOLO类型, 不含OCR)"""
+        h, w = frame_shape[:2]
+        units: list[Unit] = []
+
+        for i, a in enumerate(allies):
+            units.append(Unit(
+                track_id=i,
+                unit_type=UnitType.INFANTRY,  # 颜色检测不知道类型
+                team=Team.ALLY,
+                x=a["x"], y=a["y"],
+                bbox=(a["x"]-a["w"]//2, a["y"]-a["h"]//2,
+                      a["x"]+a["w"]//2, a["y"]+a["h"]//2),
+                confidence=0.9,
+            ))
+
+        for j, e in enumerate(enemies):
+            units.append(Unit(
+                track_id=j + 1000,  # 敌方ID偏移
+                unit_type=UnitType.INFANTRY,
+                team=Team.ENEMY,
+                x=e["x"], y=e["y"],
+                bbox=(e["x"]-e["w"]//2, e["y"]-e["h"]//2,
+                      e["x"]+e["w"]//2, e["y"]+e["h"]//2),
+                confidence=0.9,
+            ))
+
+        return GameState(
+            frame_id=self._cycle_count,
+            units=units,
+            screen_size=(w, h),
+            timestamp=time.time(),
+        )
+
+    # ================================================================
+    # LLM决策 (带缓存)
+    # ================================================================
+
+    def _fast_decide(self, state: GameState) -> tuple[Optional[list[ParsedCommand]], float]:
+        """LLM决策, 带状态哈希缓存 + few-shot经验注入
+
+        Returns:
+            (commands, elapsed_ms)
+        """
+        t0 = time.time()
+
+        # 计算状态哈希
+        hash_str = self._hash_state(state)
+
+        # 缓存命中: 状态没变, 复用上次决策(最多2轮)
+        if hash_str == self._state_hash and self._cached_commands:
+            self._cache_hit_count += 1
+            elapsed = (time.time() - t0) * 1000
+            logger.debug(f"缓存命中 (#{self._cache_hit_count})")
+            return self._cached_commands, elapsed
+
+        # ── L1 经验注入: 检索相似成功案例 ──
+        if self._learning_enabled and self.memory_retriever:
+            try:
+                self.commander.set_learned_examples(
+                    self.memory_retriever, hash_str,
+                    state.ally_count, state.enemy_count
+                )
+            except Exception as e:
+                logger.warning(f"经验注入失败: {e}")
+
+        # 调用LLM
+        llm_response = self.commander.decide(state)
+
+        if llm_response is None:
+            self._state_hash = ""
+            self._cached_commands = []
+            return None, (time.time() - t0) * 1000
+
+        # 解析指令
+        commands = self.parser.parse(llm_response, state)
+
+        # 更新缓存
+        self._state_hash = hash_str
+        self._cached_commands = commands
+
+        elapsed = (time.time() - t0) * 1000
+        return commands, elapsed
+
+    # ================================================================
+    # L1 学习: 评估 + 记录
+    # ================================================================
+
+    def _evaluate_previous_cycle(self, current_frame: np.ndarray) -> Optional[dict]:
+        """评估上一轮决策效果 (延迟评估, ~3秒反应时间)
+
+        对比当前帧与上一帧的友军/敌军数量:
+          - 敌人减少 = 有效击杀 (+10分/个)
+          - 友军减少 = 己方伤亡 (-10分/个)
+          - 阵线进退 = 小幅加减分
+
+        评估完成后自动记录到 BattleMemory。
+        """
+        if self.outcome_eval is None:
+            return None
+
+        try:
+            # 使用当前帧与缓存的上轮帧对比
+            # outcome_eval 内部已缓存了上轮的计数
+            result = self.outcome_eval.evaluate(current_frame)
+
+            # 记录到经验库
+            if self.battle_memory and self._prev_decision:
+                self.battle_memory.record(
+                    state_hash=self._state_hash,
+                    ally_count=self._prev_ally_count,
+                    enemy_count=self._prev_enemy_count,
+                    ally_positions=[],  # 精简模式不存详细坐标
+                    decision=self._prev_decision,
+                    outcome_score=result["score"],
+                    cycle_num=self._cycle_count - 1,
+                    game_session=self.game_session,
+                )
+
+            return result
+
+        except Exception as e:
+            logger.warning(f"效果评估失败: {e}")
+            return None
+
+    def _decision_to_dict(self, commands: list[ParsedCommand], state: GameState) -> dict:
+        """将指令列表转为可存储的字典格式"""
+        if not commands:
+            return {"action": "idle", "reason": "无行动"}
+
+        # 取第一条有效指令为代表
+        for cmd in commands:
+            if cmd.action is None:
+                continue
+            result = {
+                "action": cmd.action.value if hasattr(cmd.action, 'value') else str(cmd.action),
+                "reason": getattr(cmd, 'reason', ''),
+            }
+            if cmd.target_pixel:
+                sw, sh = state.screen_size
+                result["target"] = [
+                    round(cmd.target_pixel[0] / sw, 3),
+                    round(cmd.target_pixel[1] / sh, 3),
+                ]
+            if cmd.unit_ids:
+                result["unit_ids"] = cmd.unit_ids[:5]  # 最多存5个
+            if cmd.target_enemy_pixel:
+                sw, sh = state.screen_size
+                result["target_enemy"] = [
+                    round(cmd.target_enemy_pixel[0] / sw, 3),
+                    round(cmd.target_enemy_pixel[1] / sh, 3),
+                ]
+            return result
+
+        return {"action": "idle", "reason": "无有效指令"}
+
+    def _maybe_compress(self) -> None:
+        """触发热提炼 (每15轮)"""
+        if self.strategy_compressor and self.strategy_compressor.should_compress(self._cycle_count):
+            try:
+                new_rules = self.strategy_compressor.compress(
+                    self._cycle_count, self.game_session
+                )
+                if new_rules:
+                    # 重新加载规则到 commander 的系统 prompt
+                    self.commander.reload_tactics_rules()
+            except Exception as e:
+                logger.error(f"策略提炼失败: {e}")
+
+    def _hash_state(self, state: GameState) -> str:
+        """快速状态哈希 (只关注关键变化)"""
+        parts = [
+            f"{state.ally_count}",
+            f"{state.enemy_count}",
+        ]
+        # 取前10个友军坐标
+        for u in state.allies[:10]:
+            parts.append(f"{u.x//20},{u.y//20}")  # 20px粒度
+        # 取前10个敌军坐标
+        for u in state.enemies[:10]:
+            parts.append(f"{u.x//20},{u.y//20}")
+        return hashlib.md5("|".join(parts).encode()).hexdigest()[:8]
+
+    # ================================================================
+    # 批量执行指令 (semicolon批处理)
+    # ================================================================
+
+    def _fast_execute(self, commands: list[ParsedCommand], state: GameState) -> float:
+        """执行指令: select=批量tap(快), move=双击中圈拖拽(慢)
+
+        select: 批量tap → 选中自动接敌 (≤300ms)
+        move:   单单位 → tap选中→tap+hold中圈→拖到目标 (~3s)
+        """
+        if not commands:
+            return 0
+
+        import subprocess
+
+        t0 = time.time()
+        select_cmds: list[str] = []
+
+        for cmd in commands:
+            if not cmd.unit_ids or cmd.action is None:
+                continue
+
+            if cmd.action.value in ("select",):
+                for uid in cmd.unit_ids[:8]:
+                    unit = state.get_unit_by_id(uid)
+                    if unit:
+                        select_cmds.append(f"input tap {unit.x} {unit.y}")
+
+            elif cmd.action.value in ("move", "attack") and cmd.target_pixel:
+                unit = state.get_unit_by_id(cmd.unit_ids[0])
+                if unit is None:
+                    continue
+                ux, uy = unit.x, unit.y
+                tx, ty = cmd.target_pixel
+
+                # ① tap单位选中
+                self._mumu(f"input tap {ux} {uy}")
+                time.sleep(self.SELECT_WAIT)
+
+                # ② 中圈位置 (单位下方40px)
+                cx, cy = ux, uy + self.CIRCLE_OFFSET
+
+                # ③ 双击中圈+拖拽
+                self._mumu(f"input tap {cx} {cy}")
+                self._mumu(
+                    f"input swipe {cx} {cy} {tx} {ty} {self.DRAG_DURATION}"
+                )
+
+        # 批量执行select
+        if select_cmds:
+            batch = "; ".join(select_cmds)
+            try:
+                subprocess.run(
+                    [self.MUMU_EXE, "control", "-v", "0", "tool", "cmd",
+                     "-c", batch],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except Exception as e:
+                logger.error(f"批量tap失败: {e}")
+
+        elapsed = (time.time() - t0) * 1000
+        if select_cmds:
+            logger.debug(f"执行: {len(select_cmds)}select ({elapsed:.0f}ms)")
+        return elapsed
+
+    def _mumu(self, cmd: str, timeout: int = 10) -> None:
+        """发送单条 MuMuManager 命令"""
+        import subprocess
+        try:
+            subprocess.run(
+                [self.MUMU_EXE, "control", "-v", "0", "tool", "cmd", "-c", cmd],
+                capture_output=True, text=True, timeout=timeout,
+            )
+        except Exception as e:
+            logger.error(f"MuMuManager 失败: {str(e)[:80]}")
+
+    # ================================================================
+    # 游戏结束检查
+    # ================================================================
+
+    def _check_game_over(self, state: GameState) -> bool:
         elapsed = time.time() - self._start_time
         if elapsed > self.game_over_timeout:
             logger.info(f"游戏超时({self.game_over_timeout}s)")
             return True
-
-        # 检查是否一方被全歼
-        if game_state.ally_count == 0 and self._cycle_count > 3:
-            logger.info("己方单位全灭,游戏结束")
+        if state.ally_count == 0 and self._cycle_count > 3:
+            logger.info("己方全灭")
             self._victory = False
             return True
-        if game_state.enemy_count == 0 and self._cycle_count > 5:
-            logger.info("敌方单位全灭,胜利!")
+        if state.enemy_count == 0 and self._cycle_count > 5:
+            logger.info("敌方全灭, 胜利!")
             self._victory = True
             return True
-
         return False
 
-    def _record_cycle(
-        self,
-        game_state: GameState,
-        llm_response,
-        commands: list[ParsedCommand],
-    ) -> None:
-        """记录本轮数据用于回放"""
-        self._replay_data.append({
+    # ================================================================
+    # 记录 & 清理
+    # ================================================================
+
+    def _record_cycle(self, state, outcome, commands):
+        record = {
             "cycle": self._cycle_count,
             "timestamp": time.time(),
-            "state": game_state.to_dict(),
-            "llm_analysis": llm_response.analysis if llm_response else "[降级]",
-            "commands": [
-                {
-                    "action": c.action.value,
-                    "unit_ids": c.unit_ids,
-                    "target": c.target_pixel,
-                    "enemy_target": c.target_enemy_pixel,
-                    "reason": c.reason,
-                }
-                for c in commands
-            ],
-        })
+            "ally_count": state.ally_count,
+            "enemy_count": state.enemy_count,
+            "commands": [{"action": c.action.value, "reason": c.reason} for c in (commands or [])],
+        }
+        if outcome:
+            record["outcome"] = {
+                "score": outcome["score"],
+                "details": outcome["details"],
+            }
+        self._replay_data.append(record)
 
-    def _cleanup(self) -> None:
-        """清理资源"""
+    def _cleanup(self):
         self._running = False
         elapsed = time.time() - self._start_time
+        logger.info("=" * 60)
+        logger.info(f"游戏结束 | 总轮次:{self._cycle_count} | 耗时:{elapsed:.0f}s | "
+                    f"缓存命中:{self._cache_hit_count}")
+        logger.info(f"LLM决策:{self.commander.decision_count}次 | "
+                    f"平均:{self.commander.avg_decision_time:.0f}ms")
+
+        # 学习统计
+        if self._learning_enabled and self.battle_memory:
+            try:
+                stats = self.battle_memory.get_stats(self.game_session)
+                logger.info(
+                    f"学习记录:{stats['total']}条 | "
+                    f"平均得分:{stats['avg_score']} | "
+                    f"有效率:{stats['positive_rate']}%"
+                )
+            except Exception:
+                pass
 
         logger.info("=" * 60)
-        logger.info("游戏结束统计")
-        logger.info(f"  总轮次: {self._cycle_count}")
-        logger.info(f"  总耗时: {elapsed:.0f}s")
-        logger.info(f"  结果: {'胜利' if self._victory else '失败/中断'}")
-        logger.info(f"  LLM决策次数: {self.commander.decision_count}")
-        logger.info(f"  LLM平均耗时: {self.commander.avg_decision_time:.0f}ms")
-        logger.info(f"  YOLO平均耗时: {self.detector.avg_inference_time:.0f}ms")
-        logger.info(f"  ADB执行次数: {self.executor.execution_count}")
-        logger.info("=" * 60)
-
-        # 停止屏幕捕获
         self.capture.stop()
 
-        # 保存回放数据
         if self.save_replay and self._replay_data:
             self._save_replay()
 
-    def _save_replay(self) -> None:
-        """保存回放数据"""
+    def _save_replay(self):
         import json
         from pathlib import Path
-
         replay_path = Path("sessions") / f"replay_{int(self._start_time)}.json"
         try:
             with open(replay_path, "w", encoding="utf-8") as f:
                 json.dump(self._replay_data, f, ensure_ascii=False, indent=2)
-            logger.info(f"回放数据已保存: {replay_path}")
+            logger.info(f"回放已保存: {replay_path}")
         except Exception as e:
-            logger.error(f"保存回放数据失败: {e}")
+            logger.error(f"保存回放失败: {e}")
 
     @property
     def cycle_count(self) -> int:
@@ -307,6 +711,5 @@ class GameController:
     def is_running(self) -> bool:
         return self._running
 
-    def stop(self) -> None:
-        """停止游戏循环"""
+    def stop(self):
         self._running = False
