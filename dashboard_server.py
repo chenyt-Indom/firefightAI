@@ -533,10 +533,10 @@ def api_github_upload_file():
 # ═══════════════════════════════════════════════════════════════
 
 SERVER_HOST = "139.199.69.88"
-SERVER_USER = "root"
+SERVER_USER = "ubuntu"
 SSH_KEY_PATH = r"D:\firefightAI2.pem"
 SSH_PASSWORD = "@Cyt20080102"
-SERVER_DEPLOY_PATH = "/opt/firefightAI"
+SERVER_DEPLOY_PATH = "/home/ubuntu/firefightAI"
 
 def _ssh_exec(cmd: str, timeout: int = 30) -> tuple:
     """Execute command via SSH, try key then password"""
@@ -2177,6 +2177,9 @@ def _run_ai_loop():
     py = int(lpc["pause_button_y"] * ss[1])
     executor = CommandExecutor(adb=adb, screen_size=ss, touch=touch if (touch and touch.is_connected) else None, pause_button=(px, py))
 
+    # 应用 monkey patch（仅在ADB可用时）
+    _apply_patches()
+
     capture.start()
 
     controller = DashboardGameController(
@@ -2270,7 +2273,7 @@ def _on_cycle_event(event: dict):
     socketio.emit("ai_thinking_update", {"thinking": thinking, "cycle": cycle, "analysis": analysis, "reason": reason_display})
 
 
-# ── Patch ──
+# ── Patch (延迟导入，避免服务器端缺少游戏依赖) ──
 class DashboardGameController:
     def __new__(cls, event_callback=None, **kw):
         from src.controller.game_controller import GameController
@@ -2279,76 +2282,74 @@ class DashboardGameController:
         inst._dashboard_callback = event_callback
         return inst
 
+_patches_applied = False
 
-import src.controller.game_controller as gc_mod
-
-_orig_record = gc_mod.GameController._record_cycle
-
-def _patched_record(self, state, outcome, commands):
-    _orig_record(self, state, outcome, commands)
-    cb = getattr(self, "_dashboard_callback", None)
-    if not cb:
+def _apply_patches():
+    """应用GameController和TacticalCommander的monkey patch（仅在ADB可用时调用）"""
+    global _patches_applied
+    if _patches_applied:
         return
-    d = "无决策"
-    a = "无行动"
-    if commands:
-        for c in commands:
-            if c.action:
-                d = c.reason or "无理由"
-                a = f"{c.action.value}({','.join(str(u) for u in (c.unit_ids or []))})"
-                break
-    cb({"cycle": self._cycle_count, "allies": state.ally_count, "enemies": state.enemy_count, "score": outcome.get("score", 0) if outcome else 0, "decision": d, "action": a, "cycle_time": int((time.time() - getattr(self, '_cycle_start', time.time())) * 1000)})
-
-gc_mod.GameController._record_cycle = _patched_record
-
-_orig_run = gc_mod.GameController.run
-
-def _patched_run(self):
-    self._cycle_start = 0
-    return _orig_run(self)
-
-gc_mod.GameController.run = _patched_run
-
-_orig_fe = gc_mod.GameController._fast_execute
-
-def _patched_fe(self, commands, state):
-    self._cycle_start = time.time()
-    return _orig_fe(self, commands, state)
-
-gc_mod.GameController._fast_execute = _patched_fe
-
-import src.decision.commander as cmd_mod
-
-_orig_build = cmd_mod.TacticalCommander._build_user_message
-
-def _patched_build(self, state_text):
-    global _user_instruction
-    msg = _orig_build(self, state_text)
-    if _user_instruction:
-        marker = "请根据以上战场状态"
-        if marker in msg:
-            parts = msg.split(marker, 1)
-            msg = f"{parts[0]}\n---\n## 指挥官指令 (你必须执行!)\n{_user_instruction}\n\n---\n{marker}{parts[1]}"
-        else:
-            msg += f"\n\n指挥官最新指令: {_user_instruction}"
-    return msg
-
-cmd_mod.TacticalCommander._build_user_message = _patched_build
-
-_orig_decide = cmd_mod.TacticalCommander.decide
-
-def _patched_decide(self, state):
-    result = _orig_decide(self, state)
-    if result:
-        try:
-            data = json.loads(result)
-            global _last_full_decision
-            _last_full_decision = {"analysis": data.get("analysis", ""), "next_prediction": data.get("next_prediction", ""), "commands": [{"action": c.get("action", "?"), "unit_ids": c.get("unit_ids", []), "target": c.get("target", None), "reason": c.get("reason", "")} for c in data.get("commands", [])]}
-        except:
-            pass
-    return result
-
-cmd_mod.TacticalCommander.decide = _patched_decide
+    _patches_applied = True
+    
+    import src.controller.game_controller as gc_mod
+    import src.decision.commander as cmd_mod
+    
+    _orig_record = gc_mod.GameController._record_cycle
+    def _patched_record(self, state, outcome, commands):
+        _orig_record(self, state, outcome, commands)
+        cb = getattr(self, "_dashboard_callback", None)
+        if not cb:
+            return
+        d = "无决策"
+        a = "无行动"
+        if commands:
+            for c in commands:
+                if c.action:
+                    d = c.reason or "无理由"
+                    a = f"{c.action.value}({','.join(str(u) for u in (c.unit_ids or []))})"
+                    break
+        cb({"cycle": self._cycle_count, "allies": state.ally_count, "enemies": state.enemy_count, "score": outcome.get("score", 0) if outcome else 0, "decision": d, "action": a, "cycle_time": int((time.time() - getattr(self, '_cycle_start', time.time())) * 1000)})
+    gc_mod.GameController._record_cycle = _patched_record
+    
+    _orig_run = gc_mod.GameController.run
+    def _patched_run(self):
+        self._cycle_start = 0
+        return _orig_run(self)
+    gc_mod.GameController.run = _patched_run
+    
+    _orig_fe = gc_mod.GameController._fast_execute
+    def _patched_fe(self, commands, state):
+        self._cycle_start = time.time()
+        return _orig_fe(self, commands, state)
+    gc_mod.GameController._fast_execute = _patched_fe
+    
+    _orig_build = cmd_mod.TacticalCommander._build_user_message
+    def _patched_build(self, state_text):
+        global _user_instruction
+        msg = _orig_build(self, state_text)
+        if _user_instruction:
+            marker = "请根据以上战场状态"
+            if marker in msg:
+                parts = msg.split(marker, 1)
+                msg = f"{parts[0]}\n---\n## 指挥官指令 (你必须执行!)\n{_user_instruction}\n\n---\n{marker}{parts[1]}"
+            else:
+                msg += f"\n\n指挥官最新指令: {_user_instruction}"
+        return msg
+    cmd_mod.TacticalCommander._build_user_message = _patched_build
+    
+    _orig_decide = cmd_mod.TacticalCommander.decide
+    def _patched_decide(self, state):
+        result = _orig_decide(self, state)
+        if result:
+            try:
+                data = json.loads(result)
+                global _last_full_decision
+                _last_full_decision = {"analysis": data.get("analysis", ""), "next_prediction": data.get("next_prediction", ""), "commands": [{"action": c.get("action", "?"), "unit_ids": c.get("unit_ids", []), "target": c.get("target", None), "reason": c.get("reason", "")} for c in data.get("commands", [])]}
+            except:
+                pass
+        return result
+    cmd_mod.TacticalCommander.decide = _patched_decide
+    logger.info("GameController patches applied")
 _last_full_decision: dict = {}
 
 
