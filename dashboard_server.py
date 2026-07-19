@@ -5945,7 +5945,6 @@ if __name__ == "__main__":
     start_auto_cleanup()
 
     # ── v5.1 启动自动参数保存调度器 ──
-    global _scheduler
     try:
         from src.learning.auto_scheduler import AutoScheduler
         _scheduler = AutoScheduler(project_root=PROJECT_ROOT)
