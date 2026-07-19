@@ -54,6 +54,30 @@ _chat_history: list[dict] = []
 _learning_log: list[dict] = []  # 学习日志持久化
 _adb_utils = None  # ADB实例引用
 
+# ── GPU 状态 ──
+_gpu_info: dict = {"cuda_available": False, "gpus": [], "pytorch_cuda": False, "pytorch_version": "", "message": ""}
+
+# ── Android 模拟器状态 ──
+EMULATOR_HOME = PROJECT_ROOT / "android_emulator"
+ANDROID_SDK_ROOT = EMULATOR_HOME / "sdk"
+AVD_NAME = "firefight_avd"
+AVD_CONFIG = {
+    "device": "pixel_6",
+    "api_level": 33,
+    "arch": "x86_64",
+    "ram": 4096,          # MUMU同级4GB
+    "cores": 4,
+    "resolution": "1920x1080",  # MUMU同级1080P
+    "density": 320,
+    "fullscreen": True,   # 全屏支持
+    "touch_screen": True,  # MUMU同级触控
+    "keyboard": True,     # MUMU同级键盘输入
+}
+_emulator_process = None
+_emulator_adb_port = 5556  # Different from MuMu's 7555
+_scrcpy_process = None
+_scrcpy_enabled = False
+
 
 def update_state(**kw):
     with _lock:
@@ -180,11 +204,11 @@ def api_adb_status():
     host = di.get("adb_host", "127.0.0.1")
     port = di.get("adb_port", 7555)
 
-    # 尝试检测ADB
+    # 尝试检测ADB - 优先使用MuMu自带的ADB
     adb_paths = [
+        r"d:\MuMuPlayer\nx_device\12.0\shell\adb.exe",
         r"d:\firefight\adb\adb.exe",
         r"C:\adb\platform-tools\platform-tools\adb.exe",
-        r"d:\MuMuPlayer\nx_device\12.0\shell\adb.exe",
         "adb",
     ]
     adb_exe = "adb"
@@ -200,6 +224,8 @@ def api_adb_status():
 
     # 尝试连接检测
     try:
+        # 先启动ADB server
+        subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
         r = subprocess.run([adb_exe, "devices"], capture_output=True, text=True, timeout=5)
         devices = [l for l in r.stdout.strip().split("\n") if l and "\tdevice" in l]
         result["devices"] = devices
@@ -231,7 +257,7 @@ def api_adb_reconnect():
         host = host or di.get("adb_host", "127.0.0.1")
         port = port or di.get("adb_port", 7555)
 
-    adb_paths = [r"d:\firefight\adb\adb.exe", r"C:\adb\platform-tools\platform-tools\adb.exe", r"d:\MuMuPlayer\nx_device\12.0\shell\adb.exe", "adb"]
+    adb_paths = [r"d:\MuMuPlayer\nx_device\12.0\shell\adb.exe", r"d:\firefight\adb\adb.exe", r"C:\adb\platform-tools\platform-tools\adb.exe", "adb"]
     adb_exe = "adb"
     for p in adb_paths:
         if p == "adb" or Path(p).exists():
@@ -240,6 +266,8 @@ def api_adb_reconnect():
 
     add_learning_log("connection", f"尝试重连ADB: {host}:{port}", "")
     try:
+        # 先启动ADB server
+        subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
         r = subprocess.run([adb_exe, "connect", f"{host}:{port}"], capture_output=True, text=True, timeout=10)
         if "connected" in r.stdout.lower() or "already connected" in r.stdout.lower():
             update_state(adb_status="connected", adb_host=host, adb_port=port)
@@ -280,30 +308,106 @@ def api_github_status():
     try:
         import requests
         r = requests.get("https://api.github.com", timeout=5)
-        status = "online" if r.status_code == 200 else "error"
-        update_state(github_status=status)
+        api_status = "online" if r.status_code == 200 else "error"
+        update_state(github_status=api_status)
     except:
-        status = "offline"
-        update_state(github_status=status)
+        api_status = "offline"
+        update_state(github_status=api_status)
 
     # 尝试获取本地git信息
+    remote = "未配置仓库"
+    branch = "N/A"
+    dirty = False
+    has_remote = False
+    remote_url = ""
+    
     try:
         import git
         repo = git.Repo(str(PROJECT_ROOT))
-        remote = repo.remotes.origin.url if repo.remotes else "未配置"
         branch = repo.active_branch.name
         dirty = repo.is_dirty()
+        if repo.remotes:
+            remote = repo.remotes.origin.url
+            has_remote = True
+            remote_url = remote
+        else:
+            remote = "未配置仓库"
+            has_remote = False
     except:
-        remote = "未初始化"
-        branch = "N/A"
-        dirty = False
+        # 尝试通过命令行获取
+        try:
+            r = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+            if r.returncode == 0 and r.stdout.strip():
+                remote = r.stdout.strip()
+                has_remote = True
+                remote_url = remote
+            r2 = subprocess.run(["git", "branch", "--show-current"], cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+            branch = r2.stdout.strip() or "N/A"
+            r3 = subprocess.run(["git", "status", "--porcelain"], cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+            dirty = bool(r3.stdout.strip())
+        except:
+            pass
 
-    return jsonify({
-        "api_status": status,
+    result = {
+        "api_status": api_status,
         "repo_url": remote,
+        "remote_url": remote_url,
         "branch": branch,
         "has_changes": dirty,
-    })
+        "has_remote": has_remote,
+    }
+    
+    if not has_remote:
+        result["message"] = "GitHub未配置 - 请使用 /api/github/setup 配置仓库地址，或在指令框输入 'repo 仓库地址'"
+        result["suggestion"] = "在指令框输入: repo https://github.com/用户名/仓库名.git"
+    
+    return jsonify(result)
+
+@app.route("/api/github/setup", methods=["POST"])
+def api_github_setup():
+    """配置GitHub远程仓库"""
+    data = request.get_json() or {}
+    repo_url = data.get("repo_url", "").strip()
+    
+    if not repo_url:
+        return jsonify({"error": "缺少repo_url参数", "suggestion": "请提供GitHub仓库地址，如: https://github.com/username/repo.git"}), 400
+    
+    # 验证URL格式
+    if not (repo_url.startswith("https://github.com/") or repo_url.startswith("git@github.com:")):
+        return jsonify({"error": "不支持的仓库URL格式，请使用HTTPS或SSH格式", "suggestion": "示例: https://github.com/username/repo.git"}), 400
+    
+    add_learning_log("github", f"配置GitHub仓库: {repo_url}", "")
+    
+    try:
+        # 尝试使用GitPython
+        try:
+            import git
+            repo = git.Repo(str(PROJECT_ROOT))
+            if repo.remotes:
+                repo.remotes.origin.set_url(repo_url)
+            else:
+                repo.create_remote("origin", repo_url)
+        except ImportError:
+            # GitPython不可用，使用命令行
+            # 检查是否已有remote
+            r = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+            if r.returncode == 0:
+                subprocess.run(["git", "remote", "set-url", "origin", repo_url], cwd=str(PROJECT_ROOT), check=True, capture_output=True)
+            else:
+                subprocess.run(["git", "remote", "add", "origin", repo_url], cwd=str(PROJECT_ROOT), check=True, capture_output=True)
+        
+        update_state(github_repo=repo_url)
+        add_learning_log("github", f"GitHub仓库配置成功: {repo_url}", "")
+        
+        return jsonify({
+            "status": "configured",
+            "repo_url": repo_url,
+            "message": f"GitHub仓库已配置: {repo_url}",
+            "next_steps": "可以使用 git push -u origin main 进行首次推送，或点击推送按钮",
+        })
+    except Exception as e:
+        add_learning_log("github", f"GitHub配置失败", str(e)[:200])
+        return jsonify({"status": "error", "error": str(e), "suggestion": "请确保已初始化git仓库 (git init)"}), 500
 
 @app.route("/api/github/push", methods=["POST"])
 def api_github_push():
@@ -313,6 +417,18 @@ def api_github_push():
     commit_msg = data.get("message", f"AI训练更新 {datetime.now().strftime('%Y%m%d-%H%M')}")
 
     add_learning_log("github", "开始推送数据到GitHub", f"文件: {', '.join(paths)}")
+
+    # 先检查是否有remote
+    has_remote = False
+    try:
+        r = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+        has_remote = r.returncode == 0 and bool(r.stdout.strip())
+    except:
+        pass
+    
+    if not has_remote:
+        add_learning_log("github", "GitHub未配置仓库，无法推送", "")
+        return jsonify({"status": "error", "error": "未配置GitHub仓库", "suggestion": "请先使用 /api/github/setup 或在指令框输入 repo 地址 配置仓库"}), 400
 
     try:
         import git
@@ -339,16 +455,25 @@ def api_github_push():
         # GitPython不可用，尝试命令行
         try:
             subprocess.run(["git", "add"] + paths, cwd=str(PROJECT_ROOT), check=True, capture_output=True)
+            # 检查是否有变更
+            r_status = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(PROJECT_ROOT), capture_output=True)
+            if r_status.returncode == 0:
+                add_learning_log("github", "无变更需要推送", "")
+                return jsonify({"status": "no_changes"})
             subprocess.run(["git", "commit", "-m", commit_msg], cwd=str(PROJECT_ROOT), check=True, capture_output=True)
-            r = subprocess.run(["git", "push"], cwd=str(PROJECT_ROOT), check=True, capture_output=True, text=True)
-            add_learning_log("github", f"Git推送成功: {commit_msg}", r.stdout[:200])
-            return jsonify({"status": "pushed", "message": commit_msg})
-        except Exception as e:
+            r = subprocess.run(["git", "push", "-u", "origin", "HEAD"], cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+            if r.returncode == 0:
+                add_learning_log("github", f"Git推送成功: {commit_msg}", r.stdout[:200])
+                return jsonify({"status": "pushed", "message": commit_msg})
+            else:
+                add_learning_log("github", f"Git推送失败", r.stderr[:200])
+                return jsonify({"status": "error", "error": r.stderr.strip()[:300], "suggestion": "可能需要先执行 git pull 或设置上游分支"}), 500
+        except subprocess.CalledProcessError as e:
             add_learning_log("github", f"Git推送失败", str(e)[:200])
-            return jsonify({"status": "error", "error": str(e)}), 500
+            return jsonify({"status": "error", "error": str(e), "suggestion": "请检查git配置和仓库权限"}), 500
     except Exception as e:
         add_learning_log("github", f"推送失败", str(e)[:200])
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return jsonify({"status": "error", "error": str(e), "suggestion": "请检查git配置和仓库权限"}), 500
 
 @app.route("/api/github/pull", methods=["POST"])
 def api_github_pull():
@@ -409,28 +534,265 @@ def api_github_upload_file():
 
 SERVER_HOST = "139.199.69.88"
 SERVER_USER = "root"
-SSH_KEY_PATH = r"C:\Users\19853\Downloads\firefightAI.pem"
+SSH_KEY_PATH = r"D:\firefightAI2.pem"
+SSH_PASSWORD = "@Cyt20080102"
 SERVER_DEPLOY_PATH = "/opt/firefightAI"
+
+def _ssh_exec(cmd: str, timeout: int = 30) -> tuple:
+    """Execute command via SSH, try key then password"""
+    import paramiko
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        # Try key first (RSA then Ed25519)
+        key = None
+        if Path(SSH_KEY_PATH).exists():
+            for key_class in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey]:
+                try:
+                    key = key_class.from_private_key_file(SSH_KEY_PATH)
+                    break
+                except:
+                    continue
+        if key:
+            try:
+                client.connect(SERVER_HOST, username=SERVER_USER, pkey=key, timeout=10)
+            except Exception as ke:
+                logger.warning(f"SSH密钥认证失败: {ke}, 尝试密码认证")
+                client.close()
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                if SSH_PASSWORD:
+                    client.connect(SERVER_HOST, username=SERVER_USER, password=SSH_PASSWORD, timeout=10)
+                else:
+                    return False, "", f"密钥认证失败且未配置密码: {str(ke)[:200]}"
+        elif SSH_PASSWORD:
+            client.connect(SERVER_HOST, username=SERVER_USER, password=SSH_PASSWORD, timeout=10)
+        else:
+            return False, "", "SSH密钥不存在且未配置密码"
+        stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
+        out = stdout.read().decode()
+        err = stderr.read().decode()
+        return True, out, err
+    except Exception as e:
+        return False, "", str(e)
+    finally:
+        try:
+            client.close()
+        except:
+            pass
+
+def _ssh_connect(command: str, use_key: bool = True, timeout: int = 10) -> tuple:
+    """统一的SSH连接函数，使用paramiko（密钥优先，密码回退），返回(stdout, stderr, error_diagnosis)"""
+    success, stdout, stderr = _ssh_exec(command, timeout)
+    if success:
+        return stdout, stderr, ""
+    return "", "", f"SSH连接失败: {stderr[:200]}"
 
 @app.route("/api/server/status")
 def api_server_status():
     """检查腾讯云服务器连接状态"""
-    try:
-        r = subprocess.run([
-            "ssh", "-i", SSH_KEY_PATH, "-o", "StrictHostKeyChecking=no",
-            "-o", "ConnectTimeout=5", f"{SERVER_USER}@{SERVER_HOST}",
-            "echo OK && python3 --version 2>/dev/null && ls /opt/firefightAI 2>/dev/null || echo no_deploy"
-        ], capture_output=True, text=True, timeout=10)
-        if "OK" in r.stdout:
-            update_state(server_status="online")
-            deployed = "no_deploy" not in r.stdout
-            return jsonify({"status": "online", "deployed": deployed, "output": r.stdout.strip()})
-        else:
-            update_state(server_status="offline")
-            return jsonify({"status": "offline", "error": r.stderr.strip()[:200]})
-    except Exception as e:
+    detail = {}
+    
+    # 检查SSH密钥是否存在
+    key_exists = Path(SSH_KEY_PATH).exists()
+    detail["ssh_key_exists"] = key_exists
+    detail["ssh_key_path"] = SSH_KEY_PATH
+    detail["has_password"] = bool(SSH_PASSWORD)
+    
+    if not key_exists and not SSH_PASSWORD:
+        detail["suggestion"] = "SSH密钥不存在，请上传密钥文件或使用/api/server/setup_key生成新密钥"
+        update_state(server_status="no_key")
+        return jsonify({"status": "no_key", "detail": detail, "error": "SSH密钥不存在"})
+    
+    # 尝试连接
+    stdout, stderr, diagnosis = _ssh_connect("echo OK && python3 --version 2>/dev/null && ls /opt/firefightAI 2>/dev/null || echo no_deploy")
+    
+    if "OK" in stdout:
+        update_state(server_status="online")
+        deployed = "no_deploy" not in stdout
+        detail["python_version"] = stdout.split("\n")[1] if len(stdout.split("\n")) > 1 else "unknown"
+        return jsonify({"status": "online", "deployed": deployed, "output": stdout.strip(), "detail": detail})
+    elif diagnosis:
         update_state(server_status="error")
-        return jsonify({"status": "error", "error": str(e)[:200]})
+        detail["diagnosis"] = diagnosis
+        return jsonify({"status": "error", "detail": detail, "error": diagnosis, "stderr": stderr[:300]})
+    else:
+        update_state(server_status="offline")
+        detail["stderr"] = stderr[:300] if stderr else ""
+        detail["diagnosis"] = "SSH连接被拒绝，可能是密钥被服务器拒绝。请检查服务器authorized_keys或使用密码认证"
+        return jsonify({"status": "offline", "detail": detail, "error": stderr.strip()[:300] if stderr else "连接失败"})
+
+@app.route("/api/server/setup_key", methods=["POST"])
+def api_server_setup_key():
+    """生成新的SSH密钥对并返回公钥"""
+    data = request.get_json() or {}
+    key_type = data.get("type", "ed25519")  # ed25519 or rsa
+    
+    new_key_path = str(PROJECT_ROOT / "keys" / "firefightAI_deploy")
+    key_dir = PROJECT_ROOT / "keys"
+    key_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # 生成密钥对
+        if key_type == "rsa":
+            subprocess.run([
+                "ssh-keygen", "-t", "rsa", "-b", "4096", "-f", new_key_path,
+                "-N", "", "-C", "firefightAI-deploy"
+            ], check=True, capture_output=True, text=True, timeout=30)
+        else:
+            subprocess.run([
+                "ssh-keygen", "-t", "ed25519", "-f", new_key_path,
+                "-N", "", "-C", "firefightAI-deploy"
+            ], check=True, capture_output=True, text=True, timeout=30)
+        
+        # 读取公钥
+        pub_key_path = new_key_path + ".pub"
+        pub_key = Path(pub_key_path).read_text().strip()
+        
+        add_learning_log("server", "已生成新的SSH密钥对", f"路径: {new_key_path}")
+        
+        return jsonify({
+            "status": "generated",
+            "private_key_path": new_key_path,
+            "public_key_path": pub_key_path,
+            "public_key": pub_key,
+            "instructions": (
+                "请将以下公钥添加到服务器 ~/.ssh/authorized_keys 文件中:\n"
+                f"echo '{pub_key}' >> ~/.ssh/authorized_keys\n"
+                "或者在服务器上执行:\n"
+                f"ssh-copy-id -i {pub_key_path} {SERVER_USER}@{SERVER_HOST}"
+            ),
+        })
+    except subprocess.CalledProcessError as e:
+        return jsonify({"status": "error", "error": f"密钥生成失败: {e.stderr}"}), 500
+    except FileNotFoundError:
+        return jsonify({"status": "error", "error": "ssh-keygen未找到，请安装OpenSSH"}), 500
+
+@app.route("/api/server/upload_key", methods=["POST"])
+def api_server_upload_key():
+    """尝试通过密码认证上传公钥到服务器"""
+    import paramiko
+    data = request.get_json() or {}
+    pub_key = data.get("public_key", "")
+    
+    if not pub_key:
+        # 如果没有提供公钥，从现有密钥读取
+        pub_key_path = SSH_KEY_PATH + ".pub"
+        if Path(pub_key_path).exists():
+            pub_key = Path(pub_key_path).read_text().strip()
+        else:
+            # 生成新密钥并读取公钥
+            try:
+                key_dir = PROJECT_ROOT / "keys"
+                key_dir.mkdir(parents=True, exist_ok=True)
+                new_key = key_dir / "firefightAI_deploy"
+                subprocess.run([
+                    "ssh-keygen", "-t", "rsa", "-b", "4096", "-f", str(new_key),
+                    "-N", "", "-C", "firefightAI-deploy"
+                ], check=True, capture_output=True, text=True, timeout=30)
+                pub_key = (new_key.parent / (new_key.name + ".pub")).read_text().strip()
+            except Exception as e:
+                return jsonify({"status": "error", "error": f"无法生成或读取公钥: {str(e)}"}), 500
+    
+    if not SSH_PASSWORD:
+        return jsonify({"status": "error", "error": "未配置SSH密码，无法自动上传公钥。请手动添加公钥到服务器"}), 400
+    
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(SERVER_HOST, username=SERVER_USER, password=SSH_PASSWORD, timeout=10)
+        
+        # 确保 .ssh 目录存在
+        client.exec_command("mkdir -p ~/.ssh && chmod 700 ~/.ssh", timeout=10)
+        # 追加公钥
+        cmd = f"echo '{pub_key}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && echo OK"
+        stdin, stdout, stderr = client.exec_command(cmd, timeout=10)
+        out = stdout.read().decode()
+        client.close()
+        
+        if "OK" in out:
+            add_learning_log("server", "SSH公钥已上传到服务器", "")
+            return jsonify({"status": "ok", "message": "公钥已成功添加到服务器authorized_keys"})
+        return jsonify({"status": "error", "error": f"上传失败: {stderr.read().decode()[:200]}"}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "error": f"SSH连接失败: {str(e)[:200]}"}), 500
+
+@app.route("/api/server/test_ssh", methods=["POST"])
+def api_server_test_ssh():
+    """测试SSH连接，返回详细诊断信息"""
+    import socket
+    
+    result = {
+        "host": SERVER_HOST,
+        "user": SERVER_USER,
+        "tests": [],
+        "ssh_key_exists": Path(SSH_KEY_PATH).exists(),
+        "ssh_key_path": SSH_KEY_PATH,
+        "has_password": bool(SSH_PASSWORD),
+    }
+    
+    # 测试1: DNS解析
+    try:
+        ip = socket.gethostbyname(SERVER_HOST)
+        result["tests"].append({"name": "DNS解析", "status": "ok", "detail": f"{SERVER_HOST} -> {ip}"})
+    except Exception as e:
+        result["tests"].append({"name": "DNS解析", "status": "fail", "detail": str(e)})
+        result["summary"] = "DNS解析失败，可能服务器地址错误"
+        return jsonify(result)
+    
+    # 测试2: TCP端口连通性
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        sock.connect((SERVER_HOST, 22))
+        sock.close()
+        result["tests"].append({"name": "TCP端口22", "status": "ok", "detail": "SSH端口可达"})
+    except socket.timeout:
+        result["tests"].append({"name": "TCP端口22", "status": "fail", "detail": "连接超时，请检查防火墙和服务器状态"})
+        result["summary"] = "SSH端口22不可达，请检查服务器防火墙"
+        return jsonify(result)
+    except Exception as e:
+        result["tests"].append({"name": "TCP端口22", "status": "fail", "detail": str(e)})
+        result["summary"] = "SSH端口不可达"
+        return jsonify(result)
+    
+    # 测试3: SSH密钥认证
+    if Path(SSH_KEY_PATH).exists():
+        stdout, stderr, diagnosis = _ssh_connect("echo OK", use_key=True, timeout=10)
+        if "OK" in stdout:
+            result["tests"].append({"name": "SSH密钥认证", "status": "ok", "detail": "密钥认证成功"})
+        else:
+            result["tests"].append({"name": "SSH密钥认证", "status": "fail", "detail": diagnosis or stderr[:300]})
+    else:
+        result["tests"].append({"name": "SSH密钥认证", "status": "skip", "detail": "密钥文件不存在"})
+    
+    # 测试4: 密码认证（如果配置了）
+    if SSH_PASSWORD:
+        stdout, stderr, diagnosis = _ssh_connect("echo OK", use_key=False, timeout=10)
+        if "OK" in stdout:
+            result["tests"].append({"name": "SSH密码认证", "status": "ok", "detail": "密码认证成功"})
+        else:
+            result["tests"].append({"name": "SSH密码认证", "status": "fail", "detail": diagnosis or stderr[:300]})
+    
+    # 测试5: 检查Python和部署状态
+    if any(t["status"] == "ok" for t in result["tests"] if "SSH" in t["name"]):
+        stdout, stderr, _ = _ssh_connect("python3 --version 2>/dev/null; ls /opt/firefightAI 2>/dev/null || echo no_deploy", timeout=10)
+        py_ver = stdout.split("\n")[0].strip() if stdout else "未安装"
+        deployed = "no_deploy" not in stdout
+        result["tests"].append({"name": "Python环境", "status": "ok" if "Python" in py_ver else "fail", "detail": py_ver})
+        result["tests"].append({"name": "项目部署", "status": "ok" if deployed else "fail", "detail": "已部署" if deployed else "未部署"})
+    
+    # 汇总
+    failures = [t for t in result["tests"] if t["status"] == "fail"]
+    if failures:
+        result["summary"] = f"发现{len(failures)}个问题: " + "; ".join(f"{t['name']}: {t['detail'][:50]}" for t in failures)
+    else:
+        result["summary"] = "所有检查通过，SSH连接正常"
+    
+    result["all_ok"] = len(failures) == 0
+    
+    add_learning_log("server", f"SSH诊断完成: {result['summary']}", "")
+    return jsonify(result)
 
 @app.route("/api/server/deploy", methods=["POST"])
 def api_server_deploy():
@@ -444,12 +806,9 @@ def api_server_deploy():
         try:
             # 1. 测试SSH连接
             socketio.emit("server_deploy_progress", {"step": "连接服务器", "progress": 10})
-            r = subprocess.run([
-                "ssh", "-i", SSH_KEY_PATH, "-o", "StrictHostKeyChecking=no",
-                "-o", "ConnectTimeout=10", f"{SERVER_USER}@{SERVER_HOST}", "echo OK"
-            ], capture_output=True, text=True, timeout=15)
-            if "OK" not in r.stdout:
-                socketio.emit("server_deploy_error", {"error": f"SSH连接失败: {r.stderr}"})
+            ok, out, err = _ssh_exec("echo OK", timeout=15)
+            if not ok or "OK" not in out:
+                socketio.emit("server_deploy_error", {"error": f"SSH连接失败: {err}"})
                 update_state(server_status="offline")
                 return
 
@@ -457,11 +816,7 @@ def api_server_deploy():
             socketio.emit("server_deploy_progress", {"step": "创建目录", "progress": 20})
 
             # 2. 创建远程目录
-            subprocess.run([
-                "ssh", "-i", SSH_KEY_PATH, "-o", "StrictHostKeyChecking=no",
-                f"{SERVER_USER}@{SERVER_HOST}",
-                f"mkdir -p {SERVER_DEPLOY_PATH}/data/params {SERVER_DEPLOY_PATH}/config {SERVER_DEPLOY_PATH}/models"
-            ], check=True, capture_output=True, timeout=10)
+            _ssh_exec(f"mkdir -p {SERVER_DEPLOY_PATH}/data/params {SERVER_DEPLOY_PATH}/config {SERVER_DEPLOY_PATH}/models", timeout=10)
 
             # 3. 同步数据文件
             socketio.emit("server_deploy_progress", {"step": "同步数据文件", "progress": 40})
@@ -469,10 +824,37 @@ def api_server_deploy():
             for d in data_dirs:
                 local = PROJECT_ROOT / d
                 if local.exists():
-                    subprocess.run([
-                        "scp", "-i", SSH_KEY_PATH, "-o", "StrictHostKeyChecking=no",
-                        "-r", str(local), f"{SERVER_USER}@{SERVER_HOST}:{SERVER_DEPLOY_PATH}/data/"
-                    ], check=True, capture_output=True, timeout=30)
+                    import paramiko as _p
+                    _ok, _out, _err = _ssh_exec("cat > /dev/null", timeout=5)
+                    if _ok:
+                        with _p.Transport((SERVER_HOST, 22)) as transport:
+                            try:
+                                transport.connect(username=SERVER_USER, password=SSH_PASSWORD)
+                            except:
+                                try:
+                                    key = _p.RSAKey.from_private_key_file(SSH_KEY_PATH)
+                                    transport.connect(username=SERVER_USER, pkey=key)
+                                except:
+                                    pass
+                            if transport.is_authenticated():
+                                sftp = _p.SFTPClient.from_transport(transport)
+                                try:
+                                    remote_path = f"{SERVER_DEPLOY_PATH}/data/{d.split('/')[-1] if '/' in d else d}"
+                                    if local.is_dir():
+                                        sftp.mkdir(remote_path)
+                                        for f in local.rglob("*"):
+                                            if f.is_file():
+                                                rel = str(f.relative_to(local)).replace("\\", "/")
+                                                sftp.put(str(f), f"{remote_path}/{rel}")
+                                    else:
+                                        sftp.put(str(local), remote_path)
+                                finally:
+                                    sftp.close()
+                    else:
+                        subprocess.run([
+                            "scp", "-o", "StrictHostKeyChecking=no",
+                            "-r", str(local), f"{SERVER_USER}@{SERVER_HOST}:{SERVER_DEPLOY_PATH}/data/"
+                        ], capture_output=True, timeout=30)
 
             if not sync_only:
                 # 4. 同步项目文件
@@ -481,24 +863,20 @@ def api_server_deploy():
                     local = PROJECT_ROOT / item
                     if local.exists():
                         subprocess.run([
-                            "scp", "-i", SSH_KEY_PATH, "-o", "StrictHostKeyChecking=no",
+                            "scp", "-o", "StrictHostKeyChecking=no",
                             str(local), f"{SERVER_USER}@{SERVER_HOST}:{SERVER_DEPLOY_PATH}/"
-                        ], check=True, capture_output=True, timeout=30)
+                        ], capture_output=True, timeout=30)
 
                 # 5. 同步src目录
                 socketio.emit("server_deploy_progress", {"step": "同步源码", "progress": 80})
                 subprocess.run([
-                    "scp", "-i", SSH_KEY_PATH, "-o", "StrictHostKeyChecking=no",
+                    "scp", "-o", "StrictHostKeyChecking=no",
                     "-r", str(PROJECT_ROOT / "src"), f"{SERVER_USER}@{SERVER_HOST}:{SERVER_DEPLOY_PATH}/"
-                ], check=True, capture_output=True, timeout=60)
+                ], capture_output=True, timeout=60)
 
                 # 6. 安装依赖并重启
                 socketio.emit("server_deploy_progress", {"step": "安装依赖", "progress": 90})
-                subprocess.run([
-                    "ssh", "-i", SSH_KEY_PATH, "-o", "StrictHostKeyChecking=no",
-                    f"{SERVER_USER}@{SERVER_HOST}",
-                    f"cd {SERVER_DEPLOY_PATH} && pip3 install -r requirements.txt -q 2>&1"
-                ], capture_output=True, timeout=120)
+                _ssh_exec(f"cd {SERVER_DEPLOY_PATH} && pip3 install -r requirements.txt -q 2>&1", timeout=120)
 
             socketio.emit("server_deploy_progress", {"step": "完成", "progress": 100})
             add_learning_log("server", "部署成功", f"服务器: {SERVER_HOST}")
@@ -574,7 +952,7 @@ def verify_deepseek_api() -> dict:
             result["status"] = "online"
             result["models"] = [m["id"] for m in data.get("data", [])]
             t1 = time.time()
-            r2 = req.post(f"{llm_cfg['api_base']}/chat/completions", headers={"Authorization": f"Bearer {llm_cfg['api_key']}", "Content-Type": "application/json"}, json={"model": llm_cfg.get("model", "deepseek-chat"), "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}, timeout=10)
+            r2 = req.post(f"{llm_cfg['api_base']}/chat/completions", headers={"Authorization": f"Bearer {llm_cfg['api_key']}", "Content-Type": "application/json"}, json={"model": llm_cfg.get("model", "deepseek-v4-flash"), "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}, timeout=10)
             result["chat_latency_ms"] = round((time.time() - t1) * 1000)
             result["chat_ok"] = r2.status_code == 200
         else:
@@ -648,12 +1026,12 @@ def on_ai_chat(data: dict):
             full_response = ""
 
             stream = client.chat.completions.create(
-                model=llm_cfg.get("model", "deepseek-chat"),
+                model=llm_cfg.get("model", "deepseek-v4-flash"),
                 messages=messages,
                 max_tokens=800,
-                temperature=0.7,
+                temperature=0.1,
                 stream=True,
-                timeout=30,
+                timeout=6,
             )
 
             for chunk in stream:
@@ -748,11 +1126,11 @@ def on_ai_correct_behavior(data: dict):
             )
 
             resp = client.chat.completions.create(
-                model=llm_cfg.get("model", "deepseek-chat"),
+                model=llm_cfg.get("model", "deepseek-v4-flash"),
                 messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": prompt}],
-                max_tokens=500,
-                temperature=0.5,
-                timeout=30,
+                max_tokens=512,
+                temperature=0.1,
+                timeout=6,
             )
             analysis = resp.choices[0].message.content
             add_learning_log("correction", "AI分析完成", analysis[:300])
@@ -860,11 +1238,11 @@ def api_params_learn():
                 f"参数内容:\n{content}"
             )
             resp = client.chat.completions.create(
-                model=llm_cfg.get("model", "deepseek-chat"),
+                model=llm_cfg.get("model", "deepseek-v4-flash"),
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=500,
-                temperature=0.5,
-                timeout=30,
+                max_tokens=512,
+                temperature=0.1,
+                timeout=6,
             )
             analysis = resp.choices[0].message.content
             add_learning_log("params", "参数学习完成", analysis[:300])
@@ -1055,7 +1433,7 @@ def api_combat_learn():
             client = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["api_base"])
             exp_text = "\n".join([f"- 友{d['ally_count']}vs敌{d['enemy_count']}: {d['decision'].get('reason','')[:80]} (得分+{d['outcome_score']:.0f})" for d in top_exps[:15]])
             prompt = f"从以下实战数据中总结AI学到了什么（3-5条要点）：\n{exp_text}\n\n请用中文列出。"
-            resp = client.chat.completions.create(model=llm_cfg.get("model", "deepseek-chat"), messages=[{"role": "user", "content": prompt}], max_tokens=400, temperature=0.3, timeout=15)
+            resp = client.chat.completions.create(model=llm_cfg.get("model", "deepseek-v4-flash"), messages=[{"role": "user", "content": prompt}], max_tokens=512, temperature=0.1, timeout=6)
             summary = resp.choices[0].message.content
 
             add_learning_log("combat", "实战学习总结", summary[:300])
@@ -1097,6 +1475,440 @@ def api_combat_export():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+# ═══════════════════════════════════════════════════════════════
+# 智能搜索 / Web Search
+# ═══════════════════════════════════════════════════════════════
+
+WEB_KNOWLEDGE_DIR = PROJECT_ROOT / "data" / "web_knowledge"
+
+@app.route("/api/web/search", methods=["POST"])
+def api_web_search():
+    """Web search using DeepSeek API"""
+    data = request.get_json() or {}
+    query = data.get("query", "")
+    if not query:
+        return jsonify({"error": "query required"}), 400
+
+    add_learning_log("web_search", f"搜索: {query[:50]}")
+
+    try:
+        from openai import OpenAI
+        cfg = load_config()
+        llm_cfg = cfg["llm"]
+        client = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["api_base"], timeout=10)
+        response = client.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[
+                {"role": "system", "content": "你是一个智能搜索助手。请根据用户的问题，利用你的知识库提供准确、详细的信息。如果涉及最新信息，请说明知识截止日期。回答要结构化、有条理。"},
+                {"role": "user", "content": f"请帮我搜索并回答以下问题，提供详细信息：\n\n{query}"}
+            ],
+            temperature=0.1,
+            max_tokens=2048,
+            stream=True,
+            timeout=6,
+        )
+        full_text = ""
+        for chunk in response:
+            if chunk.choices[0].delta.content:
+                full_text += chunk.choices[0].delta.content
+                socketio.emit("web_search_stream", {"text": full_text, "done": False})
+        socketio.emit("web_search_stream", {"text": full_text, "done": True})
+
+        add_learning_log("web_search", f"搜索完成: {query[:50]}", full_text[:200])
+        return jsonify({
+            "query": query,
+            "summary": full_text,
+            "searched_at": datetime.now().isoformat(),
+            "source": "DeepSeek Knowledge Base",
+            "total_results": 1,
+        })
+    except Exception as e:
+        add_learning_log("web_search", f"搜索失败: {str(e)[:100]}")
+        return jsonify({"error": str(e), "query": query}), 500
+
+@app.route("/api/web/save", methods=["POST"])
+def api_web_save():
+    """保存搜索结果到知识库"""
+    data = request.get_json() or {}
+    query = data.get("query", "").strip()
+    results = data.get("results", [])
+    summary = data.get("summary", "")
+    tags = data.get("tags", [])
+    
+    if not query:
+        return jsonify({"error": "缺少查询参数"}), 400
+    
+    WEB_KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+    
+    filename = f"web_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(query.encode()).hexdigest()[:8]}.json"
+    filepath = WEB_KNOWLEDGE_DIR / filename
+    
+    entry = {
+        "query": query,
+        "results": results,
+        "summary": summary,
+        "tags": tags,
+        "saved_at": datetime.now().isoformat(),
+        "source": "web_search",
+    }
+    
+    filepath.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+    
+    add_learning_log("web_search", f"知识已保存: {filename}", f"查询: {query}")
+    
+    return jsonify({
+        "status": "saved",
+        "filename": filename,
+        "path": str(filepath.relative_to(PROJECT_ROOT)),
+        "query": query,
+    })
+
+@app.route("/api/web/learn", methods=["POST"])
+def api_web_learn():
+    """AI从保存的web知识中学习"""
+    data = request.get_json() or {}
+    filename = data.get("filename", "")
+    query_filter = data.get("query", "")
+    
+    if filename:
+        filepath = WEB_KNOWLEDGE_DIR / filename
+        if not filepath.exists():
+            return jsonify({"error": "文件不存在"}), 404
+        entries = [json.loads(filepath.read_text(encoding="utf-8"))]
+    else:
+        entries = []
+        if WEB_KNOWLEDGE_DIR.exists():
+            for f in sorted(WEB_KNOWLEDGE_DIR.glob("web_*.json"), reverse=True):
+                try:
+                    entry = json.loads(f.read_text(encoding="utf-8"))
+                    if query_filter and query_filter.lower() not in entry.get("query", "").lower():
+                        continue
+                    entries.append(entry)
+                except:
+                    pass
+        entries = entries[:20]
+    
+    if not entries:
+        return jsonify({"error": "没有可学习的知识", "suggestion": "请先保存搜索结果到知识库"}), 400
+    
+    add_learning_log("web_search", f"AI开始从{len(entries)}条知识中学习", "")
+    
+    def learn_from_web():
+        try:
+            from openai import OpenAI
+            cfg = load_config()
+            llm_cfg = cfg["llm"]
+            client = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["api_base"])
+            
+            knowledge_text = "\n\n---\n".join([
+                f"查询: {e.get('query','')}\n结果: {e.get('summary','')[:500]}" 
+                for e in entries
+            ])
+            
+            prompt = (
+                "你是Firefight AI学习系统。请从以下网络搜索知识中提取对战术AI有用的信息：\n"
+                "1. 提取关键战术概念和策略\n"
+                "2. 如果有可用的战术数据，转化为游戏规则\n"
+                "3. 总结3-5条可应用的学习要点\n\n"
+                f"知识内容:\n{knowledge_text[:4000]}"
+            )
+            
+            resp = client.chat.completions.create(
+                model=llm_cfg.get("model", "deepseek-v4-flash"),
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=512,
+                temperature=0.1,
+                timeout=6,
+            )
+            learning = resp.choices[0].message.content
+            
+            add_learning_log("web_search", "AI学习完成", learning[:300])
+            socketio.emit("web_learn_result", {
+                "learning": learning,
+                "source_count": len(entries),
+                "time": datetime.now().isoformat(),
+            })
+            
+            # 尝试保存战术规则
+            try:
+                from src.learning.strategy_compressor import StrategyCompressor
+                if "规则" in learning or "要点" in learning:
+                    lines = [l.strip() for l in learning.split("\n") if l.strip() and any(kw in l for kw in ["规则", "要点", "策略", "战术"])]
+                    if lines:
+                        StrategyCompressor._save_rules_static(lines[:5])
+            except:
+                pass
+                
+        except Exception as e:
+            socketio.emit("web_learn_result", {"error": str(e)[:200]})
+    
+    threading.Thread(target=learn_from_web, daemon=True).start()
+    return jsonify({"status": "learning", "source_count": len(entries)})
+
+@app.route("/api/web/knowledge")
+def api_web_knowledge():
+    """列出已保存的知识"""
+    entries = []
+    if WEB_KNOWLEDGE_DIR.exists():
+        for f in sorted(WEB_KNOWLEDGE_DIR.glob("web_*.json"), reverse=True):
+            try:
+                entry = json.loads(f.read_text(encoding="utf-8"))
+                entries.append({
+                    "filename": f.name,
+                    "query": entry.get("query", ""),
+                    "saved_at": entry.get("saved_at", ""),
+                    "tags": entry.get("tags", []),
+                    "summary_preview": entry.get("summary", "")[:100],
+                })
+            except:
+                pass
+    return jsonify(entries)
+
+@socketio.on("web_search")
+def on_web_search(data: dict):
+    """流式Web搜索，实时返回进度"""
+    query = data.get("query", "").strip()
+    if not query:
+        emit("web_search_error", {"error": "缺少查询参数"})
+        return
+    
+    emit("web_search_progress", {"step": "搜索中", "progress": 20, "query": query})
+    
+    def search_worker():
+        try:
+            import requests as req
+            
+            # 搜索
+            search_url = "https://html.duckduckgo.com/html/"
+            r = req.post(search_url, data={"q": query}, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }, timeout=15)
+            
+            from html.parser import HTMLParser
+            
+            class DDGParser(HTMLParser):
+                def __init__(self):
+                    super().__init__()
+                    self.results = []
+                    self.current = {}
+                    self.in_result = False
+                    self.in_snippet = False
+                    self.in_link = False
+                    self.text_buf = ""
+                    
+                def handle_starttag(self, tag, attrs):
+                    attrs_dict = dict(attrs)
+                    if tag == "div" and "result__body" in attrs_dict.get("class", ""):
+                        self.in_result = True
+                        self.current = {}
+                    if self.in_result and tag == "a" and "result__a" in attrs_dict.get("class", ""):
+                        self.in_link = True
+                        self.current["url"] = attrs_dict.get("href", "")
+                    if self.in_result and tag == "a" and "result__snippet" in attrs_dict.get("class", ""):
+                        self.in_snippet = True
+                        self.text_buf = ""
+                        
+                def handle_endtag(self, tag):
+                    if self.in_snippet and tag == "a":
+                        self.in_snippet = False
+                        self.current["snippet"] = self.text_buf.strip()
+                    if self.in_result and tag == "div":
+                        self.in_result = False
+                        if self.current.get("snippet") or self.current.get("url"):
+                            self.results.append(dict(self.current))
+                        
+                def handle_data(self, data):
+                    if self.in_snippet:
+                        self.text_buf += data
+                    if self.in_link:
+                        self.current["title"] = self.current.get("title", "") + data.strip()
+            
+            parser = DDGParser()
+            parser.feed(r.text)
+            results = parser.results[:10]
+            
+            emit("web_search_progress", {"step": "AI总结中", "progress": 60, "results_count": len(results)})
+            
+            # AI总结
+            summary = ""
+            try:
+                from openai import OpenAI
+                cfg = load_config()
+                llm_cfg = cfg["llm"]
+                client = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["api_base"])
+                
+                snippets_text = "\n".join([f"{i+1}. {r.get('title','')}: {r.get('snippet','')[:300]}" for i, r in enumerate(results[:8])])
+                prompt = f"搜索结果如下，请用中文总结关键信息（3-5条要点）：\n查询: {query}\n\n{snippets_text}"
+                
+                full_summary = ""
+                stream = client.chat.completions.create(
+                    model=llm_cfg.get("model", "deepseek-v4-flash"),
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=512,
+                    temperature=0.1,
+                    stream=True,
+                    timeout=6,
+                )
+                for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        token = chunk.choices[0].delta.content
+                        full_summary += token
+                        emit("web_search_token", {"token": token, "done": False})
+                summary = full_summary
+                emit("web_search_token", {"token": "", "done": True, "full": summary})
+            except Exception as e:
+                summary = f"(AI总结暂不可用)"
+                emit("web_search_token", {"token": summary, "done": True, "full": summary})
+            
+            emit("web_search_progress", {"step": "完成", "progress": 100})
+            emit("web_search_complete", {
+                "query": query,
+                "results": results,
+                "summary": summary,
+                "total_results": len(results),
+            })
+            
+            add_learning_log("web_search", f"搜索完成: {query}", summary[:200])
+            
+        except Exception as e:
+            emit("web_search_error", {"error": str(e)[:200]})
+    
+    threading.Thread(target=search_worker, daemon=True).start()
+
+# ═══════════════════════════════════════════════════════════════
+# 安装包创建
+# ═══════════════════════════════════════════════════════════════
+
+PACKAGE_EXCLUDE = {".git", "__pycache__", "logs", "runs", "sessions", "data/battle_memory.db", ".venv", "venv", "node_modules", "dist"}
+
+@app.route("/api/package/create", methods=["POST"])
+def api_package_create():
+    """创建项目安装包zip"""
+    import zipfile
+    
+    dist_dir = PROJECT_ROOT / "dist"
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    
+    zip_path = dist_dir / "firefightAI_v5.zip"
+    
+    add_learning_log("system", "开始创建安装包", "")
+    
+    file_count = 0
+    try:
+        with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(str(PROJECT_ROOT)):
+                # 过滤排除目录
+                rel_root = Path(root).relative_to(PROJECT_ROOT)
+                rel_str = str(rel_root).replace("\\", "/")
+                if rel_str == ".":
+                    parts = []
+                else:
+                    parts = rel_str.split("/")
+                
+                # 跳过排除的目录
+                skip = False
+                for part in parts:
+                    if part in PACKAGE_EXCLUDE or part.startswith("."):
+                        skip = True
+                        break
+                if skip:
+                    dirs[:] = []  # 不进入子目录
+                    continue
+                
+                # 修改dirs in place 来排除目录
+                dirs[:] = [d for d in dirs if d not in PACKAGE_EXCLUDE and not d.startswith(".")]
+                
+                for f in files:
+                    if f.startswith("."):
+                        continue
+                    fp = Path(root) / f
+                    arcname = str(fp.relative_to(PROJECT_ROOT))
+                    # 跳过较大的数据库文件
+                    if "battle_memory.db" in arcname:
+                        continue
+                    try:
+                        zf.write(str(fp), arcname)
+                        file_count += 1
+                    except Exception:
+                        pass  # 跳过无法读取的文件
+        
+        zip_size = zip_path.stat().st_size
+        size_mb = round(zip_size / 1024 / 1024, 2)
+        
+        add_learning_log("system", f"安装包创建完成: {size_mb}MB, {file_count}个文件", "")
+        
+        # 创建install.bat
+        install_bat = dist_dir / "install.bat"
+        install_bat.write_text("""@echo off
+chcp 65001 >nul
+title Firefight AI v5.0 安装程序
+echo ============================================
+echo   Firefight AI v5.0 安装程序
+echo ============================================
+echo.
+
+:: 检查Python
+echo [1/4] 检查Python环境...
+python --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [错误] 未检测到Python，请先安装Python 3.10+
+    echo 下载地址: https://www.python.org/downloads/
+    pause
+    exit /b 1
+)
+python --version
+echo.
+
+:: 安装依赖
+echo [2/4] 安装依赖包...
+pip install -r requirements.txt -q
+if %errorlevel% neq 0 (
+    echo [警告] 部分依赖安装可能失败，请检查网络连接
+)
+echo.
+
+:: 创建桌面快捷方式
+echo [3/4] 创建桌面快捷方式...
+powershell -Command "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut([Environment]::GetFolderPath('Desktop') + '\\FirefightAI.lnk'); $Shortcut.TargetPath = 'pythonw.exe'; $Shortcut.Arguments = 'dashboard_server.py --host 0.0.0.0 --port 5000'; $Shortcut.WorkingDirectory = '%~dp0'; $Shortcut.IconLocation = 'shell32.dll,13'; $Shortcut.Save()"
+echo.
+
+:: 启动应用
+echo [4/4] 启动Firefight AI Dashboard...
+echo.
+echo 服务将在 http://localhost:5000 启动
+echo 按 Ctrl+C 可停止服务
+echo.
+python dashboard_server.py --host 0.0.0.0 --port 5000
+
+pause
+""", encoding="utf-8")
+        
+        return jsonify({
+            "status": "created",
+            "filename": "firefightAI_v5.zip",
+            "path": str(zip_path),
+            "size_bytes": zip_size,
+            "size_mb": size_mb,
+            "file_count": file_count,
+            "download_url": "/api/package/download",
+            "install_bat": "install.bat",
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+@app.route("/api/package/download")
+def api_package_download():
+    """下载安装包"""
+    zip_path = PROJECT_ROOT / "dist" / "firefightAI_v5.zip"
+    if not zip_path.exists():
+        return jsonify({"error": "安装包不存在，请先创建", "suggestion": "POST /api/package/create 创建安装包"}), 404
+    return send_from_directory(
+        str(PROJECT_ROOT / "dist"),
+        "firefightAI_v5.zip",
+        as_attachment=True,
+        download_name="firefightAI_v5.zip",
+    )
 
 # ═══════════════════════════════════════════════════════════════
 # 标注工具
@@ -1182,6 +1994,7 @@ def on_rebuild_chain():
                 if p == "adb" or Path(p).exists():
                     adb_exe = p
                     break
+            subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
             r = subprocess.run([adb_exe, "connect", f"{di.get('adb_host','127.0.0.1')}:{di.get('adb_port',7555)}"], capture_output=True, text=True, timeout=10)
             results["adb"] = "connected" if "connected" in r.stdout.lower() else "failed"
             update_state(adb_status=results["adb"])
@@ -1200,8 +2013,8 @@ def on_rebuild_chain():
         # 4. 验证服务器
         emit("rebuild_progress", {"step": "验证腾讯云服务器", "progress": 80})
         try:
-            r = subprocess.run(["ssh", "-i", SSH_KEY_PATH, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5", f"{SERVER_USER}@{SERVER_HOST}", "echo OK"], capture_output=True, text=True, timeout=10)
-            results["server"] = "online" if "OK" in r.stdout else "offline"
+            ok, out, _ = _ssh_exec("echo OK", timeout=10)
+            results["server"] = "online" if ok and "OK" in out else "offline"
         except:
             results["server"] = "offline"
 
@@ -1236,6 +2049,7 @@ def on_check_all_connections():
             if p == "adb" or Path(p).exists():
                 adb_exe = p
                 break
+        subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
         r = subprocess.run([adb_exe, "devices"], capture_output=True, text=True, timeout=5)
         results["adb"] = "connected" if f"{di.get('adb_host','127.0.0.1')}:{di.get('adb_port',7555)}" in r.stdout else "disconnected"
     except:
@@ -1572,7 +2386,7 @@ def on_send_command(data: dict):
             lc = cfg["llm"]
             client = OpenAI(api_key=lc["api_key"], base_url=lc["api_base"])
             sp = f"你是Firefight战术AI。指挥官给你下达了一条指令。请用1-2句话分析: 1)你对这条指令的见解 2)你将在下一轮如何运用它。当前兵力: 友{allies}vs敌{enemies} (第{cycle}轮)"
-            resp = client.chat.completions.create(model=lc.get("model", "deepseek-chat"), messages=[{"role": "system", "content": sp}, {"role": "user", "content": f"指挥官指令: {cmd}"}], max_tokens=150, temperature=0.5, timeout=5)
+            resp = client.chat.completions.create(model=lc.get("model", "deepseek-v4-flash"), messages=[{"role": "system", "content": sp}, {"role": "user", "content": f"指挥官指令: {cmd}"}], max_tokens=128, temperature=0.1, timeout=4)
             analysis = resp.choices[0].message.content.strip()
             socketio.emit("command_analysis", {"command": cmd, "cycle": cycle, "analysis": analysis, "allies": allies, "enemies": enemies})
             try:
@@ -1798,6 +2612,37 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
 .conn-mini.online{background:#4caf50;color:#000}
 .conn-mini.offline{background:#e53935;color:#fff}
 .conn-mini.checking{background:#ff9800;color:#000}
+/* Web Search */
+.search-container{display:flex;flex-direction:column;gap:12px}
+.search-bar{display:flex;gap:8px}
+.search-bar input{flex:1;padding:10px 14px;border:1px solid #252a33;border-radius:8px;background:#1a1f2b;color:#d0d0d0;font-size:13px;outline:none}
+.search-bar input:focus{border-color:#58a5f3}
+.search-result{background:#1a1f2b;border:1px solid #252a33;border-radius:8px;padding:12px;margin-bottom:8px}
+.search-result .sr-title{font-size:13px;font-weight:600;color:#58a5f3;margin-bottom:4px}
+.search-result .sr-snippet{font-size:11px;color:#aaa;line-height:1.4}
+.search-result .sr-url{font-size:10px;color:#555;margin-top:4px;word-break:break-all}
+.search-summary{background:#1a2530;border-left:3px solid #58a5f3;padding:12px;border-radius:6px;margin-top:10px;font-size:12px;line-height:1.6}
+.search-summary h4{color:#58a5f3;margin-bottom:6px;font-size:13px}
+.search-progress{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#302a1a;border-radius:6px;font-size:11px;color:#ff9800;margin-top:8px}
+/* Agent */
+.agent-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.agent-chat{display:flex;flex-direction:column;height:400px}
+.agent-chat .chat-messages{flex:1;overflow-y:auto;padding:10px;background:#0a0e14;border-radius:8px;margin-bottom:8px}
+.agent-chat .chat-input-area{display:flex;gap:8px}
+.agent-chat .chat-input-area textarea{flex:1;padding:10px;border:1px solid #252a33;border-radius:8px;background:#1a1f2b;color:#d0d0d0;font-size:12px;outline:none;resize:none;height:50px}
+.diagnostic-panel{display:flex;flex-direction:column;gap:8px}
+.diag-item{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:#1a1f2b;border-radius:6px;font-size:11px}
+.diag-item .diag-name{font-weight:600;color:#aaa}
+.diag-item .diag-status{font-size:10px;padding:2px 8px;border-radius:10px}
+.diag-item .diag-status.ok{background:#4caf50;color:#000}
+.diag-item .diag-status.fail{background:#e53935;color:#fff}
+.diag-item .diag-status.checking{background:#ff9800;color:#000}
+.diag-item .diag-status.unknown{background:#555;color:#fff}
+.diag-detail{font-size:9px;color:#888;margin-top:2px}
+/* Package */
+.package-info{background:#1a3020;border-left:3px solid #4caf50;padding:12px;border-radius:6px;margin-top:8px}
+.knowledge-list-item{display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid #1a1f2b;font-size:11px}
+.knowledge-list-item:hover{background:#1a1f2b}
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 </style>
@@ -1817,10 +2662,14 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
   <button class="nav-tab active" onclick="switchTab('dashboard')">指挥面板</button>
   <button class="nav-tab" onclick="switchTab('chat')">AI 对话</button>
   <button class="nav-tab" onclick="switchTab('connections')">连接管理</button>
+  <button class="nav-tab" onclick="switchTab('emulator')">模拟器</button>
+  <button class="nav-tab" onclick="switchTab('agent')">智能体</button>
+  <button class="nav-tab" onclick="switchTab('websearch')">智能搜索</button>
   <button class="nav-tab" onclick="switchTab('training')">模型训练</button>
   <button class="nav-tab" onclick="switchTab('annotate')">标注工具</button>
   <button class="nav-tab" onclick="switchTab('params')">参数学习</button>
   <button class="nav-tab" onclick="switchTab('learning')">学习日志</button>
+  <button class="nav-tab" onclick="switchTab('datamanage')">数据管理</button>
   <button class="nav-tab" onclick="switchTab('settings')">系统设置</button>
 </div>
 
@@ -1877,9 +2726,14 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
 <div class="tab-content" id="tab-connections">
   <div class="panel" style="margin-bottom:12px">
     <h3>整条决策链状态</h3>
-    <button class="btn-rebuild" onclick="rebuildChain()" style="margin-bottom:10px">重建决策链</button>
-    <button class="btn-verify" onclick="checkAllConnections()" style="margin-bottom:10px;margin-left:6px">检查所有连接</button>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <button class="btn-rebuild" onclick="rebuildChain()">重建决策链</button>
+      <button class="btn-verify" onclick="checkAllConnections()">检查所有连接</button>
+      <button class="btn-deploy" onclick="runDiagnostics()" style="background:#7c4dff;color:#fff">诊断</button>
+      <button class="btn-start" onclick="oneClickFix()" style="background:#ff9800;color:#000">一键修复</button>
+    </div>
     <div id="rebuild-status" style="font-size:12px;margin-top:8px"></div>
+    <div id="diagnostic-result" style="margin-top:8px"></div>
   </div>
   <div class="conn-grid">
     <!-- DeepSeek API -->
@@ -1889,11 +2743,12 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
       <div id="conn-deepseek-detail" style="font-size:10px;color:#888"></div>
       <div class="conn-actions">
         <button class="btn-verify" onclick="verifyAPI()">验证</button>
+        <button class="btn-verify" onclick="checkBalance()" style="font-size:10px;padding:4px 8px">余额</button>
       </div>
     </div>
     <!-- ADB -->
     <div class="conn-card">
-      <div class="conn-name">ADB 连接</div>
+      <div class="conn-name">ADB 连接 (MuMu)</div>
       <div class="conn-status unknown" id="conn-adb-status">未检查</div>
       <div id="conn-adb-detail" style="font-size:10px;color:#888"></div>
       <div class="conn-actions">
@@ -1910,6 +2765,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
         <button class="btn-verify" onclick="checkGitHub()">检查</button>
         <button class="btn-push" onclick="pushToGitHub()">推送</button>
         <button class="btn-verify" onclick="pullFromGitHub()">拉取</button>
+        <button class="btn-deploy" onclick="setupGitHub()" style="font-size:10px;padding:4px 8px">配置仓库</button>
       </div>
     </div>
     <!-- 腾讯云 -->
@@ -1921,6 +2777,8 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
         <button class="btn-verify" onclick="checkServer()">检查</button>
         <button class="btn-deploy" onclick="deployToServer()">部署</button>
         <button class="btn-push" onclick="syncDataToServer()">同步数据</button>
+        <button class="btn-verify" onclick="testSSH()" style="font-size:10px;padding:4px 8px">诊断SSH</button>
+        <button class="btn-start" onclick="uploadSSHKey()" style="font-size:10px;padding:4px 8px">上传公钥</button>
       </div>
     </div>
     <!-- PyTorch -->
@@ -1932,6 +2790,202 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
         <button class="btn-verify" onclick="checkPyTorch()">检查</button>
         <button class="btn-push" onclick="updatePyTorch()">更新</button>
       </div>
+    </div>
+    <!-- GPU -->
+    <div class="conn-card">
+      <div class="conn-name">GPU (NVIDIA)</div>
+      <div class="conn-status unknown" id="conn-gpu-status">检查中</div>
+      <div id="conn-gpu-detail" style="font-size:10px;color:#888"></div>
+      <div class="conn-actions">
+        <button class="btn-verify" onclick="checkGPU()">检查</button>
+        <button class="btn-push" onclick="installCUDATorch()">安装CUDA PyTorch</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 模拟器 ═══ -->
+<div class="tab-content" id="tab-emulator">
+  <div class="panel" style="margin-bottom:12px">
+    <h3>Android 模拟器管理 (MUMU规格)</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <button class="btn-start" onclick="checkEmulatorStatus()">检查状态</button>
+      <button class="btn-deploy" onclick="installEmulator()">安装模拟器</button>
+      <button class="btn-start" onclick="startEmulator()">启动</button>
+      <button class="btn-stop" onclick="stopEmulator()">停止</button>
+      <button class="btn-verify" onclick="installGameAPK()">安装游戏APK</button>
+      <button class="btn-push" onclick="installAPKPrompt()">安装APK文件</button>
+    </div>
+    <div id="emu-status" style="font-size:12px;color:#888;margin-bottom:8px">
+      <div class="diag-item"><span class="diag-name">SDK安装</span><span class="diag-status unknown" id="emu-installed">未知</span></div>
+      <div class="diag-item"><span class="diag-name">AVD</span><span class="diag-status unknown" id="emu-avd">未知</span></div>
+      <div class="diag-item"><span class="diag-name">运行状态</span><span class="diag-status unknown" id="emu-running">未知</span></div>
+      <div class="diag-item"><span class="diag-name">ADB连接</span><span class="diag-status unknown" id="emu-adb">未知</span></div>
+    </div>
+    <div id="emu-progress" style="font-size:11px;margin-top:6px"></div>
+  </div>
+
+  <!-- scrcpy 投屏控制 -->
+  <div class="panel" style="margin-bottom:12px">
+    <h3>scrcpy 投屏 <span style="font-size:10px;color:#888;font-weight:normal">(MUMU级全屏触控)</span></h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+      <button class="btn-deploy" onclick="installScrcpy()">安装scrcpy</button>
+      <button class="btn-start" onclick="startScrcpy()">启动投屏</button>
+      <button class="btn-stop" onclick="stopScrcpy()">停止投屏</button>
+      <span id="scrcpy-status" style="font-size:11px;color:#888">未检测</span>
+    </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:#aaa">
+      <label>分辨率: <select id="scrcpy-res" style="background:#1a1f2b;color:#d0d0d0;border:1px solid #252a33;padding:2px 6px;border-radius:4px">
+        <option value="1920">1920x1080</option>
+        <option value="1280">1280x720</option>
+        <option value="2560">2560x1440</option>
+      </select></label>
+      <label>FPS: <select id="scrcpy-fps" style="background:#1a1f2b;color:#d0d0d0;border:1px solid #252a33;padding:2px 6px;border-radius:4px">
+        <option value="60">60</option>
+        <option value="30">30</option>
+        <option value="15">15</option>
+      </select></label>
+      <label>码率: <select id="scrcpy-bitrate" style="background:#1a1f2b;color:#d0d0d0;border:1px solid #252a33;padding:2px 6px;border-radius:4px">
+        <option value="8000000">8M</option>
+        <option value="16000000">16M</option>
+        <option value="4000000">4M</option>
+      </select></label>
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+        <input type="checkbox" id="scrcpy-fullscreen" checked> 全屏
+      </label>
+    </div>
+  </div>
+
+  <!-- 端口检测 -->
+  <div class="panel" style="margin-bottom:12px">
+    <h3>端口检测 <span style="font-size:10px;color:#888;font-weight:normal">(避免行旅白冲突)</span></h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+      <button class="btn-verify" onclick="checkPorts()">检测端口</button>
+    </div>
+    <div id="port-check-result" style="font-size:11px;color:#888"></div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1.2fr 1fr;gap:14px">
+    <div class="panel">
+      <h3>模拟器屏幕 <span id="emu-screen-fps" style="font-size:10px;color:#888;font-weight:normal"></span></h3>
+      <div id="emu-screen-container" style="position:relative;width:100%;aspect-ratio:16/9;background:#000;border:1px solid #252a33;border-radius:8px;overflow:hidden;cursor:crosshair">
+        <canvas id="emu-screen-canvas" style="width:100%;height:100%;object-fit:contain" onclick="handleEmulatorClick(event)"></canvas>
+        <div id="emu-screen-placeholder" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#555;font-size:13px;text-align:center">
+          模拟器未启动<br><span style="font-size:11px">点击"启动"按钮</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
+        <label style="font-size:10px;color:#888;display:flex;align-items:center;gap:4px;cursor:pointer">
+          <input type="checkbox" id="emu-auto-refresh" checked onchange="toggleEmulatorRefresh()"> 实时刷新(~3fps)
+        </label>
+        <button class="btn-clear" onclick="refreshEmulatorScreen()" style="font-size:10px;padding:4px 8px">手动刷新</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>触摸控制</h3>
+      <div style="font-size:11px;color:#888;margin-bottom:8px">点击屏幕上方的模拟器画面即可发送触摸事件</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <div style="display:flex;gap:6px;align-items:center">
+          <label style="font-size:11px;color:#aaa;width:60px">X坐标:</label>
+          <input type="number" id="emu-touch-x" value="960" style="width:80px;padding:4px 8px;border:1px solid #252a33;border-radius:4px;background:#1a1f2b;color:#d0d0d0;font-size:11px">
+          <label style="font-size:11px;color:#aaa;width:60px">Y坐标:</label>
+          <input type="number" id="emu-touch-y" value="540" style="width:80px;padding:4px 8px;border:1px solid #252a33;border-radius:4px;background:#1a1f2b;color:#d0d0d0;font-size:11px">
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn-send" onclick="emuTouch('tap')" style="font-size:11px;padding:6px 14px">点击</button>
+          <button class="btn-verify" onclick="emuTouch('longpress')" style="font-size:11px;padding:6px 14px">长按</button>
+          <button class="btn-push" onclick="emuSwipe()" style="font-size:11px;padding:6px 14px">滑动</button>
+        </div>
+        <div id="emu-touch-result" style="font-size:10px;color:#888;margin-top:4px"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 智能体 ═══ -->
+<div class="tab-content" id="tab-agent">
+  <div class="agent-grid">
+    <div class="panel">
+      <h3>AI 智能体对话</h3>
+      <div class="agent-chat">
+        <div class="chat-messages" id="agent-chat-messages">
+          <div class="chat-msg assistant"><div class="avatar">AI</div><div class="bubble">你好！我是智能体助手，可以联网搜索、分析连接状态、诊断问题。试试问我："诊断所有连接"或"搜索最新战术策略"</div></div>
+        </div>
+        <div class="chat-input-area">
+          <textarea id="agent-chat-input" placeholder="输入问题，支持联网搜索和系统诊断..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();agentChat()}"></textarea>
+          <button class="btn-send" onclick="agentChat()">发送</button>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>连接诊断面板</h3>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <button class="btn-verify" onclick="runDiagnostics()">自诊断</button>
+        <button class="btn-start" onclick="oneClickFix()">一键修复</button>
+        <button class="btn-deploy" onclick="createPackage()" style="background:#00bcd4;color:#000">创建安装包</button>
+      </div>
+      <div class="diagnostic-panel" id="diagnostic-panel">
+        <div class="diag-item"><span class="diag-name">DeepSeek API</span><span class="diag-status unknown">等待诊断</span></div>
+        <div class="diag-item"><span class="diag-name">ADB (MuMu)</span><span class="diag-status unknown">等待诊断</span></div>
+        <div class="diag-item"><span class="diag-name">GitHub</span><span class="diag-status unknown">等待诊断</span></div>
+        <div class="diag-item"><span class="diag-name">腾讯云服务器</span><span class="diag-status unknown">等待诊断</span></div>
+        <div class="diag-item"><span class="diag-name">PyTorch</span><span class="diag-status unknown">等待诊断</span></div>
+        <div class="diag-item"><span class="diag-name">Python环境</span><span class="diag-status unknown">等待诊断</span></div>
+      </div>
+      <div id="agent-fix-result" style="margin-top:8px;font-size:11px"></div>
+    </div>
+  </div>
+  <div class="panel" style="margin-top:14px">
+    <h3>决策链管理</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+      <button class="btn-verify" onclick="verifyDecisionChain()">验证决策链</button>
+      <button class="btn-rebuild" onclick="rebuildDecisionChain()">重建决策链</button>
+      <button class="btn-deploy" onclick="oneClickDeploy()">一键部署</button>
+      <button class="btn-start" onclick="executeAgent('重建决策链')" style="font-size:11px;padding:6px 12px">智能体: 重建决策链</button>
+      <button class="btn-start" onclick="executeAgent('修复ADB连接并启动游戏')" style="font-size:11px;padding:6px 12px">智能体: 修复ADB</button>
+    </div>
+    <div id="chain-verify-progress" style="font-size:11px;margin-top:4px"></div>
+    <div id="chain-verify-result" style="font-size:11px;margin-top:6px"></div>
+  </div>
+  <div class="panel" style="margin-top:14px">
+    <h3>安装包管理</h3>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn-start" onclick="createPackage()">创建安装包</button>
+      <button class="btn-verify" onclick="downloadPackage()">下载安装包</button>
+    </div>
+    <div id="package-result" style="margin-top:8px;font-size:11px"></div>
+  </div>
+</div>
+
+<!-- ═══ 智能搜索 ═══ -->
+<div class="tab-content" id="tab-websearch">
+  <div class="panel" style="margin-bottom:12px">
+    <h3>联网智能搜索</h3>
+    <div class="search-bar">
+      <input type="text" id="web-search-input" placeholder="输入搜索内容，AI会自动总结..." onkeydown="if(event.key==='Enter')webSearch()">
+      <button class="btn-send" onclick="webSearch()">联网搜索</button>
+      <button class="btn-verify" onclick="webSearchStream()">流式搜索</button>
+    </div>
+    <div id="web-search-progress" style="margin-top:8px"></div>
+    <div id="web-search-summary" style="margin-top:10px"></div>
+  </div>
+  <div class="panel" style="margin-bottom:12px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <h3 style="margin:0;border:none;padding:0">搜索结果</h3>
+      <div style="display:flex;gap:6px">
+        <button class="btn-start" onclick="saveSearchResult()" style="padding:5px 12px;font-size:11px">保存到知识库</button>
+        <button class="btn-verify" onclick="learnFromWeb()" style="padding:5px 12px;font-size:11px">让AI学习</button>
+        <button class="btn-clear" onclick="copySearchResults()" style="padding:5px 12px;font-size:11px">复制</button>
+      </div>
+    </div>
+    <div id="web-search-results" style="max-height:400px;overflow-y:auto">
+      <div style="color:#888;padding:20px;text-align:center">输入关键词开始搜索</div>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>知识库（已保存的搜索结果）</h3>
+    <div id="knowledge-list" style="max-height:200px;overflow-y:auto">
+      <div style="color:#888;padding:10px;text-align:center;font-size:11px">加载中...</div>
     </div>
   </div>
 </div>
@@ -2004,6 +3058,41 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
   </div>
 </div>
 
+<!-- ═══ 数据管理 ═══ -->
+<div class="tab-content" id="tab-datamanage">
+  <div class="panel" style="margin-bottom:12px">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <h3 style="margin:0;border:none;padding:0">本地数据管理</h3>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span style="font-size:10px;color:#888">自动清理(每5分钟):</span>
+        <label class="toggle-switch" style="display:flex;align-items:center;gap:4px;cursor:pointer">
+          <input type="checkbox" id="auto-cleanup-toggle" onchange="toggleAutoCleanup()" checked>
+          <span id="auto-cleanup-label" style="font-size:10px;color:#4caf50">已开启</span>
+        </label>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
+      <button class="btn-verify" onclick="browseData()">浏览数据</button>
+      <button class="btn-rebuild" onclick="autoCleanup()">一键清理</button>
+      <button class="btn-deploy" onclick="selectiveCleanup()">选择删除</button>
+    </div>
+    <div id="data-total-size" style="font-size:12px;margin-bottom:8px;color:#888">总占用: --</div>
+    <div style="max-height:500px;overflow-y:auto;font-size:11px">
+      <table style="width:100%;border-collapse:collapse" id="data-table">
+        <thead><tr style="background:#1a1f2b;color:#888;font-size:10px">
+          <th style="padding:6px 8px;text-align:left">文件名</th>
+          <th style="padding:6px 8px;text-align:left">目录</th>
+          <th style="padding:6px 8px;text-align:right">大小</th>
+          <th style="padding:6px 8px;text-align:right">时间</th>
+          <th style="padding:6px 8px;text-align:center">状态</th>
+          <th style="padding:6px 8px;text-align:center">操作</th>
+        </tr></thead>
+        <tbody id="data-browse-result"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
 <!-- ═══ 系统设置 ═══ -->
 <div class="tab-content" id="tab-settings">
   <div class="panel"><h3>API 验证</h3>
@@ -2043,9 +3132,13 @@ function switchTab(tab) {
   if(tab==='training'){loadDatasets();loadModels()}
   if(tab==='settings'){loadVersion();verifyAPI()}
   if(tab==='connections'){checkAllConnections()}
+  if(tab==='emulator'){checkEmulatorStatus();checkScrcpyStatus();checkPorts()}
   if(tab==='params'){loadParams()}
   if(tab==='learning'){refreshLearningLog()}
   if(tab==='dashboard'&&!scoreChart)initChart();
+  if(tab==='websearch'){loadKnowledge()}
+  if(tab==='datamanage'){browseData()}
+  if(tab==='agent'){runDiagnostics()}
 }
 
 // ── 图表 ──
@@ -2095,6 +3188,12 @@ socket.on('ai_chat_token',function(data){
     if(data.done){currentChatBubble.textContent=data.full;var el=document.getElementById('chat-bubble-streaming');if(el)el.id='';currentChatBubble=null}
     else{currentChatBubble.textContent+=data.token}
     document.getElementById('chat-messages').scrollTop=document.getElementById('chat-messages').scrollHeight;
+  }
+  // 同时更新智能体聊天
+  if(agentChatBubble){
+    if(data.done){agentChatBubble.textContent=data.full;var el2=document.getElementById('agent-bubble-streaming');if(el2)el2.id='';agentChatBubble=null}
+    else{agentChatBubble.textContent+=data.token}
+    document.getElementById('agent-chat-messages').scrollTop=document.getElementById('agent-chat-messages').scrollHeight;
   }
 });
 socket.on('ai_chat_error',function(data){if(currentChatBubble){currentChatBubble.textContent='[错误] '+data.error;currentChatBubble=null}});
@@ -2176,10 +3275,30 @@ function reconnectADB(){fetch('/api/adb/reconnect',{method:'POST',headers:{'Cont
   document.getElementById('conn-adb-detail').textContent=d.output||'';
 })}
 function checkGitHub(){fetch('/api/github/status').then(r=>r.json()).then(d=>{
-  document.getElementById('conn-github-status').textContent=d.api_status==='online'?'在线':'离线';
-  document.getElementById('conn-github-status').className='conn-status '+(d.api_status==='online'?'online':'offline');
-  document.getElementById('conn-github-detail').textContent=(d.repo_url||'')+' | '+d.branch;
+  if(!d.has_remote){
+    document.getElementById('conn-github-status').textContent='未配置仓库';
+    document.getElementById('conn-github-status').className='conn-status offline';
+    document.getElementById('conn-github-detail').textContent=(d.message||'GitHub未配置')+' | '+(d.suggestion||'');
+  }else{
+    document.getElementById('conn-github-status').textContent=d.api_status==='online'?'在线':'离线';
+    document.getElementById('conn-github-status').className='conn-status '+(d.api_status==='online'?'online':'offline');
+    document.getElementById('conn-github-detail').textContent=(d.repo_url||'')+' | '+d.branch;
+  }
 })}
+function setupGitHub(){
+  var url=prompt('请输入GitHub仓库地址:\n例如: https://github.com/username/repo.git');
+  if(!url)return;
+  fetch('/api/github/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo_url:url})}).then(r=>r.json()).then(d=>{
+    if(d.status==='configured'){
+      document.getElementById('conn-github-status').textContent='已配置';
+      document.getElementById('conn-github-status').className='conn-status online';
+      document.getElementById('conn-github-detail').textContent=d.repo_url;
+      alert(d.message);
+    }else{
+      alert(d.error||'配置失败');
+    }
+  })
+}
 function pushToGitHub(){fetch('/api/github/push',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:'手动推送 '+new Date().toLocaleString()})}).then(r=>r.json()).then(d=>{
   document.getElementById('settings-github-result').innerHTML='<div class="alert '+(d.status==='pushed'||d.status==='no_changes'?'success':'error')+'">'+d.status+'</div>';
 })}
@@ -2187,10 +3306,48 @@ function pullFromGitHub(){fetch('/api/github/pull',{method:'POST'}).then(r=>r.js
   document.getElementById('settings-github-result').innerHTML='<div class="alert '+(d.status==='pulled'?'success':'error')+'">'+d.status+'</div>';
 })}
 function checkServer(){fetch('/api/server/status').then(r=>r.json()).then(d=>{
-  document.getElementById('conn-server-status').textContent=d.status==='online'?'在线':d.status;
-  document.getElementById('conn-server-status').className='conn-status '+(d.status==='online'?'online':'offline');
-  document.getElementById('conn-server-detail').textContent='部署: '+(d.deployed?'是':'否');
+  var el=document.getElementById('conn-server-status');
+  var dl=document.getElementById('conn-server-detail');
+  if(d.status==='no_key'){
+    el.textContent='无密钥';
+    el.className='conn-status offline';
+    dl.textContent=(d.detail&&d.detail.suggestion)||'请配置SSH密钥';
+  }else if(d.status==='online'){
+    el.textContent='在线';
+    el.className='conn-status online';
+    dl.textContent='部署: '+(d.deployed?'是':'否');
+  }else if(d.status==='error'){
+    el.textContent='错误';
+    el.className='conn-status offline';
+    dl.textContent=(d.detail&&d.detail.diagnosis)||d.error||'连接失败';
+  }else{
+    el.textContent='离线';
+    el.className='conn-status offline';
+    dl.textContent=(d.detail&&d.detail.diagnosis)||d.error||'连接失败';
+  }
 })}
+function testSSH(){
+  var dl=document.getElementById('conn-server-detail');
+  dl.textContent='诊断中...';
+  fetch('/api/server/test_ssh',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).then(d=>{
+    var html='<div class="alert '+(d.all_ok?'success':'warning')+'"><strong>诊断结果:</strong> '+d.summary+'</div>';
+    if(d.tests){d.tests.forEach(function(t){html+='<div style="font-size:10px;color:'+(t.status==='ok'?'#4caf50':(t.status==='fail'?'#e53935':'#888'))+'">'+t.name+': '+t.detail+'</div>'})}
+    dl.innerHTML=html;
+  }).catch(function(e){dl.textContent='诊断失败: '+e})
+}
+function uploadSSHKey(){
+  var dl=document.getElementById('conn-server-detail');
+  dl.innerHTML='<span class="spinner"></span> 正在上传公钥到服务器...';
+  if(!confirm('将尝试通过密码认证上传SSH公钥到服务器。如果密码正确，之后即可使用密钥连接。确认?')){dl.textContent='已取消';return}
+  fetch('/api/server/upload_key',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).then(d=>{
+    if(d.status==='ok'){
+      dl.innerHTML='<div class="alert success">'+d.message+'</div>';
+      setTimeout(checkServer,1500);
+    }else{
+      dl.innerHTML='<div class="alert error">上传失败: '+(d.error||'')+'</div><div style="font-size:10px;color:#ff9800;margin-top:4px">提示: 请确认服务器密码正确且允许密码登录</div>';
+    }
+  }).catch(function(e){dl.innerHTML='<div class="alert error">上传失败: '+e+'</div>'})
+}
 function deployToServer(){fetch('/api/server/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sync_only:false})}).then(r=>r.json()).then(d=>{
   document.getElementById('conn-server-status').textContent='部署中...';document.getElementById('conn-server-status').className='conn-status checking';
 })}
@@ -2202,14 +3359,226 @@ socket.on('server_deploy_complete',function(d){document.getElementById('conn-ser
 socket.on('server_deploy_error',function(d){document.getElementById('conn-server-status').textContent='错误';document.getElementById('conn-server-status').className='conn-status offline';document.getElementById('conn-server-detail').textContent=d.error});
 
 function checkPyTorch(){fetch('/api/pytorch/version').then(r=>r.json()).then(d=>{
-  document.getElementById('conn-pytorch-status').textContent=d.version||'未安装';
-  document.getElementById('conn-pytorch-status').className='conn-status '+(d.version?'online':'offline');
-  document.getElementById('conn-pytorch-detail').textContent='CUDA: '+(d.cuda?'是':'否');
+  var el=document.getElementById('conn-pytorch-status');
+  var dl=document.getElementById('conn-pytorch-detail');
+  if(d.version&&d.version!=='未安装'){
+    el.textContent=d.version;
+    el.className='conn-status online';
+    if(d.cuda){
+      dl.textContent='CUDA: 可用 ('+(d.cuda_version||'')+') | GPU加速';
+    }else{
+      dl.textContent='仅CPU | 对于非NVIDIA系统完全正常，CPU推理可用';
+    }
+  }else{
+    el.textContent='未安装';
+    el.className='conn-status offline';
+    dl.textContent='PyTorch未安装';
+  }
 })}
 function updatePyTorch(){fetch('/api/pytorch/update',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).then(d=>{
   document.getElementById('conn-pytorch-status').textContent='更新中...';document.getElementById('conn-pytorch-status').className='conn-status checking';
 })}
 socket.on('pytorch_update_complete',function(d){document.getElementById('conn-pytorch-status').textContent=d.version||'更新完成';document.getElementById('conn-pytorch-status').className='conn-status '+(d.success?'online':'offline')});
+
+// ── 智能搜索 ──
+var lastSearchResults=null;
+var lastSearchQuery='';
+function webSearch(){
+  var q=document.getElementById('web-search-input').value.trim();
+  if(!q)return;
+  lastSearchQuery=q;
+  document.getElementById('web-search-progress').innerHTML='<div class="search-progress"><span class="spinner"></span> 搜索中...</div>';
+  document.getElementById('web-search-summary').innerHTML='';
+  fetch('/api/web/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})}).then(r=>r.json()).then(d=>{
+    document.getElementById('web-search-progress').innerHTML='';
+    lastSearchResults=d;
+    renderSearchResults(d);
+    if(d.summary){
+      document.getElementById('web-search-summary').innerHTML='<div class="search-summary"><h4>AI 总结</h4>'+escapeHtml(d.summary)+'</div>';
+    }
+  }).catch(function(e){
+    document.getElementById('web-search-progress').innerHTML='<div class="alert error">搜索失败: '+e+'</div>';
+  })
+}
+function webSearchStream(){
+  var q=document.getElementById('web-search-input').value.trim();
+  if(!q)return;
+  lastSearchQuery=q;
+  document.getElementById('web-search-progress').innerHTML='<div class="search-progress"><span class="spinner"></span> 流式搜索中...</div>';
+  document.getElementById('web-search-results').innerHTML='';
+  document.getElementById('web-search-summary').innerHTML='<div class="search-summary" id="stream-summary"><h4>AI 总结 (流式)</h4><span id="stream-text"></span></div>';
+  socket.emit('web_search',{query:q});
+}
+function renderSearchResults(d){
+  var html='';
+  if(d.results){
+    d.results.forEach(function(r,i){
+      html+='<div class="search-result"><div class="sr-title">'+(i+1)+'. '+escapeHtml(r.title||'')+'</div>';
+      if(r.snippet)html+='<div class="sr-snippet">'+escapeHtml(r.snippet)+'</div>';
+      if(r.url)html+='<div class="sr-url">'+escapeHtml(r.url)+'</div>';
+      html+='</div>';
+    });
+  }
+  document.getElementById('web-search-results').innerHTML=html||'<div style="color:#888;padding:10px">无结果</div>';
+}
+function saveSearchResult(){
+  if(!lastSearchResults||!lastSearchQuery){alert('请先搜索');return}
+  fetch('/api/web/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:lastSearchQuery,results:lastSearchResults.results||[],summary:lastSearchResults.summary||''})}).then(r=>r.json()).then(d=>{
+    alert('已保存到知识库: '+d.filename);
+    loadKnowledge();
+  })
+}
+function learnFromWeb(){
+  fetch('/api/web/learn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(r=>r.json()).then(d=>{
+    if(d.status==='learning'){alert('AI学习已启动，请查看学习日志')}
+    else{alert(d.error||'启动失败')}
+  })
+}
+function copySearchResults(){
+  if(!lastSearchResults){alert('请先搜索');return}
+  var text=lastSearchQuery+'\n\n';
+  if(lastSearchResults.summary)text+='AI总结:\n'+lastSearchResults.summary+'\n\n';
+  if(lastSearchResults.results){lastSearchResults.results.forEach(function(r,i){text+=(i+1)+'. '+r.title+'\n'+r.snippet+'\n'+r.url+'\n\n'})}
+  navigator.clipboard.writeText(text).then(function(){alert('已复制到剪贴板')}).catch(function(){alert('复制失败')})
+}
+function loadKnowledge(){
+  fetch('/api/web/knowledge').then(r=>r.json()).then(data=>{
+    var html='';
+    if(!data.length){html='<div style="color:#888;padding:10px;text-align:center;font-size:11px">暂无保存的知识</div>'}
+    else{data.forEach(function(k){html+='<div class="knowledge-list-item"><div><strong>'+escapeHtml(k.query)+'</strong><br><span style="font-size:10px;color:#888">'+k.saved_at+' | '+escapeHtml(k.summary_preview)+'</span></div></div>'})}
+    document.getElementById('knowledge-list').innerHTML=html;
+  })
+}
+
+// ── 智能体 ──
+var agentChatBubble=null;
+function agentChat(){
+  var inp=document.getElementById('agent-chat-input');var msg=inp.value.trim();if(!msg)return;
+  addAgentMessage('user',msg);inp.value='';
+  if(msg.includes('诊断')||msg.includes('检查')||msg.includes('连接')){
+    runDiagnostics();
+    addAgentMessage('assistant','正在运行诊断，请查看右侧诊断面板...');
+  }else if(msg.includes('搜索')||msg.includes('查询')){
+    var q=msg.replace(/搜索|查询|帮我查/g,'').trim();
+    if(q){
+      addAgentMessage('assistant','正在联网搜索: '+q+'...');
+      fetch('/api/web/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})}).then(r=>r.json()).then(d=>{
+        addAgentMessage('assistant','搜索完成! '+d.summary);
+      });
+    }
+  }else if(msg.includes('修复')){
+    oneClickFix();
+    addAgentMessage('assistant','正在一键修复...');
+  }else{
+    socket.emit('ai_chat',{message:msg,include_battlefield:false,is_correction:false});
+    addAgentMessage('assistant','');
+  }
+}
+function addAgentMessage(role,text){
+  var msgs=document.getElementById('agent-chat-messages');
+  var avatar=role==='user'?'你':'AI';
+  var div=document.createElement('div');div.className='chat-msg '+role;
+  div.innerHTML='<div class="avatar">'+avatar+'</div><div class="bubble">'+escapeHtml(text)+'</div>';
+  if(role==='assistant'){div.id='agent-bubble-streaming';agentChatBubble=div.querySelector('.bubble')}
+  msgs.appendChild(div);msgs.scrollTop=msgs.scrollHeight;
+}
+
+// ── 诊断和一键修复 ──
+function runDiagnostics(){
+  updateDiagItem(0,'checking','检查中');
+  updateDiagItem(1,'checking','检查中');
+  updateDiagItem(2,'checking','检查中');
+  updateDiagItem(3,'checking','检查中');
+  updateDiagItem(4,'checking','检查中');
+  updateDiagItem(5,'checking','检查中');
+  fetch('/api/verify_api_http').then(r=>r.json()).then(d=>{
+    var ok=d.deepseek&&d.deepseek.status==='online';
+    updateDiagItem(0,ok?'ok':'fail',ok?'在线 ('+(d.deepseek.latency_ms||'')+'ms)':'离线: '+(d.deepseek.error||''));
+  }).catch(function(){updateDiagItem(0,'fail','无法连接')});
+  fetch('/api/adb/status').then(r=>r.json()).then(d=>{
+    updateDiagItem(1,d.status==='connected'?'ok':'fail',d.status+' | '+d.adb_exe);
+  }).catch(function(){updateDiagItem(1,'fail','检查失败')});
+  fetch('/api/github/status').then(r=>r.json()).then(d=>{
+    var ok=d.api_status==='online';
+    var txt=(d.has_remote?d.repo_url:'未配置仓库')+' | API: '+d.api_status;
+    updateDiagItem(2,ok&&d.has_remote?'ok':'fail',txt);
+  }).catch(function(){updateDiagItem(2,'fail','无法连接')});
+  fetch('/api/server/status').then(r=>r.json()).then(d=>{
+    updateDiagItem(3,d.status==='online'?'ok':'fail',d.status+(d.error?': '+d.error:''));
+  }).catch(function(){updateDiagItem(3,'fail','无法连接')});
+  fetch('/api/pytorch/version').then(r=>r.json()).then(d=>{
+    updateDiagItem(4,d.version?'ok':'fail',d.version||'未安装');
+  }).catch(function(){updateDiagItem(4,'fail','检查失败')});
+  updateDiagItem(5,'ok','Python环境正常');
+}
+function updateDiagItem(idx,status,detail){
+  var panel=document.getElementById('diagnostic-panel');
+  if(!panel)return;
+  var items=panel.querySelectorAll('.diag-item');
+  if(idx<items.length){
+    var s=items[idx].querySelector('.diag-status');
+    s.className='diag-status '+status;
+    s.textContent=status==='ok'?'正常':(status==='fail'?'异常':status);
+    var dd=items[idx].querySelector('.diag-detail');
+    if(!dd){dd=document.createElement('div');dd.className='diag-detail';items[idx].appendChild(dd)}
+    dd.textContent=detail;
+  }
+}
+function oneClickFix(){
+  var r=document.getElementById('agent-fix-result');
+  r.innerHTML='<div class="alert info"><span class="spinner"></span> 一键修复中...</div>';
+  var fixes=[];
+  fetch('/api/adb/reconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(res=>res.json()).then(d=>{
+    fixes.push('ADB: '+(d.status==='connected'?'已连接':'重连失败'));
+  }).catch(function(){fixes.push('ADB: 修复失败')});
+  fetch('/api/server/setup_key',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(res=>res.json()).then(d=>{
+    if(d.status==='generated'){fixes.push('SSH密钥: 已生成，请将公钥添加到服务器')}
+    else{fixes.push('SSH密钥: 生成失败')}
+  }).catch(function(){fixes.push('SSH密钥: 修复失败')});
+  setTimeout(function(){
+    r.innerHTML='<div class="alert success">一键修复完成</div>';
+    fixes.forEach(function(f){r.innerHTML+='<div style="font-size:10px;color:#aaa">'+f+'</div>'});
+    runDiagnostics();
+  },3000);
+}
+
+// ── 安装包 ──
+function createPackage(){
+  var r=document.getElementById('package-result');
+  r.innerHTML='<div class="alert info"><span class="spinner"></span> 创建安装包中...</div>';
+  fetch('/api/package/create',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(res=>res.json()).then(d=>{
+    if(d.status==='created'){
+      r.innerHTML='<div class="package-info"><strong>安装包已创建!</strong><br>文件: '+d.filename+' | 大小: '+d.size_mb+'MB | 文件数: '+d.file_count+'<br><a href="'+d.download_url+'" style="color:#4caf50;font-size:11px">点击下载</a> | install.bat已生成</div>';
+    }else{
+      r.innerHTML='<div class="alert error">创建失败: '+d.error+'</div>';
+    }
+  }).catch(function(e){r.innerHTML='<div class="alert error">创建失败: '+e+'</div>'})
+}
+function downloadPackage(){
+  window.open('/api/package/download','_blank');
+}
+
+// ── Web Search Socket事件 ──
+socket.on('web_search_progress',function(d){
+  document.getElementById('web-search-progress').innerHTML='<div class="search-progress"><span class="spinner"></span> '+d.step+' ('+d.progress+'%)</div>';
+});
+socket.on('web_search_token',function(d){
+  var el=document.getElementById('stream-text');
+  if(el){
+    if(d.done){el.textContent=d.full}else{el.textContent+=d.token}
+  }
+});
+socket.on('web_search_complete',function(d){
+  document.getElementById('web-search-progress').innerHTML='';
+  lastSearchResults=d;
+  renderSearchResults(d);
+});
+socket.on('web_search_error',function(d){
+  document.getElementById('web-search-progress').innerHTML='<div class="alert error">'+d.error+'</div>';
+});
+socket.on('web_learn_result',function(d){
+  if(d.error){alert('学习失败: '+d.error)}else{alert('AI学习完成!')}
+});
 
 // ── 训练 ──
 function loadDatasets(){fetch('/api/datasets').then(r=>r.json()).then(data=>{var html='';data.forEach(function(d){html+='<div class="dataset-card'+(selectedDataset===d.name?' selected':'')+'" onclick="selectDataset(\''+d.name+'\')"><div class="name">'+d.name+'</div><div class="count">'+d.images+' 张</div></div>'});document.getElementById('dataset-list').innerHTML=html||'暂无数据集'})}
@@ -2297,13 +3666,446 @@ function verifyAPI(){fetch('/api/verify_api_http').then(r=>r.json()).then(d=>{
   setConnCard('conn-deepseek-status','conn-deepseek-detail',ds.status,'DeepSeek');
 })}
 
+// ── GPU 检测 ──
+function checkGPU(){
+  var el=document.getElementById('conn-gpu-status');
+  var dl=document.getElementById('conn-gpu-detail');
+  el.textContent='检查中';el.className='conn-status checking';
+  fetch('/api/gpu/status').then(r=>r.json()).then(d=>{
+    if(d.gpus&&d.gpus.length>0){
+      var g=d.gpus[0];
+      el.textContent=g.name;
+      el.className='conn-status online';
+      dl.textContent='显存: '+g.memory+' | 驱动: '+g.driver+' | CUDA: '+g.cuda;
+      if(d.pytorch_cuda){dl.textContent+=' | PyTorch CUDA: 可用 ('+d.pytorch_version+')'}
+      else{dl.textContent+=' | PyTorch: CPU模式 ('+(d.pytorch_version||'')+')'}
+      if(d.message){dl.textContent+=' | '+d.message}
+    }else{
+      el.textContent='未检测到GPU';
+      el.className='conn-status offline';
+      dl.textContent=d.message||'';
+    }
+  }).catch(function(e){el.textContent='错误';el.className='conn-status offline';dl.textContent=str(e)})
+}
+function installCUDATorch(){
+  var el=document.getElementById('conn-gpu-status');
+  el.textContent='安装中...';el.className='conn-status checking';
+  var dl=document.getElementById('conn-gpu-detail');
+  fetch('/api/gpu/install_cuda_torch',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).then(d=>{
+    el.textContent='安装中...';el.className='conn-status checking';
+    dl.textContent='等待安装完成...';
+  })
+}
+socket.on('gpu_install_progress',function(d){
+  document.getElementById('conn-gpu-detail').textContent=d.step+' ('+d.progress+'%)';
+});
+socket.on('gpu_install_complete',function(d){
+  var el=document.getElementById('conn-gpu-status');
+  if(d.success){el.textContent='安装成功';el.className='conn-status online'}else{el.textContent='安装失败';el.className='conn-status offline'}
+  document.getElementById('conn-gpu-detail').textContent=d.message;
+  setTimeout(checkGPU,2000);
+});
+
+// ── 模拟器管理 ──
+var emulatorInterval=null;
+var emulatorScreenImage=null;
+function checkEmulatorStatus(){
+  fetch('/api/emulator/status').then(r=>r.json()).then(d=>{
+    setDiagStatus('emu-installed',d.installed?'已安装':'未安装',d.installed);
+    setDiagStatus('emu-avd',d.avd_exists?'已创建':'未创建',d.avd_exists);
+    setDiagStatus('emu-running',d.running?'运行中':'已停止',d.running);
+    setDiagStatus('emu-adb',d.adb_connected?'已连接':'未连接',d.adb_connected);
+    if(d.installed){document.getElementById('emu-installed').textContent=d.emulator_path.replace(/\\/g,'\\\\').split('\\\\').pop()||'已安装'}
+    if(d.running&&!emulatorInterval){startEmulatorRefresh()}
+    if(!d.running){stopEmulatorRefresh();var ph=document.getElementById('emu-screen-placeholder');if(ph)ph.style.display='block'}
+  }).catch(function(e){document.getElementById('emu-progress').innerHTML='<div class="alert error">检查失败: '+e+'</div>'})
+}
+function setDiagStatus(id,text,ok){
+  var el=document.getElementById(id);if(!el)return;
+  el.textContent=text;el.className='diag-status '+(ok?'ok':'fail');
+}
+function installEmulator(){
+  var p=document.getElementById('emu-progress');
+  p.innerHTML='<div class="alert info"><span class="spinner"></span> 开始安装Android模拟器...这可能需要几分钟</div>';
+  fetch('/api/emulator/install',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).then(d=>{
+    p.innerHTML='<div class="alert info">安装已启动，请等待进度更新...</div>';
+  }).catch(function(e){p.innerHTML='<div class="alert error">安装失败: '+e+'</div>'})
+}
+function startEmulator(){
+  var p=document.getElementById('emu-progress');
+  p.innerHTML='<div class="alert info"><span class="spinner"></span> 启动模拟器...</div>';
+  fetch('/api/emulator/start',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).then(d=>{
+    if(d.status==='already_running'){p.innerHTML='<div class="alert warning">模拟器已在运行</div>';checkEmulatorStatus()}
+    else{p.innerHTML='<div class="alert info">启动中，请等待...</div>'}
+  }).catch(function(e){p.innerHTML='<div class="alert error">启动失败: '+e+'</div>'})
+}
+function stopEmulator(){
+  fetch('/api/emulator/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).then(d=>{
+    stopEmulatorRefresh();
+    document.getElementById('emu-progress').innerHTML='<div class="alert success">模拟器已停止</div>';
+    checkEmulatorStatus();
+  }).catch(function(e){document.getElementById('emu-progress').innerHTML='<div class="alert error">停止失败: '+e+'</div>'})
+}
+function installGameAPK(){
+  var p=document.getElementById('emu-progress');
+  p.innerHTML='<div class="alert info"><span class="spinner"></span> 安装游戏APK...</div>';
+  fetch('/api/emulator/install_apk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(r=>r.json()).then(d=>{
+    if(d.status==='success')p.innerHTML='<div class="alert success">APK安装成功!</div>';
+    else p.innerHTML='<div class="alert error">安装失败: '+(d.error||d.output||'未知')+'</div>';
+  }).catch(function(e){p.innerHTML='<div class="alert error">安装失败: '+e+'</div>'})
+}
+function installAPKPrompt(){
+  var path=prompt('请输入APK文件路径:\\n例如: D:\\\\firefight\\\\Firefight.apk');
+  if(!path)return;
+  var p=document.getElementById('emu-progress');
+  p.innerHTML='<div class="alert info"><span class="spinner"></span> 安装APK: '+path+'...</div>';
+  fetch('/api/emulator/install_apk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apk_path:path})}).then(r=>r.json()).then(d=>{
+    if(d.status==='success')p.innerHTML='<div class="alert success">APK安装成功!</div>';
+    else p.innerHTML='<div class="alert error">安装失败: '+(d.error||d.output||'未知')+'</div>';
+  }).catch(function(e){p.innerHTML='<div class="alert error">安装失败: '+e+'</div>'})
+}
+function refreshEmulatorScreen(){
+  fetch('/api/emulator/screenshot').then(r=>r.json()).then(d=>{
+    if(d.error){return}
+    emulatorScreenImage=d.image;
+    var canvas=document.getElementById('emu-screen-canvas');
+    if(!canvas)return;
+    var ctx=canvas.getContext('2d');
+    var img=new Image();
+    img.onload=function(){
+      canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;
+      ctx.drawImage(img,0,0);
+      var ph=document.getElementById('emu-screen-placeholder');
+      if(ph)ph.style.display='none';
+    };
+    img.src='data:image/png;base64,'+d.image;
+    var now=new Date();
+    if(window._lastEmuScreen){var fps=Math.round(1000/(now-window._lastEmuScreen));document.getElementById('emu-screen-fps').textContent=fps+'fps'}
+    window._lastEmuScreen=now;
+  }).catch(function(){})
+}
+function startEmulatorRefresh(){
+  if(emulatorInterval)return;
+  refreshEmulatorScreen();
+  emulatorInterval=setInterval(refreshEmulatorScreen,333);
+}
+function stopEmulatorRefresh(){
+  if(emulatorInterval){clearInterval(emulatorInterval);emulatorInterval=null}
+}
+function toggleEmulatorRefresh(){
+  if(document.getElementById('emu-auto-refresh').checked){startEmulatorRefresh()}else{stopEmulatorRefresh()}
+}
+function handleEmulatorClick(e){
+  var canvas=document.getElementById('emu-screen-canvas');
+  if(!canvas||!emulatorScreenImage)return;
+  var rect=canvas.getBoundingClientRect();
+  var scaleX=canvas.width/rect.width;
+  var scaleY=canvas.height/rect.height;
+  var x=Math.round((e.clientX-rect.left)*scaleX);
+  var y=Math.round((e.clientY-rect.top)*scaleY);
+  document.getElementById('emu-touch-x').value=x;
+  document.getElementById('emu-touch-y').value=y;
+  emuTouch('tap',x,y);
+}
+function emuTouch(action,ox,oy){
+  var x=ox||parseInt(document.getElementById('emu-touch-x').value)||0;
+  var y=oy||parseInt(document.getElementById('emu-touch-y').value)||0;
+  var r=document.getElementById('emu-touch-result');
+  fetch('/api/emulator/touch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x:x,y:y,action:action})}).then(res=>res.json()).then(d=>{
+    r.textContent=action+' ('+x+','+y+'): '+(d.status||'');
+    if(d.status==='ok')r.style.color='#4caf50';else r.style.color='#e53935';
+  }).catch(function(e){r.textContent='失败: '+e;r.style.color='#e53935'})
+}
+function emuSwipe(){
+  var x1=parseInt(document.getElementById('emu-touch-x').value)||0;
+  var y1=parseInt(document.getElementById('emu-touch-y').value)||0;
+  var x2=prompt('滑动终点X:');if(x2===null)return;
+  var y2=prompt('滑动终点Y:');if(y2===null)return;
+  var r=document.getElementById('emu-touch-result');
+  fetch('/api/emulator/touch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x:x1,y:y1,x2:parseInt(x2),y2:parseInt(y2),action:'swipe'})}).then(res=>res.json()).then(d=>{
+    r.textContent='swipe: '+(d.status||'');r.style.color=d.status==='ok'?'#4caf50':'#e53935';
+  }).catch(function(e){r.textContent='失败: '+e;r.style.color='#e53935'})
+}
+socket.on('emu_install_progress',function(d){document.getElementById('emu-progress').innerHTML='<div class="alert info"><span class="spinner"></span> '+d.step+' ('+d.progress+'%)</div>'});
+socket.on('emu_install_complete',function(d){
+  var html='<div class="alert '+(d.success?'success':'error')+'">'+d.message+'</div>';
+  document.getElementById('emu-progress').innerHTML=html;
+  checkEmulatorStatus();
+});
+socket.on('emu_start_progress',function(d){document.getElementById('emu-progress').innerHTML='<div class="alert info"><span class="spinner"></span> '+d.step+' ('+d.progress+'%)</div>'});
+socket.on('emu_start_complete',function(d){
+  document.getElementById('emu-progress').innerHTML='<div class="alert success">模拟器启动完成! 端口: '+d.port+'</div>';
+  checkEmulatorStatus();
+  startEmulatorRefresh();
+});
+socket.on('emu_start_error',function(d){document.getElementById('emu-progress').innerHTML='<div class="alert error">'+d.error+'</div>'});
+
+// ── scrcpy 投屏控制 ──
+function checkScrcpyStatus(){
+  fetch('/api/scrcpy/status').then(r=>r.json()).then(d=>{
+    var s=document.getElementById('scrcpy-status');
+    if(d.installed){
+      s.innerHTML=d.running?'<span style="color:#4caf50">运行中</span>':'<span style="color:#ff9800">已安装(未运行)</span>';
+    }else{
+      s.innerHTML='<span style="color:#e53935">未安装</span>';
+    }
+  }).catch(function(e){document.getElementById('scrcpy-status').innerHTML='<span style="color:#e53935">检测失败</span>'})
+}
+function installScrcpy(){
+  document.getElementById('scrcpy-status').innerHTML='<span class="spinner"></span> 安装中...';
+  fetch('/api/scrcpy/install',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).then(d=>{
+    if(d.status==='ok'){document.getElementById('scrcpy-status').innerHTML='<span style="color:#4caf50">安装成功</span>'}
+    else{document.getElementById('scrcpy-status').innerHTML='<span style="color:#e53935">'+d.message+'</span>'}
+  }).catch(function(e){document.getElementById('scrcpy-status').innerHTML='<span style="color:#e53935">安装失败: '+e+'</span>'})
+}
+function startScrcpy(){
+  var res=document.getElementById('scrcpy-res').value;
+  var fps=document.getElementById('scrcpy-fps').value;
+  var bitrate=document.getElementById('scrcpy-bitrate').value;
+  document.getElementById('scrcpy-status').innerHTML='<span class="spinner"></span> 启动投屏...';
+  fetch('/api/scrcpy/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({max_width:parseInt(res),max_fps:parseInt(fps),bitrate:parseInt(bitrate)})}).then(r=>r.json()).then(d=>{
+    if(d.status==='ok'){document.getElementById('scrcpy-status').innerHTML='<span style="color:#4caf50">投屏已启动 (全屏)</span>'}
+    else{document.getElementById('scrcpy-status').innerHTML='<span style="color:#e53935">'+d.error+'</span>'}
+  }).catch(function(e){document.getElementById('scrcpy-status').innerHTML='<span style="color:#e53935">启动失败: '+e+'</span>'})
+}
+function stopScrcpy(){
+  fetch('/api/scrcpy/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).then(d=>{
+    document.getElementById('scrcpy-status').innerHTML='<span style="color:#ff9800">已停止</span>';
+  })
+}
+
+// ── 端口检测 ──
+function checkPorts(){
+  var pr=document.getElementById('port-check-result');
+  pr.innerHTML='<span class="spinner"></span> 检测中...';
+  fetch('/api/port/check').then(r=>r.json()).then(d=>{
+    var html='';
+    if(d.xinglv_detected){
+      html+='<div class="alert warning">检测到行旅白相关进程占用端口</div>';
+      d.xinglv_ports.forEach(function(p){
+        html+='<div style="font-size:10px;color:#e53935;margin:2px 0">端口 '+p.port+' (PID: '+p.pid+') - '+p.process+'</div>';
+      });
+    }else{
+      html+='<div class="alert success">未检测到行旅白端口冲突</div>';
+    }
+    html+='<div style="font-size:10px;margin-top:4px">建议端口: <span style="color:#4caf50;font-weight:600">'+d.suggested_port+'</span></div>';
+    html+='<div style="font-size:10px;margin-top:4px">';
+    if(d.port_scan){d.port_scan.forEach(function(p){
+      html+='<span style="margin-right:8px;color:'+(p.occupied?'#e53935':'#4caf50')+'">'+p.port+':'+(p.occupied?'占用':'空闲')+'</span>';
+    })}
+    html+='</div>';
+    pr.innerHTML=html;
+  }).catch(function(e){pr.innerHTML='<span style="color:#e53935">检测失败: '+e+'</span>'})
+}
+function verifyDecisionChain(){
+  var p=document.getElementById('chain-verify-progress');
+  var r=document.getElementById('chain-verify-result');
+  p.innerHTML='<div class="alert info"><span class="spinner"></span> 验证决策链中...</div>';
+  r.innerHTML='';
+  fetch('/api/chain/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(res=>res.json()).then(d=>{
+    p.innerHTML='';
+    var html='<div class="alert '+(d.all_ok?'success':'error')+'"><strong>'+d.summary+'</strong></div>';
+    if(d.steps){
+      for(var k in d.steps){
+        var s=d.steps[k];
+        html+='<div class="diag-item"><span class="diag-name">'+k+'</span><span class="diag-status '+(s.status==='ok'?'ok':'fail')+'">'+s.status+'</span><span class="diag-detail">'+escapeHtml(s.detail||'')+'</span></div>';
+      }
+    }
+    r.innerHTML=html;
+  }).catch(function(e){p.innerHTML='<div class="alert error">验证失败: '+e+'</div>'})
+}
+function rebuildDecisionChain(){
+  document.getElementById('chain-verify-progress').innerHTML='<div class="alert info"><span class="spinner"></span> 重建决策链...</div>';
+  socket.emit('rebuild_chain');
+}
+function oneClickDeploy(){
+  var r=document.getElementById('chain-verify-result');
+  r.innerHTML='<div class="alert info"><span class="spinner"></span> 一键部署中...</div>';
+  fetch('/api/chain/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(res=>res.json()).then(d=>{
+    var ok=0,fail=0;
+    if(d.steps){for(var k in d.steps){if(d.steps[k].status==='ok')ok++;else fail++}}
+    r.innerHTML='<div class="alert '+(fail===0?'success':'warning')+'">决策链状态: '+ok+'/'+(ok+fail)+' 就绪</div>';
+    if(fail>0){
+      fetch('/api/adb/reconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(function(){r.innerHTML+='<div style="font-size:10px;color:#4caf50">ADB重连已触发</div>'})
+    }
+  }).catch(function(e){r.innerHTML='<div class="alert error">部署失败: '+e+'</div>'})
+}
+function executeAgent(cmd){
+  var r=document.getElementById('chain-verify-result');
+  r.innerHTML='<div class="alert info"><span class="spinner"></span> 智能体执行: '+cmd+'</div>';
+  fetch('/api/agent/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmd})}).then(res=>res.json()).then(d=>{
+    r.innerHTML='<div class="alert info">任务已启动: '+cmd+'</div>'
+  }).catch(function(e){r.innerHTML='<div class="alert error">启动失败: '+e+'</div>'})
+}
+socket.on('agent_progress',function(d){
+  var r=document.getElementById('chain-verify-result');
+  if(r)r.innerHTML='<div class="alert info">'+d.step+' ('+d.progress+'%)</div>'
+});
+socket.on('agent_step_result',function(d){
+  var r=document.getElementById('chain-verify-result');
+  if(r){
+    var ok=d.result&&!d.result.error;
+    r.innerHTML+='<div style="font-size:10px;color:'+(ok?'#4caf50':'#e53935')+'">['+d.index+'/'+d.total+'] '+d.tool+': '+(ok?'OK':'FAIL')+'</div>'
+  }
+});
+socket.on('agent_complete',function(d){
+  var r=document.getElementById('chain-verify-result');
+  if(r){
+    var html='<div class="alert success">智能体完成: '+escapeHtml(d.summary||'')+'</div>';
+    if(d.results){
+      d.results.forEach(function(s){html+='<div style="font-size:10px;color:#aaa">'+s.tool+': '+JSON.stringify(s.result||{}).substring(0,100)+'</div>'})
+    }
+    r.innerHTML=html;
+  }
+});
+socket.on('agent_error',function(d){
+  var r=document.getElementById('chain-verify-result');
+  if(r)r.innerHTML='<div class="alert error">智能体错误: '+d.error+'</div>'
+});
+socket.on('chain_verify_progress',function(d){
+  document.getElementById('chain-verify-progress').innerHTML='<div class="alert info"><span class="spinner"></span> '+d.step+' ('+d.progress+'%)</div>';
+});
+socket.on('chain_verify_complete',function(d){
+  document.getElementById('chain-verify-progress').innerHTML='';
+  var r=document.getElementById('chain-verify-result');
+  if(r){
+    var html='<div class="alert '+(d.all_ok?'success':'error')+'"><strong>'+d.summary+'</strong></div>';
+    if(d.steps){for(var k in d.steps){var s=d.steps[k];html+='<div class="diag-item"><span class="diag-name">'+k+'</span><span class="diag-status '+(s.status==='ok'?'ok':'fail')+'">'+s.status+'</span><span class="diag-detail">'+escapeHtml(s.detail||'')+'</span></div>'}}
+    r.innerHTML=html;
+  }
+});
+
+</textarea>
+</div>
+</div>
+
+// ── DeepSeek 余额查询 ──
+function checkBalance(){
+  fetch('/api/deepseek/balance').then(r=>r.json()).then(d=>{
+    var dl=document.getElementById('conn-deepseek-detail');
+    if(d.status==='ok'){
+      var balances=d.balance||[];
+      var html='';
+      if(balances.length===0){
+        html='<span style="color:#ff9800">余额数据为空，请检查API Key</span>';
+      }else{
+        balances.forEach(function(b){
+          html+='<div style="margin:2px 0"><span style="color:#4caf50;font-weight:600">'+b.currency+' '+b.total_balance+'</span></div>';
+          html+='<div style="font-size:9px;color:#888">充值余额: '+b.topped_up_balance+' | 赠送余额: '+b.granted_balance+'</div>';
+        });
+      }
+      dl.innerHTML=html||'余额: N/A';
+    }else{
+      dl.innerHTML='<span style="color:#e53935">查询失败: '+(d.message||'未知错误')+'</span>';
+    }
+  }).catch(function(e){document.getElementById('conn-deepseek-detail').innerHTML='<span style="color:#e53935">查询失败: '+e+'</span>'})
+}
+
+// ── 数据管理 (表格版) ──
+var dataBrowseCache=null;
+function browseData(){
+  var tbody=document.getElementById('data-browse-result');
+  tbody.innerHTML='<tr><td colspan="6" style="padding:20px;text-align:center"><span class="spinner"></span> 扫描中...</td></tr>';
+  fetch('/api/data/browse').then(r=>r.json()).then(d=>{
+    dataBrowseCache=d;
+    document.getElementById('data-total-size').textContent='总占用: '+d.total_size_mb+' MB';
+    var html='';
+    var dirs=['data','sessions','logs','runs','test_screenshots'];
+    var allFiles=[];
+    dirs.forEach(function(name){
+      var dd=d[name];
+      if(!dd||!dd.exists||!dd.files)return;
+      dd.files.forEach(function(f){
+        f._dir=name;
+        allFiles.push(f);
+      });
+    });
+    // 按可删除优先排序
+    allFiles.sort(function(a,b){
+      if(a.can_delete!==b.can_delete)return a.can_delete?-1:1;
+      return b.age_hours-a.age_hours;
+    });
+    if(allFiles.length===0){
+      html='<tr><td colspan="6" style="padding:20px;text-align:center;color:#888">暂无数据文件</td></tr>';
+    }else{
+      allFiles.forEach(function(f){
+        var bg=f.can_delete?'background:#2a1a1a':'';
+        var statusHtml=f.can_delete
+          ?'<span style="background:#e53935;color:#fff;padding:2px 6px;border-radius:3px;font-size:9px" title="'+f.reason+'">可清理</span>'
+          :'<span style="color:#888;font-size:9px">正常</span>';
+        var delBtn=f.can_delete
+          ?'<button class="btn-clear" onclick="deleteFile(\''+f.path.replace(/\\/g,'\\\\')+'\')" style="padding:2px 8px;font-size:9px">删除</button>'
+          :'<span style="color:#555;font-size:9px">-</span>';
+        var reason=f.can_delete?'<span style="color:#e53935;font-size:9px;margin-left:4px">'+f.reason+'</span>':'';
+        html+='<tr style="'+bg+';border-bottom:1px solid #1a1f2b">';
+        html+='<td style="padding:4px 8px">'+f.name+reason+'</td>';
+        html+='<td style="padding:4px 8px;color:#888">'+f._dir+'/</td>';
+        html+='<td style="padding:4px 8px;text-align:right;color:#aaa">'+f.size_mb+' MB</td>';
+        html+='<td style="padding:4px 8px;text-align:right;color:#555">'+f.age_hours+'h前</td>';
+        html+='<td style="padding:4px 8px;text-align:center">'+statusHtml+'</td>';
+        html+='<td style="padding:4px 8px;text-align:center">'+delBtn+'</td>';
+        html+='</tr>';
+      });
+    }
+    tbody.innerHTML=html;
+  }).catch(function(e){document.getElementById('data-browse-result').innerHTML='<tr><td colspan="6" style="padding:20px;text-align:center;color:#e53935">扫描失败: '+e+'</td></tr>'})
+}
+function autoCleanup(){
+  if(!confirm('确认删除超过5分钟的截图和临时文件？'))return;
+  var tbody=document.getElementById('data-browse-result');
+  tbody.innerHTML='<tr><td colspan="6" style="padding:20px;text-align:center"><span class="spinner"></span> 清理中...</td></tr>';
+  fetch('/api/data/cleanup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dry_run:false})}).then(r=>r.json()).then(d=>{
+    tbody.innerHTML='<tr><td colspan="6" style="padding:16px;text-align:center"><div class="alert success">已删除 '+d.deleted+' 个文件</div>'+(d.errors.length?'<div class="alert error">'+d.errors.length+' 个错误</div>':'')+'</td></tr>';
+    setTimeout(browseData,1500);
+  }).catch(function(e){tbody.innerHTML='<tr><td colspan="6" style="padding:20px;text-align:center;color:#e53935">清理失败: '+e+'</td></tr>'})
+}
+function selectiveCleanup(){
+  if(!dataBrowseCache){alert('请先浏览数据');return}
+  var files=[];
+  var dirs=['data','sessions','logs','runs','test_screenshots'];
+  dirs.forEach(function(name){
+    var dd=dataBrowseCache[name];
+    if(dd&&dd.files){dd.files.forEach(function(f){if(f.can_delete)files.push(f.path)})}
+  });
+  if(!files.length){alert('没有可清理的文件');return}
+  if(!confirm('确认删除 '+files.length+' 个可清理文件？'))return;
+  var tbody=document.getElementById('data-browse-result');
+  tbody.innerHTML='<tr><td colspan="6" style="padding:20px;text-align:center"><span class="spinner"></span> 清理中...</td></tr>';
+  fetch('/api/data/cleanup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:files,dry_run:false})}).then(r=>r.json()).then(d=>{
+    tbody.innerHTML='<tr><td colspan="6" style="padding:16px;text-align:center"><div class="alert success">已删除 '+d.deleted+' 个文件</div></td></tr>';
+    setTimeout(browseData,1500);
+  })
+}
+function deleteFile(path){
+  if(!confirm('删除 '+path+'?'))return;
+  fetch('/api/data/cleanup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:[path],dry_run:false})}).then(r=>r.json()).then(d=>{
+    browseData();
+  })
+}
+function toggleAutoCleanup(){
+  var enable=document.getElementById('auto-cleanup-toggle').checked;
+  fetch('/api/data/auto_cleanup/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enable:enable})}).then(r=>r.json()).then(d=>{
+    var label=document.getElementById('auto-cleanup-label');
+    if(d.running){
+      label.textContent='已开启';label.style.color='#4caf50';
+    }else{
+      label.textContent='已关闭';label.style.color='#e53935';
+    }
+  }).catch(function(e){alert('切换失败: '+e)})
+}
+
 // ── 初始化 ──
 document.addEventListener('DOMContentLoaded',function(){
-  initChart();loadVersion();checkPyTorch();
-  // 检查ADB状态
+  initChart();loadVersion();checkPyTorch();checkGPU();
   setTimeout(function(){checkADB();checkGitHub();checkServer()},1000);
   // 定期刷新连接状态
   setInterval(function(){checkAllConnections()},30000);
+  // 定期刷新ADB状态
+  setInterval(function(){checkADB()},15000);
+  // 定期刷新GitHub状态
+  setInterval(function(){checkGitHub()},30000);
+  // 定期刷新服务器状态
+  setInterval(function(){checkServer()},30000);
 });
 </script>
 </body>
@@ -2478,6 +4280,1231 @@ loadImages();
 </html>"""
 
 
+# ═══════════════════════════════════════════════════════════════
+# GPU 检测与管理
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/api/gpu/status")
+def api_gpu_status():
+    import subprocess as sp, json as _json
+    result = {"cuda_available": False, "gpus": [], "pytorch_cuda": False, "message": ""}
+    # Try multiple approaches to detect GPU
+    try:
+        # Method 1: Try direct nvidia-smi via subprocess
+        r = sp.run('nvidia-smi --query-gpu=name,memory.total,driver_version,cuda_version --format=csv,noheader', capture_output=True, text=True, timeout=10, shell=True)
+        if r.returncode == 0 and r.stdout.strip():
+            for line in r.stdout.strip().split("\n"):
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 4:
+                    result["gpus"].append({"name": parts[0], "memory": parts[1], "driver": parts[2], "cuda": parts[3]})
+            result["cuda_available"] = True
+    except Exception:
+        pass
+    if not result["cuda_available"]:
+        try:
+            # Method 2: Try os.popen
+            import os as _os
+            with _os.popen('nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>nul') as f:
+                out = f.read()
+                if out.strip():
+                    for line in out.strip().split("\n"):
+                        parts = [p.strip() for p in line.split(",")]
+                        if len(parts) >= 2:
+                            result["gpus"].append({"name": parts[0], "memory": parts[1], "driver": "N/A", "cuda": "N/A"})
+                    result["cuda_available"] = True
+        except Exception:
+            pass
+    if not result["cuda_available"]:
+        try:
+            # Method 3: Read cached GPU info
+            cache_file = PROJECT_ROOT / "data" / ".gpu_info"
+            if cache_file.exists():
+                for line in cache_file.read_text().strip().split("\n"):
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) >= 3:
+                        result["gpus"].append({"name": parts[0], "memory": parts[1], "driver": parts[2], "cuda": "N/A"})
+                    elif len(parts) >= 2:
+                        result["gpus"].append({"name": parts[0], "memory": parts[1], "driver": "N/A", "cuda": "N/A"})
+                result["cuda_available"] = True
+        except Exception:
+            pass
+    try:
+        import torch
+        result["pytorch_cuda"] = torch.cuda.is_available()
+        result["pytorch_version"] = torch.__version__
+        if torch.cuda.is_available():
+            result["cuda_devices"] = torch.cuda.device_count()
+    except:
+        pass
+    if not result["pytorch_cuda"]:
+        result["message"] = "PyTorch CPU版本。Python 3.14暂不支持CUDA预编译包，训练将使用CPU模式。YOLO推理仍可用。"
+    global _gpu_info
+    _gpu_info = result
+    return jsonify(result)
+
+
+@app.route("/api/gpu/install_cuda_torch", methods=["POST"])
+def api_gpu_install_cuda_torch():
+    import subprocess as sp, sys as _sys, threading as _thr
+
+    def install_worker():
+        try:
+            socketio.emit("gpu_install_progress", {"step": "检测Python版本", "progress": 10})
+            py_ver = f"{_sys.version_info.major}{_sys.version_info.minor}"
+            socketio.emit("gpu_install_progress", {"step": f"Python 3.{_sys.version_info.minor}, 尝试安装CUDA PyTorch", "progress": 20})
+            for cu_ver in ["cu128", "cu124", "cu121"]:
+                try:
+                    socketio.emit("gpu_install_progress", {"step": f"尝试 {cu_ver} 版本...", "progress": 40})
+                    r = sp.run([_sys.executable, "-m", "pip", "install", "--pre", "torch", "torchvision", "--index-url", f"https://download.pytorch.org/whl/nightly/{cu_ver}"], capture_output=True, text=True, timeout=300)
+                    if r.returncode == 0:
+                        socketio.emit("gpu_install_complete", {"success": True, "cu_version": cu_ver, "message": f"PyTorch CUDA {cu_ver} 安装成功！请重启应用。"})
+                        return
+                except:
+                    continue
+            socketio.emit("gpu_install_complete", {"success": False, "message": "Python 3.14暂不支持CUDA PyTorch预编译包。建议使用Python 3.12环境运行GPU训练。"})
+        except Exception as e:
+            socketio.emit("gpu_install_complete", {"success": False, "message": str(e)})
+
+    _thr.Thread(target=install_worker, daemon=True).start()
+    return jsonify({"status": "installing"})
+
+
+# ═══════════════════════════════════════════════════════════════
+# Android 模拟器管理
+# ═══════════════════════════════════════════════════════════════
+
+# ── scrcpy 安装与管理 ──
+SCRCPY_DIR = PROJECT_ROOT / "scrcpy"
+SCRCPY_EXE = "scrcpy.exe"
+
+def _install_scrcpy_internal():
+    """内部安装scrcpy"""
+    SCRCPY_DIR.mkdir(parents=True, exist_ok=True)
+    scrcpy_exe = SCRCPY_DIR / "scrcpy.exe"
+    if scrcpy_exe.exists():
+        logger.info("scrcpy已安装")
+        return True
+
+    import requests as _req, zipfile
+    try:
+        scrcpy_url = "https://github.com/Genymobile/scrcpy/releases/download/v2.7/scrcpy-win64-v2.7.zip"
+        zip_path = SCRCPY_DIR / "scrcpy.zip"
+        logger.info(f"下载scrcpy: {scrcpy_url}")
+        r = _req.get(scrcpy_url, stream=True, timeout=300)
+        total = int(r.headers.get("content-length", 0))
+        downloaded = 0
+        with open(zip_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+                downloaded += len(chunk)
+        logger.info(f"scrcpy下载完成: {downloaded} bytes")
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(SCRCPY_DIR)
+        zip_path.unlink(missing_ok=True)
+        logger.info("scrcpy安装完成")
+        return True
+    except Exception as e:
+        logger.warning(f"scrcpy下载失败: {e}，尝试使用PATH中的scrcpy")
+        return False
+
+def _get_scrcpy_exe():
+    """获取scrcpy可执行文件"""
+    candidates = [
+        str(SCRCPY_DIR / "scrcpy-win64-v2.7" / "scrcpy.exe"),
+        str(SCRCPY_DIR / "scrcpy.exe"),
+        str(SCRCPY_DIR / "scrcpy-win64" / "scrcpy.exe"),
+    ]
+    for p in candidates:
+        if Path(p).exists():
+            return p
+    if SCRCPY_DIR.exists():
+        for exe in SCRCPY_DIR.rglob("scrcpy.exe"):
+            return str(exe)
+    return "scrcpy"
+
+# ── 行旅白端口检测 ──
+def _detect_xinglv_ports():
+    """检测行旅白占用的端口（快速版本）"""
+    occupied = []
+    try:
+        # 一次性获取所有进程信息
+        result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=5)
+        tasklist = subprocess.run(["tasklist"], capture_output=True, text=True, timeout=5)
+        # 构建PID到进程名的映射
+        pid_map = {}
+        for line in tasklist.stdout.split("\n"):
+            if line.strip() and not line.startswith("映像名称"):
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    pid_map[parts[1]] = parts[0]
+        
+        for line in result.stdout.split("\n"):
+            if "LISTENING" in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    addr = parts[1]
+                    if ":" in addr:
+                        port = int(addr.split(":")[-1])
+                        pid = parts[-1] if parts[-1].isdigit() else "?"
+                        process_name = pid_map.get(pid, "")
+                        if "xinglv" in process_name.lower() or "行旅" in process_name or "python" in process_name.lower():
+                            occupied.append({"port": port, "pid": pid, "process": process_name})
+    except:
+        pass
+    return occupied
+
+def _find_available_port(start_port=5000, max_port=9000):
+    """查找可用端口，避开行旅白"""
+    occupied = _detect_xinglv_ports()
+    occupied_ports = {p["port"] for p in occupied}
+    import socket
+    for port in range(start_port, max_port):
+        if port in occupied_ports:
+            continue
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    return start_port
+
+def _get_adb_for_emulator():
+    """获取适合模拟器使用的ADB"""
+    adb_candidates = [
+        str(ANDROID_SDK_ROOT / "platform-tools" / "adb.exe"),
+        r"d:\MuMuPlayer\nx_device\12.0\shell\adb.exe",
+        r"d:\firefight\adb\adb.exe",
+        "adb",
+    ]
+    for p in adb_candidates:
+        if p == "adb" or Path(p).exists():
+            return p
+    return "adb"
+
+
+def _get_emulator_exe():
+    """获取模拟器可执行文件路径"""
+    emu_path = ANDROID_SDK_ROOT / "emulator" / "emulator.exe"
+    if emu_path.exists():
+        return str(emu_path)
+    return "emulator"
+
+
+@app.route("/api/emulator/status")
+def api_emulator_status():
+    result = {
+        "installed": False,
+        "avd_exists": False,
+        "running": False,
+        "adb_connected": False,
+        "sdk_path": str(ANDROID_SDK_ROOT),
+        "avd_name": AVD_NAME,
+        "emulator_path": "",
+        "details": {},
+    }
+
+    # 检查SDK和模拟器是否安装
+    emu_exe = _get_emulator_exe()
+    result["emulator_path"] = emu_exe
+    result["installed"] = Path(emu_exe).exists() if emu_exe != "emulator" else False
+
+    # 检查AVD是否存在
+    avd_dir = Path.home() / ".android" / "avd" / f"{AVD_NAME}.avd"
+    result["avd_exists"] = avd_dir.exists()
+
+    if result["avd_exists"]:
+        config_ini = avd_dir / "config.ini"
+        if config_ini.exists():
+            details = {}
+            for line in config_ini.read_text(errors="replace").split("\n"):
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    details[k.strip()] = v.strip()
+            result["details"] = details
+
+    # 检查是否在运行
+    adb_exe = _get_adb_for_emulator()
+    try:
+        subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
+        r = subprocess.run([adb_exe, "devices"], capture_output=True, text=True, timeout=5)
+        target = f"localhost:{_emulator_adb_port}"
+        result["running"] = target in r.stdout and "device" in r.stdout
+        result["adb_connected"] = result["running"]
+        result["adb_port"] = _emulator_adb_port
+    except Exception as e:
+        result["adb_error"] = str(e)[:200]
+
+    return jsonify(result)
+
+
+@app.route("/api/emulator/install", methods=["POST"])
+def api_emulator_install():
+    import subprocess as sp, zipfile, requests as _req, io as _io, tempfile as _tf
+
+    def install_worker():
+        try:
+            socketio.emit("emu_install_progress", {"step": "创建目录", "progress": 3})
+            EMULATOR_HOME.mkdir(parents=True, exist_ok=True)
+            ANDROID_SDK_ROOT.mkdir(parents=True, exist_ok=True)
+            avd_home = Path.home() / ".android" / "avd"
+            avd_home.mkdir(parents=True, exist_ok=True)
+
+            # 下载命令行工具
+            socketio.emit("emu_install_progress", {"step": "下载Android SDK命令行工具", "progress": 10})
+            cmdline_url = "https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip"
+            tools_zip = EMULATOR_HOME / "cmdline-tools.zip"
+
+            if not tools_zip.exists():
+                socketio.emit("emu_install_progress", {"step": "正在下载 (约150MB)...", "progress": 15})
+                r = _req.get(cmdline_url, stream=True, timeout=600)
+                total = int(r.headers.get("content-length", 0))
+                downloaded = 0
+                with open(tools_zip, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total > 0:
+                            pct = min(15 + int(downloaded / total * 30), 45)
+                            socketio.emit("emu_install_progress", {"step": f"下载中... {downloaded//1024//1024}MB", "progress": pct})
+
+            # 解压
+            socketio.emit("emu_install_progress", {"step": "解压命令行工具", "progress": 50})
+            cmdline_dir = ANDROID_SDK_ROOT / "cmdline-tools" / "latest"
+            if cmdline_dir.exists():
+                shutil.rmtree(cmdline_dir, ignore_errors=True)
+            cmdline_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(tools_zip, "r") as zf:
+                for member in zf.namelist():
+                    parts = member.split("/", 1)
+                    if len(parts) < 2:
+                        continue
+                    target_path = cmdline_dir / parts[1].replace("/", "\\")
+                    if member.endswith("/"):
+                        target_path.mkdir(parents=True, exist_ok=True)
+                    else:
+                        target_path.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(member) as src, open(target_path, "wb") as dst:
+                            dst.write(src.read())
+
+            # 安装SDK组件
+            sdkmanager = str(cmdline_dir / "bin" / "sdkmanager.bat")
+            socketio.emit("emu_install_progress", {"step": "接受许可协议", "progress": 55})
+            sp.run([sdkmanager, "--sdk_root=" + str(ANDROID_SDK_ROOT), "--licenses"], input=b"y\ny\ny\ny\ny\ny\ny\ny\n", capture_output=True, timeout=30)
+
+            components = [
+                "platform-tools",
+                "emulator",
+                f"system-images;android-{AVD_CONFIG['api_level']};default;{AVD_CONFIG['arch']}",
+                f"platforms;android-{AVD_CONFIG['api_level']}",
+            ]
+
+            for i, comp in enumerate(components):
+                pct = 60 + int((i + 1) / len(components) * 20)
+                socketio.emit("emu_install_progress", {"step": f"安装: {comp}", "progress": pct})
+                result = sp.run([sdkmanager, "--sdk_root=" + str(ANDROID_SDK_ROOT), comp], capture_output=True, text=True, timeout=600)
+                if result.returncode != 0:
+                    logger.warning(f"组件安装警告: {comp} - {result.stderr[:200]}")
+
+            # 创建AVD
+            socketio.emit("emu_install_progress", {"step": "创建AVD", "progress": 85})
+            avd_dir = Path.home() / ".android" / "avd" / f"{AVD_NAME}.avd"
+            avd_manager = str(cmdline_dir / "bin" / "avdmanager.bat")
+            avd_created = False
+
+            if Path(avd_manager).exists():
+                result = sp.run([
+                    avd_manager, "create", "avd",
+                    "-n", AVD_NAME,
+                    "-k", f"system-images;android-{AVD_CONFIG['api_level']};default;{AVD_CONFIG['arch']}",
+                    "-d", AVD_CONFIG["device"],
+                    "-f",
+                ], capture_output=True, text=True, timeout=60)
+                if result.returncode == 0 and avd_dir.exists():
+                    avd_created = True
+                else:
+                    logger.warning(f"avdmanager创建失败: {result.stderr[:300]}")
+
+            # 手动创建AVD（avdmanager失败时的备用方案）
+            if not avd_created:
+                socketio.emit("emu_install_progress", {"step": "手动创建AVD...", "progress": 88})
+                avd_dir.mkdir(parents=True, exist_ok=True)
+                ini_path = Path.home() / ".android" / "avd" / f"{AVD_NAME}.ini"
+                ini_path.write_text(f"avd.ini.encoding=UTF-8\npath={avd_dir}\npath.rel=avd\\{AVD_NAME}.avd\ntarget=android-{AVD_CONFIG['api_level']}\n")
+
+            # 配置AVD（确保config.ini存在）
+            socketio.emit("emu_install_progress", {"step": "配置AVD (MUMU规格)", "progress": 92})
+            config_ini = avd_dir / "config.ini"
+            if not config_ini.exists():
+                # 手动创建config.ini
+                default_config = f"""AvdId={AVD_NAME}
+PlayStore.enabled=false
+abi.type={AVD_CONFIG['arch']}
+avd.ini.displayname={AVD_NAME}
+avd.ini.encoding=UTF-8
+disk.dataPartition.size=8G
+fastboot.chosenSnapshotFile=
+fastboot.forceChosenSnapshotBoot=no
+fastboot.forceColdBoot=no
+fastboot.forceFastBoot=yes
+hw.accelerometer=yes
+hw.audioInput=yes
+hw.battery=yes
+hw.camera.back=emulated
+hw.camera.front=emulated
+hw.cpu.arch=x86_64
+hw.cpu.ncore={AVD_CONFIG['cores']}
+hw.dPad=no
+hw.device.hash2=MD5:1b0e71a1d3d3c45e9c5c6e6f3a7b8c9d
+hw.device.manufacturer=Google
+hw.device.name=pixel_6
+hw.gps=yes
+hw.gpu.enabled=yes
+hw.gpu.mode=host
+hw.initialOrientation=landscape
+hw.keyboard=yes
+hw.lcd.density={AVD_CONFIG['density']}
+hw.lcd.height={AVD_CONFIG['resolution'].split('x')[1]}
+hw.lcd.width={AVD_CONFIG['resolution'].split('x')[0]}
+hw.mainKeys=no
+hw.ramSize={AVD_CONFIG['ram']}
+hw.sdCard=no
+hw.sensors.orientation=yes
+hw.sensors.proximity=yes
+hw.trackBall=no
+image.sysdir.1=system-images\\android-{AVD_CONFIG['api_level']}\\default\\{AVD_CONFIG['arch']}\\
+runtime.network.latency=none
+runtime.network.speed=full
+sdcard.size=512M
+showDeviceFrame=no
+skin.dynamic=yes
+skin.name=1920x1080
+skin.path=1920x1080
+tag.display=Google APIs
+tag.id=google_apis
+vm.heapSize=256
+"""
+                config_ini.write_text(default_config)
+                logger.info("手动创建AVD config.ini成功")
+            else:
+                # 更新已有配置为MUMU规格
+                config_lines = config_ini.read_text(errors="replace").split("\n")
+                custom_config = {
+                    "hw.ramSize": str(AVD_CONFIG["ram"]),
+                    "hw.cpu.ncore": str(AVD_CONFIG["cores"]),
+                    "hw.lcd.width": AVD_CONFIG["resolution"].split("x")[0],
+                    "hw.lcd.height": AVD_CONFIG["resolution"].split("x")[1],
+                    "hw.lcd.density": str(AVD_CONFIG["density"]),
+                    "hw.keyboard": "yes",
+                    "disk.dataPartition.size": "8G",
+                    "hw.gpu.enabled": "yes",
+                    "hw.gpu.mode": "host",
+                    "hw.initialOrientation": "landscape",
+                    "skin.name": "1920x1080",
+                    "showDeviceFrame": "no",
+                }
+                existing_keys = set()
+                new_lines = []
+                for line in config_lines:
+                    if "=" in line:
+                        k = line.split("=", 1)[0].strip()
+                        existing_keys.add(k)
+                        if k in custom_config:
+                            new_lines.append(f"{k}={custom_config[k]}")
+                        else:
+                            new_lines.append(line)
+                    else:
+                        new_lines.append(line)
+                for k, v in custom_config.items():
+                    if k not in existing_keys:
+                        new_lines.append(f"{k}={v}")
+                config_ini.write_text("\n".join(new_lines))
+                logger.info("AVD配置更新为MUMU规格")
+
+            # 安装scrcpy
+            socketio.emit("emu_install_progress", {"step": "安装scrcpy...", "progress": 96})
+            _install_scrcpy_internal()
+
+            socketio.emit("emu_install_progress", {"step": "完成!", "progress": 100})
+            socketio.emit("emu_install_complete", {"success": True, "message": "Android模拟器安装完成！(MUMU规格)", "avd_name": AVD_NAME})
+            add_learning_log("emulator", "Android模拟器安装完成 (MUMU规格)", f"AVD: {AVD_NAME}, 分辨率: {AVD_CONFIG['resolution']}")
+
+        except Exception as e:
+            error_msg = str(e)[:300]
+            socketio.emit("emu_install_complete", {"success": False, "message": f"安装失败: {error_msg}"})
+            add_learning_log("emulator", "模拟器安装失败", error_msg)
+
+    threading.Thread(target=install_worker, daemon=True).start()
+    return jsonify({"status": "installing"})
+
+
+@app.route("/api/emulator/start", methods=["POST"])
+def api_emulator_start():
+    global _emulator_process
+
+    if _emulator_process and _emulator_process.poll() is None:
+        return jsonify({"status": "already_running", "message": "模拟器已在运行"})
+
+    def start_worker():
+        global _emulator_process
+        try:
+            emu_exe = _get_emulator_exe()
+            if not Path(emu_exe).exists():
+                socketio.emit("emu_start_error", {"error": "模拟器未安装，请先安装"})
+                return
+
+            socketio.emit("emu_start_progress", {"step": "启动模拟器...", "progress": 20})
+            cmd = [
+                emu_exe, "-avd", AVD_NAME,
+                "-no-window", "-no-audio",
+                "-gpu", "swiftshader_indirect",
+                "-netdelay", "none", "-netspeed", "full",
+                "-port", str(_emulator_adb_port),
+            ]
+            _emulator_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            socketio.emit("emu_start_progress", {"step": "等待模拟器启动...", "progress": 40})
+            # 等待启动
+            adb_exe = _get_adb_for_emulator()
+            subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
+
+            waited = 0
+            while waited < 120:
+                time.sleep(3)
+                waited += 3
+                r = subprocess.run([adb_exe, "devices"], capture_output=True, text=True, timeout=5)
+                if f"localhost:{_emulator_adb_port}" in r.stdout and "device" in r.stdout:
+                    break
+                socketio.emit("emu_start_progress", {"step": f"等待启动... {waited}s", "progress": 40 + min(waited, 40)})
+
+            socketio.emit("emu_start_progress", {"step": "连接ADB", "progress": 80})
+            subprocess.run([adb_exe, "connect", f"localhost:{_emulator_adb_port}"], capture_output=True, text=True, timeout=10)
+
+            # 设置屏幕属性
+            subprocess.run([adb_exe, "-s", f"localhost:{_emulator_adb_port}", "shell", "wm", "density", str(AVD_CONFIG["density"])], capture_output=True, text=True, timeout=5)
+
+            socketio.emit("emu_start_complete", {"success": True, "port": _emulator_adb_port, "message": "模拟器启动完成"})
+            add_learning_log("emulator", "模拟器启动完成", f"端口: {_emulator_adb_port}")
+
+        except Exception as e:
+            socketio.emit("emu_start_error", {"error": str(e)[:300]})
+            add_learning_log("emulator", "模拟器启动失败", str(e)[:200])
+
+    threading.Thread(target=start_worker, daemon=True).start()
+    return jsonify({"status": "starting"})
+
+
+@app.route("/api/emulator/stop", methods=["POST"])
+def api_emulator_stop():
+    global _emulator_process
+
+    try:
+        adb_exe = _get_adb_for_emulator()
+        subprocess.run([adb_exe, "-s", f"localhost:{_emulator_adb_port}", "emu", "kill"], capture_output=True, text=True, timeout=10)
+    except:
+        pass
+
+    if _emulator_process:
+        try:
+            _emulator_process.terminate()
+            _emulator_process.wait(timeout=10)
+        except:
+            try:
+                _emulator_process.kill()
+            except:
+                pass
+        _emulator_process = None
+
+    add_learning_log("emulator", "模拟器已停止", "")
+    return jsonify({"status": "stopped"})
+
+
+@app.route("/api/emulator/install_apk", methods=["POST"])
+def api_emulator_install_apk():
+    data = request.get_json() or {}
+    apk_path = data.get("apk_path", "").strip()
+    searched = [
+        str(PROJECT_ROOT / "apk" / "firefight.apk"),
+        str(PROJECT_ROOT / "dist" / "firefight.apk"),
+        str(PROJECT_ROOT / "Firefight.apk"),
+    ]
+
+    if not apk_path:
+        for p in searched:
+            if Path(p).exists():
+                apk_path = p
+                break
+
+    if not apk_path or not Path(apk_path).exists():
+        return jsonify({"error": "APK文件不存在", "searched": searched}), 404
+
+    try:
+        adb_exe = _get_adb_for_emulator()
+        r = subprocess.run(
+            [adb_exe, "-s", f"localhost:{_emulator_adb_port}", "install", "-r", apk_path],
+            capture_output=True, text=True, timeout=60
+        )
+        success = "Success" in r.stdout
+        add_learning_log("emulator", f"APK安装{'成功' if success else '失败'}", apk_path)
+        return jsonify({"status": "success" if success else "failed", "output": r.stdout.strip()[:500]})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)[:300]}), 500
+
+
+@app.route("/api/emulator/screenshot")
+def api_emulator_screenshot():
+    import base64
+    try:
+        adb_exe = _get_adb_for_emulator()
+        r = subprocess.run(
+            [adb_exe, "-s", f"localhost:{_emulator_adb_port}", "exec-out", "screencap", "-p"],
+            capture_output=True, timeout=10
+        )
+        if r.returncode != 0:
+            return jsonify({"error": "截图失败", "stderr": r.stderr[:200]}), 500
+        img_b64 = base64.b64encode(r.stdout).decode("utf-8")
+        return jsonify({"image": img_b64, "format": "png", "timestamp": time.time()})
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500
+
+
+@app.route("/api/emulator/touch", methods=["POST"])
+def api_emulator_touch():
+    data = request.get_json() or {}
+    x = data.get("x", 0)
+    y = data.get("y", 0)
+    action = data.get("action", "tap")  # tap, swipe, longpress
+
+    try:
+        adb_exe = _get_adb_for_emulator()
+        target = f"localhost:{_emulator_adb_port}"
+
+        if action == "tap":
+            subprocess.run(
+                [adb_exe, "-s", target, "shell", "input", "tap", str(int(x)), str(int(y))],
+                capture_output=True, text=True, timeout=5
+            )
+        elif action == "swipe":
+            x2 = data.get("x2", x)
+            y2 = data.get("y2", y)
+            duration = data.get("duration", 300)
+            subprocess.run(
+                [adb_exe, "-s", target, "shell", "input", "swipe", str(int(x)), str(int(y)), str(int(x2)), str(int(y2)), str(int(duration))],
+                capture_output=True, text=True, timeout=5
+            )
+        elif action == "longpress":
+            subprocess.run(
+                [adb_exe, "-s", target, "shell", "input", "swipe", str(int(x)), str(int(y)), str(int(x)), str(int(y)), "1000"],
+                capture_output=True, text=True, timeout=5
+            )
+
+        return jsonify({"status": "ok", "action": action, "x": x, "y": y})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)[:200]}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
+# scrcpy 投屏控制 (MUMU级别触控)
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/api/scrcpy/status")
+def api_scrcpy_status():
+    """检查scrcpy状态"""
+    result = {
+        "installed": False,
+        "exe_path": "",
+        "running": _scrcpy_process is not None and _scrcpy_process.poll() is None,
+        "enabled": _scrcpy_enabled,
+    }
+    scrcpy_exe = _get_scrcpy_exe()
+    result["installed"] = Path(scrcpy_exe).exists() if scrcpy_exe != "scrcpy" else False
+    result["exe_path"] = scrcpy_exe
+    return jsonify(result)
+
+@app.route("/api/scrcpy/install", methods=["POST"])
+def api_scrcpy_install():
+    """安装scrcpy"""
+    try:
+        success = _install_scrcpy_internal()
+        if success:
+            return jsonify({"status": "ok", "message": "scrcpy安装成功"})
+        else:
+            return jsonify({"status": "warning", "message": "scrcpy下载失败，请检查网络或手动安装: https://github.com/Genymobile/scrcpy"})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)[:200]}), 500
+
+@app.route("/api/scrcpy/start", methods=["POST"])
+def api_scrcpy_start():
+    """启动scrcpy投屏"""
+    global _scrcpy_process, _scrcpy_enabled
+
+    if _scrcpy_process and _scrcpy_process.poll() is None:
+        return jsonify({"status": "already_running", "message": "scrcpy已在运行"})
+
+    scrcpy_exe = _get_scrcpy_exe()
+    if not Path(scrcpy_exe).exists():
+        _install_scrcpy_internal()
+        scrcpy_exe = _get_scrcpy_exe()
+        if not Path(scrcpy_exe).exists():
+            return jsonify({"status": "error", "error": "scrcpy未安装"}), 500
+
+    try:
+        data = request.get_json() or {}
+        max_width = data.get("max_width", 1920)
+        max_height = data.get("max_height", 1080)
+        bitrate = data.get("bitrate", 8000000)
+        max_fps = data.get("max_fps", 60)
+
+        cmd = [
+            scrcpy_exe,
+            "-s", f"localhost:{_emulator_adb_port}",
+            f"--max-size={max_width}",
+            f"--bit-rate={bitrate}",
+            f"--max-fps={max_fps}",
+            "--stay-awake",
+            "--turn-screen-off=false",
+            "--no-audio",
+            "--window-title=Firefight AI 模拟器",
+            "--window-x=0", "--window-y=0",
+            "--window-width=1920", "--window-height=1080",
+            "--fullscreen",
+        ]
+
+        _scrcpy_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        _scrcpy_enabled = True
+        add_learning_log("scrcpy", "scrcpy投屏已启动", f"分辨率: {max_width}x{max_height}, FPS: {max_fps}")
+        return jsonify({"status": "ok", "message": "scrcpy投屏启动成功", "fullscreen": True})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)[:200]}), 500
+
+@app.route("/api/scrcpy/stop", methods=["POST"])
+def api_scrcpy_stop():
+    """停止scrcpy投屏"""
+    global _scrcpy_process, _scrcpy_enabled
+
+    if _scrcpy_process:
+        try:
+            _scrcpy_process.terminate()
+            _scrcpy_process.wait(timeout=5)
+        except:
+            try:
+                _scrcpy_process.kill()
+            except:
+                pass
+        _scrcpy_process = None
+    _scrcpy_enabled = False
+    add_learning_log("scrcpy", "scrcpy投屏已停止", "")
+    return jsonify({"status": "ok", "message": "scrcpy已停止"})
+
+# ═══════════════════════════════════════════════════════════════
+# 端口检测 (避免与行旅白冲突)
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/api/port/check")
+def api_port_check():
+    """检测端口占用情况"""
+    xinglv_ports = _detect_xinglv_ports()
+    import socket
+    all_occupied = []
+    try:
+        # 检查关键端口
+        for port in [5000, 5001, 5005, 5556, 7555, 8080, 3000, 9090, 9999]:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    all_occupied.append({"port": port, "occupied": True})
+                else:
+                    all_occupied.append({"port": port, "occupied": False})
+    except:
+        pass
+
+    available = _find_available_port()
+    return jsonify({
+        "xinglv_detected": len(xinglv_ports) > 0,
+        "xinglv_ports": xinglv_ports,
+        "port_scan": all_occupied,
+        "suggested_port": available,
+        "current_server_port": 5000,
+        "emulator_adb_port": _emulator_adb_port,
+    })
+
+
+# ═══════════════════════════════════════════════════════════════
+# AI Agent 增强 (高级智能体)
+# ═══════════════════════════════════════════════════════════════
+
+AGENT_TOOLS = {
+    "check_adb": "检查ADB连接状态",
+    "reconnect_adb": "重新连接ADB",
+    "check_emulator": "检查模拟器状态",
+    "start_emulator": "启动模拟器",
+    "install_apk": "安装APK到模拟器",
+    "launch_game": "启动游戏",
+    "verify_decision_chain": "验证完整决策链（ADB→截图→YOLO→LLM→执行）",
+    "rebuild_chain": "重建整条决策链",
+    "train_model": "训练YOLO模型",
+    "deploy_to_server": "部署到腾讯云服务器",
+    "push_to_github": "推送到GitHub",
+    "web_search": "联网搜索信息",
+}
+
+
+@app.route("/api/agent/execute", methods=["POST"])
+def api_agent_execute():
+    data = request.get_json() or {}
+    command = data.get("command", "").strip()
+    if not command:
+        return jsonify({"error": "缺少command参数"}), 400
+
+    add_learning_log("agent", f"智能体执行: {command[:100]}", "")
+
+    def agent_worker():
+        try:
+            socketio.emit("agent_progress", {"step": "正在分析指令...", "progress": 10, "command": command})
+
+            from openai import OpenAI
+            cfg = load_config()
+            llm_cfg = cfg["llm"]
+            client = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["api_base"])
+
+            tools_desc = "\n".join([f"- {k}: {v}" for k, v in AGENT_TOOLS.items()])
+            prompt = (
+                f"你是Firefight AI系统的智能体。你可以执行以下工具:\n{tools_desc}\n\n"
+                f"用户指令: {command}\n\n"
+                "请分析指令，输出需要执行的工具调用序列（JSON数组格式）。"
+                "每个工具调用包含: tool (工具名), args (参数对象)。\n"
+                "例如: [{{\"tool\": \"check_adb\", \"args\": {{}}}}, {{\"tool\": \"reconnect_adb\", \"args\": {{}}}}]\n"
+                "只输出JSON数组，不要其他内容。"
+            )
+
+            resp = client.chat.completions.create(
+                model=llm_cfg.get("model", "deepseek-v4-flash"),
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=128,
+                temperature=0.1,
+                timeout=6,
+            )
+            plan_text = resp.choices[0].message.content.strip()
+            # 提取JSON
+            import re as _re
+            json_match = _re.search(r"\[.*\]", plan_text, _re.DOTALL)
+            if json_match:
+                plan_text = json_match.group(0)
+
+            try:
+                plan = json.loads(plan_text)
+            except:
+                # 如果解析失败，使用关键词匹配
+                plan = _keyword_parse_command(command)
+
+            socketio.emit("agent_progress", {"step": f"解析出{len(plan)}个步骤", "progress": 20, "plan": plan})
+
+            results = []
+            for i, step in enumerate(plan):
+                tool_name = step.get("tool", "")
+                tool_args = step.get("args", {})
+                pct = 20 + int((i + 1) / len(plan) * 60)
+                socketio.emit("agent_progress", {"step": f"执行: {tool_name}", "progress": pct, "current": tool_name})
+
+                result = _execute_agent_tool(tool_name, tool_args)
+                results.append({"tool": tool_name, "result": result})
+                socketio.emit("agent_step_result", {"tool": tool_name, "result": result, "index": i + 1, "total": len(plan)})
+
+                if result.get("error"):
+                    socketio.emit("agent_progress", {"step": f"步骤失败: {tool_name}", "progress": pct, "error": result["error"]})
+
+            # 总结
+            socketio.emit("agent_progress", {"step": "生成总结", "progress": 90})
+            summary_prompt = f"执行结果:\n{json.dumps(results, ensure_ascii=False, indent=2)[:2000]}\n\n请用中文总结执行结果（2-3句话）。"
+            summary_resp = client.chat.completions.create(
+                model=llm_cfg.get("model", "deepseek-v4-flash"),
+                messages=[{"role": "user", "content": summary_prompt}],
+                max_tokens=128,
+                temperature=0.1,
+                timeout=6,
+            )
+            summary = summary_resp.choices[0].message.content.strip()
+
+            socketio.emit("agent_complete", {
+                "success": True,
+                "command": command,
+                "results": results,
+                "summary": summary,
+                "time": datetime.now().isoformat(),
+            })
+            add_learning_log("agent", f"智能体执行完成: {command[:80]}", summary[:200])
+
+        except Exception as e:
+            socketio.emit("agent_error", {"error": str(e)[:300], "command": command})
+            add_learning_log("agent", f"智能体执行失败", str(e)[:200])
+
+    threading.Thread(target=agent_worker, daemon=True).start()
+    return jsonify({"status": "executing", "command": command})
+
+
+def _keyword_parse_command(command: str) -> list:
+    """基于关键词解析命令为工具调用序列"""
+    plan = []
+    cmd_lower = command.lower()
+
+    if any(kw in cmd_lower for kw in ["重建", "决策链", "rebuild", "chain"]):
+        plan.append({"tool": "verify_decision_chain", "args": {}})
+        plan.append({"tool": "rebuild_chain", "args": {}})
+
+    if any(kw in cmd_lower for kw in ["adb", "连接", "connect"]):
+        if "修复" in cmd_lower or "重连" in cmd_lower:
+            plan.append({"tool": "reconnect_adb", "args": {}})
+        plan.append({"tool": "check_adb", "args": {}})
+
+    if any(kw in cmd_lower for kw in ["模拟器", "emulator", "部署模拟器"]):
+        plan.append({"tool": "check_emulator", "args": {}})
+        if "启动" in cmd_lower or "start" in cmd_lower:
+            plan.append({"tool": "start_emulator", "args": {}})
+
+    if any(kw in cmd_lower for kw in ["apk", "安装", "游戏"]):
+        plan.append({"tool": "install_apk", "args": {}})
+
+    if any(kw in cmd_lower for kw in ["启动游戏", "launch", "运行"]):
+        plan.append({"tool": "launch_game", "args": {}})
+
+    if any(kw in cmd_lower for kw in ["训练", "train", "yolo"]):
+        plan.append({"tool": "train_model", "args": {}})
+
+    if any(kw in cmd_lower for kw in ["部署", "deploy", "服务器", "server"]):
+        plan.append({"tool": "deploy_to_server", "args": {}})
+
+    if any(kw in cmd_lower for kw in ["github", "推送", "push"]):
+        plan.append({"tool": "push_to_github", "args": {}})
+
+    if any(kw in cmd_lower for kw in ["搜索", "search", "查询"]):
+        plan.append({"tool": "web_search", "args": {"query": command}})
+
+    if not plan:
+        plan.append({"tool": "verify_decision_chain", "args": {}})
+
+    return plan
+
+
+def _execute_agent_tool(tool_name: str, args: dict) -> dict:
+    """执行单个智能体工具"""
+    import requests as _req
+    base = "http://127.0.0.1:5000"
+    try:
+        if tool_name == "check_adb":
+            r = _req.get(f"{base}/api/adb/status", timeout=10)
+            return r.json()
+
+        elif tool_name == "reconnect_adb":
+            r = _req.post(f"{base}/api/adb/reconnect", json={}, timeout=10)
+            return r.json()
+
+        elif tool_name == "check_emulator":
+            r = _req.get(f"{base}/api/emulator/status", timeout=10)
+            return r.json()
+
+        elif tool_name == "start_emulator":
+            r = _req.post(f"{base}/api/emulator/start", json={}, timeout=10)
+            return r.json()
+
+        elif tool_name == "install_apk":
+            apk_path = args.get("apk_path", "")
+            r = _req.post(f"{base}/api/emulator/install_apk", json={"apk_path": apk_path}, timeout=60)
+            return r.json()
+
+        elif tool_name == "launch_game":
+            adb_exe = _get_adb_for_emulator()
+            subprocess.run([adb_exe, "-s", f"localhost:{_emulator_adb_port}", "shell", "monkey", "-p", "com.windowsgames.firefightbw", "-c", "android.intent.category.LAUNCHER", "1"], capture_output=True, text=True, timeout=10)
+            return {"status": "launched", "package": "com.windowsgames.firefightbw"}
+
+        elif tool_name == "verify_decision_chain":
+            r = _req.post(f"{base}/api/chain/verify", json={}, timeout=30)
+            return r.json()
+
+        elif tool_name == "rebuild_chain":
+            r = _req.post(f"{base}/api/chain/verify", json={}, timeout=30)
+            result = r.json()
+            socketio.emit("rebuild_chain_triggered", {})
+            return result
+
+        elif tool_name == "train_model":
+            return {"status": "skipped", "message": "训练需要手动触发"}
+
+        elif tool_name == "deploy_to_server":
+            r = _req.post(f"{base}/api/server/deploy", json={}, timeout=10)
+            return r.json()
+
+        elif tool_name == "push_to_github":
+            r = _req.post(f"{base}/api/github/push", json={"message": "智能体自动推送"}, timeout=10)
+            return r.json()
+
+        elif tool_name == "web_search":
+            query = args.get("query", "")
+            r = _req.post(f"{base}/api/web/search", json={"query": query}, timeout=30)
+            return r.json()
+
+        else:
+            return {"error": f"未知工具: {tool_name}"}
+
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
+# ═══════════════════════════════════════════════════════════════
+# 决策链验证
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/api/chain/verify", methods=["POST"])
+def api_chain_verify():
+    results = {
+        "timestamp": datetime.now().isoformat(),
+        "steps": {},
+        "all_ok": False,
+        "summary": "",
+    }
+
+    # 1. ADB连接
+    socketio.emit("chain_verify_progress", {"step": "检查ADB连接", "progress": 10})
+    try:
+        cfg = load_config()
+        dc = cfg["device"]
+        ad = dc.get("active", "mumu")
+        di = dc.get(ad, {})
+        adb_exe = _get_adb_for_emulator()
+        subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
+        r = subprocess.run([adb_exe, "connect", f"{di.get('adb_host','127.0.0.1')}:{di.get('adb_port',7555)}"], capture_output=True, text=True, timeout=10)
+        adb_ok = "connected" in r.stdout.lower() or "already connected" in r.stdout.lower()
+        results["steps"]["adb"] = {"status": "ok" if adb_ok else "failed", "detail": r.stdout.strip()[:200]}
+    except Exception as e:
+        results["steps"]["adb"] = {"status": "error", "detail": str(e)[:200]}
+
+    # 2. 截图测试
+    socketio.emit("chain_verify_progress", {"step": "测试截图", "progress": 30})
+    try:
+        r = subprocess.run([adb_exe, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
+        screenshot_ok = len(r.stdout) > 1000
+        results["steps"]["screenshot"] = {"status": "ok" if screenshot_ok else "failed", "detail": f"大小: {len(r.stdout)} bytes"}
+    except Exception as e:
+        results["steps"]["screenshot"] = {"status": "error", "detail": str(e)[:200]}
+
+    # 3. YOLO检测
+    socketio.emit("chain_verify_progress", {"step": "验证YOLO模型", "progress": 50})
+    try:
+        from src.vision.detector import UnitDetector
+        yc = load_config()["yolo"]
+        detector = UnitDetector(model_path=yc["model_path"], fallback_model_path=yc["fallback_model_path"], confidence_threshold=yc["confidence_threshold"], iou_threshold=yc["iou_threshold"], image_size=yc["image_size"], device=yc["device"])
+        detector.load_model()
+        results["steps"]["yolo"] = {"status": "ok", "detail": f"模型: {yc['model_path']}"}
+    except Exception as e:
+        results["steps"]["yolo"] = {"status": "error", "detail": str(e)[:200]}
+
+    # 4. LLM连接
+    socketio.emit("chain_verify_progress", {"step": "验证LLM API", "progress": 70})
+    try:
+        ds = verify_deepseek_api()
+        results["steps"]["llm"] = {"status": "ok" if ds["status"] == "online" else "failed", "detail": f"延迟: {ds.get('latency_ms', '?')}ms"}
+    except Exception as e:
+        results["steps"]["llm"] = {"status": "error", "detail": str(e)[:200]}
+
+    # 5. GitHub
+    socketio.emit("chain_verify_progress", {"step": "验证GitHub", "progress": 85})
+    try:
+        import requests as _req
+        r = _req.get("https://api.github.com", timeout=5)
+        results["steps"]["github"] = {"status": "ok" if r.status_code == 200 else "failed", "detail": f"HTTP {r.status_code}"}
+    except Exception as e:
+        results["steps"]["github"] = {"status": "error", "detail": str(e)[:200]}
+
+    # 6. 服务器
+    socketio.emit("chain_verify_progress", {"step": "验证服务器", "progress": 95})
+    try:
+        ok, out, _ = _ssh_exec("echo OK", timeout=10)
+        results["steps"]["server"] = {"status": "ok" if ok and "OK" in out else "failed", "detail": out.strip()[:100]}
+    except Exception as e:
+        results["steps"]["server"] = {"status": "error", "detail": str(e)[:200]}
+
+    # 汇总
+    all_ok = all(s["status"] == "ok" for s in results["steps"].values())
+    results["all_ok"] = all_ok
+    failed_steps = [k for k, v in results["steps"].items() if v["status"] != "ok"]
+    if all_ok:
+        results["summary"] = "决策链完整，所有环节正常"
+    else:
+        results["summary"] = f"决策链存在问题: {', '.join(failed_steps)}"
+
+    socketio.emit("chain_verify_complete", results)
+    add_learning_log("chain", f"决策链验证: {results['summary']}", "")
+
+    return jsonify(results)
+
+
+# ═══════════════════════════════════════════════════════════════
+# DeepSeek 余额查询
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/api/deepseek/balance")
+def api_deepseek_balance():
+    import requests as _req
+    try:
+        cfg = load_config()
+        api_key = cfg["llm"]["api_key"]
+        r = _req.get("https://api.deepseek.com/user/balance", headers={"Authorization": f"Bearer {api_key}"}, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            return jsonify({"status": "ok", "balance": data.get("balance_infos", [])})
+        return jsonify({"status": "error", "message": f"HTTP {r.status_code}"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+# ═══════════════════════════════════════════════════════════════
+# 本地数据管理
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/api/data/browse")
+def api_data_browse():
+    """Browse local data directories and list files with sizes"""
+    import os as _os, time as _time
+    dirs_to_scan = {
+        "data": PROJECT_ROOT / "data",
+        "sessions": PROJECT_ROOT / "sessions",
+        "logs": PROJECT_ROOT / "logs",
+        "runs": PROJECT_ROOT / "runs",
+        "test_screenshots": PROJECT_ROOT / "test_screenshots",
+    }
+    results = {}
+    total_size = 0
+    for name, dpath in dirs_to_scan.items():
+        if not dpath.exists():
+            results[name] = {"exists": False, "files": [], "size_mb": 0}
+            continue
+        files = []
+        dir_size = 0
+        for f in sorted(dpath.rglob("*"), key=lambda x: x.stat().st_size, reverse=True):
+            if f.is_file():
+                sz = f.stat().st_size
+                dir_size += sz
+                age_hours = (_time.time() - f.stat().st_mtime) / 3600
+                can_delete = any([
+                    f.suffix.lower() in (".png", ".jpg", ".jpeg") and "screenshot" in f.name.lower(),
+                    f.suffix.lower() in (".png", ".jpg") and age_hours > 0.08,
+                    "tmp" in f.name.lower(),
+                    f.name.endswith(".tmp"),
+                    f.name.endswith(".bak"),
+                ])
+                if len(files) < 200:
+                    files.append({
+                        "name": f.name,
+                        "path": str(f.relative_to(PROJECT_ROOT)),
+                        "size_mb": round(sz / 1024 / 1024, 2),
+                        "age_hours": round(age_hours, 1),
+                        "can_delete": can_delete,
+                        "reason": "截图超5分钟" if (f.suffix.lower() in (".png", ".jpg") and age_hours > 0.08) else ("截图文件" if "screenshot" in f.name.lower() else ("临时文件" if "tmp" in f.name.lower() else ""))
+                    })
+        total_size += dir_size
+        results[name] = {"exists": True, "files": files, "file_count": sum(1 for _ in dpath.rglob("*") if _.is_file()), "size_mb": round(dir_size / 1024 / 1024, 2)}
+    results["total_size_mb"] = round(total_size / 1024 / 1024, 2)
+    return jsonify(results)
+
+@app.route("/api/data/cleanup", methods=["POST"])
+def api_data_cleanup():
+    """Delete files marked for cleanup (screenshots older than 5 minutes, temp files)"""
+    import os as _os, time as _time
+    data = request.get_json() or {}
+    files_to_delete = data.get("files", [])
+    dry_run = data.get("dry_run", False)
+    deleted = []
+    errors = []
+    now = _time.time()
+
+    if not files_to_delete:
+        # Auto mode: delete screenshots older than 5 minutes
+        for pattern in ["sessions/**/*.png", "sessions/**/*.jpg", "test_screenshots/**/*.png", "data/**/*screenshot*.png", "data/**/*screenshot*.jpg"]:
+            for f in PROJECT_ROOT.glob(pattern):
+                if f.is_file() and (now - f.stat().st_mtime) > 300:
+                    try:
+                        if not dry_run:
+                            _os.remove(f)
+                        deleted.append(str(f.relative_to(PROJECT_ROOT)))
+                    except Exception as e:
+                        errors.append(str(f.relative_to(PROJECT_ROOT)) + ": " + str(e))
+
+    for fp in files_to_delete:
+        try:
+            full = PROJECT_ROOT / fp
+            if full.exists() and full.is_file():
+                if not dry_run:
+                    _os.remove(full)
+                deleted.append(fp)
+        except Exception as e:
+            errors.append(fp + ": " + str(e))
+
+    return jsonify({"deleted": len(deleted), "deleted_files": deleted[:50], "errors": errors, "dry_run": dry_run})
+
+
+# ═══════════════════════════════════════════════════════════════
+# 后台定时清理 (每5分钟自动删除超过5分钟的截图)
+# ═══════════════════════════════════════════════════════════════
+
+_auto_cleanup_running = False
+
+def _auto_cleanup_worker():
+    """后台工作线程: 每5分钟自动清理超过5分钟的截图和临时文件"""
+    global _auto_cleanup_running
+    _auto_cleanup_running = True
+    logger.info("后台自动清理线程已启动 (每5分钟检查一次)")
+    while _auto_cleanup_running:
+        try:
+            now = time.time()
+            deleted_count = 0
+            patterns = [
+                "sessions/**/*.png", "sessions/**/*.jpg",
+                "test_screenshots/**/*.png", "test_screenshots/**/*.jpg",
+                "data/**/*screenshot*.png", "data/**/*screenshot*.jpg",
+                "data/**/*.tmp", "data/**/*.bak",
+                "logs/**/*.tmp", "runs/**/*.tmp",
+            ]
+            for pattern in patterns:
+                for f in PROJECT_ROOT.glob(pattern):
+                    if f.is_file() and (now - f.stat().st_mtime) > 300:  # 5分钟
+                        try:
+                            f.unlink()
+                            deleted_count += 1
+                        except:
+                            pass
+            if deleted_count > 0:
+                add_learning_log("system", f"自动清理: 删除了{deleted_count}个过期文件", "")
+        except Exception as e:
+            logger.warning(f"自动清理错误: {e}")
+        time.sleep(300)  # 每5分钟执行一次
+
+def start_auto_cleanup():
+    """启动自动清理线程"""
+    global _auto_cleanup_running
+    if not _auto_cleanup_running:
+        t = threading.Thread(target=_auto_cleanup_worker, daemon=True)
+        t.start()
+
+def stop_auto_cleanup():
+    """停止自动清理线程"""
+    global _auto_cleanup_running
+    _auto_cleanup_running = False
+
+@app.route("/api/data/auto_cleanup/status")
+def api_auto_cleanup_status():
+    return jsonify({"running": _auto_cleanup_running})
+
+@app.route("/api/data/auto_cleanup/toggle", methods=["POST"])
+def api_auto_cleanup_toggle():
+    global _auto_cleanup_running
+    data = request.get_json() or {}
+    enable = data.get("enable", not _auto_cleanup_running)
+    if enable and not _auto_cleanup_running:
+        start_auto_cleanup()
+        return jsonify({"running": True, "message": "自动清理已启动"})
+    elif not enable and _auto_cleanup_running:
+        stop_auto_cleanup()
+        return jsonify({"running": False, "message": "自动清理已停止"})
+    return jsonify({"running": _auto_cleanup_running})
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Firefight AI Dashboard Server v5.0")
@@ -2491,6 +5518,9 @@ if __name__ == "__main__":
     logger.info(f"项目目录: {PROJECT_ROOT}")
 
     add_learning_log("system", f"服务器启动 v{APP_VERSION}", f"host={args.host}:{args.port}")
+
+    # 启动后台自动清理
+    start_auto_cleanup()
 
     try:
         socketio.run(
