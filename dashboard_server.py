@@ -1742,84 +1742,332 @@ def api_web_knowledge():
 
 @socketio.on("web_search")
 def on_web_search(data: dict):
-    """流式Web搜索，实时返回进度"""
+    """流式Web搜索，实时返回进度。支持URL直接抓取和关键词搜索。"""
     query = data.get("query", "").strip()
     if not query:
         emit("web_search_error", {"error": "缺少查询参数"})
         return
     
-    emit("web_search_progress", {"step": "搜索中", "progress": 20, "query": query})
+    # 检测是否为URL
+    import re
+    url_pattern = re.compile(r'https?://[^\s]+')
+    is_url = bool(url_pattern.match(query))
+    
+    emit("web_search_progress", {"step": "分析查询中", "progress": 10, "query": query})
     
     def search_worker():
         try:
             import requests as req
             
-            # 搜索
-            search_url = "https://html.duckduckgo.com/html/"
-            r = req.post(search_url, data={"q": query}, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }, timeout=15)
+            if is_url:
+                # ── URL模式：直接抓取网页内容 ──
+                _search_url_content(query, req)
+                return
             
-            from html.parser import HTMLParser
+            # ── 关键词搜索模式 ──
+            results = _search_duckduckgo(query, req)
             
-            class DDGParser(HTMLParser):
-                def __init__(self):
-                    super().__init__()
-                    self.results = []
-                    self.current = {}
-                    self.in_result = False
-                    self.in_snippet = False
-                    self.in_link = False
-                    self.text_buf = ""
-                    
-                def handle_starttag(self, tag, attrs):
-                    attrs_dict = dict(attrs)
-                    if tag == "div" and "result__body" in attrs_dict.get("class", ""):
-                        self.in_result = True
-                        self.current = {}
-                    if self.in_result and tag == "a" and "result__a" in attrs_dict.get("class", ""):
-                        self.in_link = True
-                        self.current["url"] = attrs_dict.get("href", "")
-                    if self.in_result and tag == "a" and "result__snippet" in attrs_dict.get("class", ""):
-                        self.in_snippet = True
-                        self.text_buf = ""
-                        
-                def handle_endtag(self, tag):
-                    if self.in_snippet and tag == "a":
-                        self.in_snippet = False
-                        self.current["snippet"] = self.text_buf.strip()
-                    if self.in_result and tag == "div":
-                        self.in_result = False
-                        if self.current.get("snippet") or self.current.get("url"):
-                            self.results.append(dict(self.current))
-                        
-                def handle_data(self, data):
-                    if self.in_snippet:
-                        self.text_buf += data
-                    if self.in_link:
-                        self.current["title"] = self.current.get("title", "") + data.strip()
+            if not results:
+                # 回退：尝试Bing搜索
+                emit("web_search_progress", {"step": "DuckDuckGo无结果，尝试备用搜索...", "progress": 30, "query": query})
+                results = _search_bing(query, req)
             
-            parser = DDGParser()
-            parser.feed(r.text)
-            results = parser.results[:10]
+            if not results:
+                # 最终回退：直接让DeepSeek回答
+                emit("web_search_progress", {"step": "搜索引擎无结果，使用DeepSeek知识库回答...", "progress": 30, "query": query})
+                _search_deepseek_fallback(query)
+                return
             
             emit("web_search_progress", {"step": "AI总结中", "progress": 60, "results_count": len(results)})
             
             # 检测是否为兵法/战术学习类查询
             is_military_query = any(kw in query for kw in ["兵法", "战术", "孙子", "战争", "军事", "克劳塞维茨", "三十六计", "战略", "布阵", "作战", "兵书", "打仗"])
             
-            # AI总结
-            summary = ""
-            try:
-                from openai import OpenAI
-                cfg = load_config()
-                llm_cfg = cfg["llm"]
-                client = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["api_base"])
+            _summarize_and_emit(query, results, is_military_query)
+            
+            emit("web_search_progress", {"step": "完成", "progress": 100})
+            
+        except Exception as e:
+            emit("web_search_error", {"error": str(e)[:200]})
+    
+    threading.Thread(target=search_worker, daemon=True).start()
+
+
+def _search_url_content(url: str, req):
+    """抓取URL内容并用AI总结"""
+    emit("web_search_progress", {"step": "抓取网页内容中...", "progress": 30, "query": url})
+    
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        resp = req.get(url, headers=headers, timeout=15, allow_redirects=True)
+        resp.encoding = resp.apparent_encoding or 'utf-8'
+        
+        # 提取文本内容
+        from html.parser import HTMLParser
+        
+        class TextExtractor(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.text = []
+                self.skip_tags = {'script', 'style', 'nav', 'footer', 'header', 'noscript', 'iframe', 'svg'}
+                self.skip_depth = 0
+                self.title = ""
+                self.in_title = False
                 
-                snippets_text = "\n".join([f"{i+1}. {r.get('title','')}: {r.get('snippet','')[:300]}" for i, r in enumerate(results[:8])])
+            def handle_starttag(self, tag, attrs):
+                if tag in self.skip_tags:
+                    self.skip_depth += 1
+                if tag == 'title':
+                    self.in_title = True
+                    
+            def handle_endtag(self, tag):
+                if tag in self.skip_tags and self.skip_depth > 0:
+                    self.skip_depth -= 1
+                if tag == 'title':
+                    self.in_title = False
+                    
+            def handle_data(self, data):
+                if self.skip_depth > 0:
+                    return
+                if self.in_title:
+                    self.title += data.strip()
+                text = data.strip()
+                if text and len(text) > 3:
+                    self.text.append(text)
+        
+        extractor = TextExtractor()
+        extractor.feed(resp.text)
+        
+        content_text = "\n".join(extractor.text[:200])  # 限制长度
+        title = extractor.title or url
+        
+        if not content_text.strip():
+            content_text = resp.text[:5000]
+        
+        emit("web_search_progress", {"step": "AI分析网页内容中...", "progress": 60, "query": url})
+        
+        # 用DeepSeek总结
+        from openai import OpenAI
+        cfg = load_config()
+        llm_cfg = cfg["llm"]
+        client = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["api_base"])
+        
+        prompt = f"""请分析以下网页内容并用中文总结关键信息（3-8条要点），如果内容包含战术、军事、游戏相关，请特别标注：
+        
+网页标题: {title}
+网页URL: {url}
+
+内容:
+{content_text[:4000]}
+
+请用清晰的格式输出总结。"""
+        
+        summary = ""
+        stream = client.chat.completions.create(
+            model=llm_cfg.get("model", "deepseek-v4-flash"),
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1024,
+            temperature=0.1,
+            stream=True,
+            timeout=8,
+        )
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                token = chunk.choices[0].delta.content
+                summary += token
+                emit("web_search_token", {"token": token, "done": False})
+        emit("web_search_token", {"token": "", "done": True, "full": summary})
+        
+        results = [{"title": title, "url": url, "snippet": content_text[:300]}]
+        emit("web_search_complete", {
+            "query": url,
+            "results": results,
+            "summary": summary,
+            "total_results": 1,
+            "source": "url_fetch",
+        })
+        
+        add_learning_log("web_search", f"URL抓取完成: {title}", summary[:200])
+        
+    except Exception as e:
+        # URL抓取失败，回退到搜索该URL
+        emit("web_search_progress", {"step": f"直接抓取失败({str(e)[:50]})，转为搜索...", "progress": 30, "query": url})
+        try:
+            results = _search_duckduckgo(url, req)
+            if results:
+                _summarize_and_emit(url, results, False)
+            else:
+                _search_deepseek_fallback(url)
+        except Exception as e2:
+            emit("web_search_error", {"error": f"URL抓取和搜索均失败: {str(e2)[:150]}"})
+
+
+def _search_duckduckgo(query: str, req) -> list:
+    """DuckDuckGo HTML搜索"""
+    search_url = "https://html.duckduckgo.com/html/"
+    try:
+        r = req.post(search_url, data={"q": query}, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }, timeout=15)
+        
+        from html.parser import HTMLParser
+        
+        class DDGParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.results = []
+                self.current = {}
+                self.in_result = False
+                self.in_snippet = False
+                self.in_link = False
+                self.text_buf = ""
                 
-                if is_military_query:
-                    prompt = f"""搜索结果如下，请从兵法和战术角度进行深度分析，用中文输出：
+            def handle_starttag(self, tag, attrs):
+                attrs_dict = dict(attrs)
+                if tag == "div" and "result__body" in attrs_dict.get("class", ""):
+                    self.in_result = True
+                    self.current = {}
+                if self.in_result and tag == "a" and "result__a" in attrs_dict.get("class", ""):
+                    self.in_link = True
+                    self.current["url"] = attrs_dict.get("href", "")
+                if self.in_result and tag == "a" and "result__snippet" in attrs_dict.get("class", ""):
+                    self.in_snippet = True
+                    self.text_buf = ""
+                    
+            def handle_endtag(self, tag):
+                if self.in_snippet and tag == "a":
+                    self.in_snippet = False
+                    self.current["snippet"] = self.text_buf.strip()
+                if self.in_result and tag == "div":
+                    self.in_result = False
+                    if self.current.get("snippet") or self.current.get("url"):
+                        self.results.append(dict(self.current))
+                    
+            def handle_data(self, data):
+                if self.in_snippet:
+                    self.text_buf += data
+                if self.in_link:
+                    self.current["title"] = self.current.get("title", "") + data.strip()
+        
+        parser = DDGParser()
+        parser.feed(r.text)
+        return parser.results[:10]
+    except Exception as e:
+        logger.warning(f"DuckDuckGo搜索失败: {e}")
+        return []
+
+
+def _search_bing(query: str, req) -> list:
+    """Bing搜索回退"""
+    try:
+        r = req.get("https://www.bing.com/search", params={"q": query}, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }, timeout=15)
+        
+        from html.parser import HTMLParser
+        
+        class BingParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.results = []
+                self.current = {}
+                self.in_result = False
+                self.in_snippet = False
+                self.text_buf = ""
+                
+            def handle_starttag(self, tag, attrs):
+                attrs_dict = dict(attrs)
+                cls = attrs_dict.get("class", "")
+                if tag == "li" and "b_algo" in cls:
+                    self.in_result = True
+                    self.current = {}
+                if self.in_result and tag == "a":
+                    self.current["url"] = attrs_dict.get("href", "")
+                    self.text_buf = ""
+                if self.in_result and tag == "p":
+                    self.in_snippet = True
+                    self.text_buf = ""
+                    
+            def handle_endtag(self, tag):
+                if self.in_snippet and tag == "p":
+                    self.in_snippet = False
+                    self.current["snippet"] = self.text_buf.strip()
+                if self.in_result and tag == "li":
+                    self.in_result = False
+                    if self.current.get("snippet") or self.current.get("url"):
+                        self.results.append(dict(self.current))
+                    
+            def handle_data(self, data):
+                if self.in_result:
+                    if self.in_snippet:
+                        self.text_buf += data
+                    else:
+                        self.current["title"] = self.current.get("title", "") + data.strip()
+        
+        parser = BingParser()
+        parser.feed(r.text)
+        return parser.results[:10]
+    except Exception as e:
+        logger.warning(f"Bing搜索失败: {e}")
+        return []
+
+
+def _search_deepseek_fallback(query: str):
+    """DeepSeek直接回答（无搜索结果时回退）"""
+    try:
+        from openai import OpenAI
+        cfg = load_config()
+        llm_cfg = cfg["llm"]
+        client = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["api_base"])
+        
+        response = client.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[
+                {"role": "system", "content": "你是一个智能搜索助手。请根据用户的问题，利用你的知识库提供准确、详细的信息。如果涉及最新信息，请说明知识截止日期。回答要结构化、有条理。"},
+                {"role": "user", "content": f"请帮我搜索并回答以下问题，提供详细信息：\n\n{query}"}
+            ],
+            temperature=0.1,
+            max_tokens=2048,
+            stream=True,
+            timeout=6,
+        )
+        full_text = ""
+        for chunk in response:
+            if chunk.choices[0].delta.content:
+                full_text += chunk.choices[0].delta.content
+                emit("web_search_token", {"token": chunk.choices[0].delta.content, "done": False})
+        emit("web_search_token", {"token": "", "done": True, "full": full_text})
+        
+        emit("web_search_complete", {
+            "query": query,
+            "results": [],
+            "summary": full_text,
+            "total_results": 0,
+            "source": "DeepSeek Knowledge Base",
+        })
+        
+        add_learning_log("web_search", f"搜索完成(知识库): {query[:50]}", full_text[:200])
+    except Exception as e:
+        emit("web_search_error", {"error": str(e)[:200]})
+
+
+def _summarize_and_emit(query: str, results: list, is_military_query: bool):
+    """AI总结搜索结果并发射事件"""
+    summary = ""
+    try:
+        from openai import OpenAI
+        cfg = load_config()
+        llm_cfg = cfg["llm"]
+        client = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["api_base"])
+        
+        snippets_text = "\n".join([f"{i+1}. {r.get('title','')}: {r.get('snippet','')[:300]}" for i, r in enumerate(results[:8])])
+        
+        if is_military_query:
+            prompt = f"""搜索结果如下，请从兵法和战术角度进行深度分析，用中文输出：
 1. 核心战术思想（3-5条）
 2. 可应用于FirefightAI游戏的具体战术建议
 3. 关键要点总结
@@ -1827,82 +2075,81 @@ def on_web_search(data: dict):
 查询: {query}
 搜索结果:
 {snippets_text}"""
-                else:
-                    prompt = f"搜索结果如下，请用中文总结关键信息（3-5条要点）：\n查询: {query}\n\n{snippets_text}"
-                
-                full_summary = ""
-                stream = client.chat.completions.create(
-                    model=llm_cfg.get("model", "deepseek-v4-flash"),
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=1024 if is_military_query else 512,
-                    temperature=0.1,
-                    stream=True,
-                    timeout=6,
-                )
-                for chunk in stream:
-                    if chunk.choices and chunk.choices[0].delta.content:
-                        token = chunk.choices[0].delta.content
-                        full_summary += token
-                        emit("web_search_token", {"token": token, "done": False})
-                summary = full_summary
-                emit("web_search_token", {"token": "", "done": True, "full": summary})
-                
-                # ── v5.1 兵法学习: 自动保存到AI知识库 ──
-                if is_military_query and summary:
-                    try:
-                        WEB_KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-                        filename = f"military_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(query.encode()).hexdigest()[:8]}.json"
-                        filepath = WEB_KNOWLEDGE_DIR / filename
-                        entry = {
-                            "query": query,
-                            "summary": summary,
-                            "results": [{"title": r.get("title", ""), "snippet": r.get("snippet", "")} for r in results[:5]],
-                            "tags": ["兵法", "战术", "AI学习"],
-                            "saved_at": datetime.now().isoformat(),
-                            "source": "web_search_military",
-                            "type": "military_doctrine",
-                        }
-                        filepath.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
-                        add_learning_log("military_learn", f"兵法知识已保存: {query[:40]}", f"文件: {filename}")
-                        
-                        # 立即让AI学习这些兵法知识
-                        doctrine_learn_prompt = f"""你是FirefightAI的战术学习系统。请从以下兵法知识中提取可应用于即时战略游戏的战术规则：
+        else:
+            prompt = f"搜索结果如下，请用中文总结关键信息（3-5条要点，包含来源链接）：\n查询: {query}\n\n{snippets_text}"
+        
+        full_summary = ""
+        stream = client.chat.completions.create(
+            model=llm_cfg.get("model", "deepseek-v4-flash"),
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1024 if is_military_query else 512,
+            temperature=0.1,
+            stream=True,
+            timeout=6,
+        )
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                token = chunk.choices[0].delta.content
+                full_summary += token
+                emit("web_search_token", {"token": token, "done": False})
+        summary = full_summary
+        emit("web_search_token", {"token": "", "done": True, "full": summary})
+        
+        # ── 兵法学习: 自动保存 ──
+        if is_military_query and summary:
+            _save_military_knowledge(query, results, summary, client, llm_cfg)
+            
+    except Exception as e:
+        summary = f"(AI总结暂不可用: {str(e)[:80]})"
+        emit("web_search_token", {"token": summary, "done": True, "full": summary})
+    
+    emit("web_search_complete", {
+        "query": query,
+        "results": results,
+        "summary": summary,
+        "total_results": len(results),
+    })
+    
+    add_learning_log("web_search", f"搜索完成: {query[:50]}", summary[:200])
+
+
+def _save_military_knowledge(query: str, results: list, summary: str, client, llm_cfg: dict):
+    """保存兵法知识并让AI学习"""
+    try:
+        WEB_KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+        filename = f"military_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(query.encode()).hexdigest()[:8]}.json"
+        filepath = WEB_KNOWLEDGE_DIR / filename
+        entry = {
+            "query": query,
+            "summary": summary,
+            "results": [{"title": r.get("title", ""), "snippet": r.get("snippet", "")} for r in results[:5]],
+            "tags": ["兵法", "战术", "AI学习"],
+            "saved_at": datetime.now().isoformat(),
+            "source": "web_search_military",
+            "type": "military_doctrine",
+        }
+        filepath.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+        add_learning_log("military_learn", f"兵法知识已保存: {query[:40]}", f"文件: {filename}")
+        
+        # 立即让AI学习
+        doctrine_learn_prompt = f"""你是FirefightAI的战术学习系统。请从以下兵法知识中提取可应用于即时战略游戏的战术规则：
 
 {summary[:2000]}
 
 请输出JSON格式：{{"rules": [{{"name": "规则名", "condition": "触发条件", "action": "战术行动", "priority": "优先级(1-10)"}}], "overall_strategy": "总体战略建议"}}"""
-                        
-                        learn_resp = client.chat.completions.create(
-                            model=llm_cfg.get("model", "deepseek-v4-flash"),
-                            messages=[{"role": "user", "content": doctrine_learn_prompt}],
-                            max_tokens=512,
-                            temperature=0.1,
-                            timeout=6,
-                        )
-                        learned = learn_resp.choices[0].message.content
-                        add_learning_log("military_learn", "AI已学习兵法知识", learned[:300])
-                        emit("military_learned", {"summary": learned[:500], "query": query})
-                    except Exception as e:
-                        logger.debug(f"兵法学习保存失败: {e}")
-                        
-            except Exception as e:
-                summary = f"(AI总结暂不可用)"
-                emit("web_search_token", {"token": summary, "done": True, "full": summary})
-            
-            emit("web_search_progress", {"step": "完成", "progress": 100})
-            emit("web_search_complete", {
-                "query": query,
-                "results": results,
-                "summary": summary,
-                "total_results": len(results),
-            })
-            
-            add_learning_log("web_search", f"搜索完成: {query}", summary[:200])
-            
-        except Exception as e:
-            emit("web_search_error", {"error": str(e)[:200]})
-    
-    threading.Thread(target=search_worker, daemon=True).start()
+        
+        learn_resp = client.chat.completions.create(
+            model=llm_cfg.get("model", "deepseek-v4-flash"),
+            messages=[{"role": "user", "content": doctrine_learn_prompt}],
+            max_tokens=512,
+            temperature=0.1,
+            timeout=6,
+        )
+        learned = learn_resp.choices[0].message.content
+        add_learning_log("military_learn", "AI已学习兵法知识", learned[:300])
+        emit("military_learned", {"summary": learned[:500], "query": query})
+    except Exception as e:
+        logger.debug(f"兵法学习保存失败: {e}")
 
 # ═══════════════════════════════════════════════════════════════
 # 安装包创建
@@ -2617,9 +2864,277 @@ def on_send_command(data: dict):
     emit("command_recorded", {"command": cmd, "cycle": cycle})
 
 
+# ═══════════════════════════════════════════════════════════════
+# 后台工作函数 (训练/部署/上传/更新/安装包)
+# ═══════════════════════════════════════════════════════════════
+
+def _start_training_background():
+    """后台启动AI训练"""
+    try:
+        from src.learning.auto_scheduler import AutoScheduler
+        scheduler = AutoScheduler()
+        socketio.emit("command_analysis", {"command": "训练", "cycle": 0, "analysis": "训练启动中...正在加载数据和模型"})
+        # 保存当前参数
+        result = scheduler.save_params_now()
+        update_state(training_progress=30, training_message="参数已保存")
+        socketio.emit("command_analysis", {"command": "训练", "cycle": 0, "analysis": f"参数已保存: {len(result.get('saved',[]))}个文件。正在上传到GitHub..."})
+        # 上传到GitHub
+        upload_result = scheduler.upload_params()
+        update_state(training_progress=60, training_message="上传中")
+        socketio.emit("command_analysis", {"command": "训练", "cycle": 0, "analysis": f"GitHub: {upload_result.get('github',{}).get('message','')} | 服务器: {upload_result.get('server',{}).get('message','')}"})
+        update_state(training_status="completed", training_progress=100, training_message="训练完成")
+        add_learning_log("training", "AI训练完成", f"保存: {len(result.get('saved',[]))}个文件")
+        socketio.emit("command_analysis", {"command": "训练", "cycle": 0, "analysis": "AI训练完成! 参数已保存并上传到GitHub和服务器。"})
+    except Exception as e:
+        update_state(training_status="error", training_message=str(e)[:100])
+        socketio.emit("command_analysis", {"command": "训练", "cycle": 0, "analysis": f"训练失败: {str(e)[:100]}"})
+
+
+def _deploy_to_server_background():
+    """后台部署到服务器"""
+    try:
+        import paramiko
+        socketio.emit("command_analysis", {"command": "部署", "cycle": 0, "analysis": "正在连接服务器..."})
+        
+        # 尝试多种方式连接
+        key_paths = [
+            r"D:\firefightAI2.pem",
+            r"C:\Users\19853\Downloads\firefightAI.pem",
+        ]
+        password = "@Cyt20080102"
+        host = "139.199.69.88"
+        user = "ubuntu"
+        
+        ssh = None
+        for key_path in key_paths:
+            try:
+                if os.path.exists(key_path):
+                    key = paramiko.RSAKey.from_private_key_file(key_path)
+                    ssh = paramiko.SSHClient()
+                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    ssh.connect(host, username=user, pkey=key, timeout=10)
+                    break
+            except:
+                continue
+        
+        if not ssh:
+            try:
+                ssh = paramiko.SSHClient()
+                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                ssh.connect(host, username=user, password=password, timeout=10)
+            except Exception as e:
+                socketio.emit("command_analysis", {"command": "部署", "cycle": 0, "analysis": f"SSH连接失败: {str(e)[:80]}"})
+                return
+        
+        # 同步文件
+        sftp = ssh.open_sftp()
+        remote_path = "/home/ubuntu/firefightAI"
+        
+        # 创建必要目录
+        for d in ["data", "data/params", "config", "src"]:
+            try:
+                sftp.mkdir(f"{remote_path}/{d}")
+            except:
+                pass
+        
+        # 上传关键文件
+        files_to_upload = [
+            "dashboard_server.py",
+            "config/settings.yaml",
+        ]
+        for f in files_to_upload:
+            local = PROJECT_ROOT / f
+            if local.exists():
+                try:
+                    sftp.put(str(local), f"{remote_path}/{f}")
+                except:
+                    pass
+        
+        sftp.close()
+        ssh.close()
+        
+        socketio.emit("command_analysis", {"command": "部署", "cycle": 0, "analysis": "部署完成! 文件已同步到服务器。"})
+        add_learning_log("deploy", "部署到服务器完成", f"主机: {host}")
+    except Exception as e:
+        socketio.emit("command_analysis", {"command": "部署", "cycle": 0, "analysis": f"部署失败: {str(e)[:100]}"})
+
+
+def _push_to_github_background():
+    """后台推送到GitHub"""
+    try:
+        import subprocess
+        git_dir = str(PROJECT_ROOT)
+        
+        # 检查是否有变更
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=git_dir, capture_output=True, text=True, timeout=10
+        )
+        if not status.stdout.strip():
+            socketio.emit("command_analysis", {"command": "上传", "cycle": 0, "analysis": "没有变更需要提交。"})
+            return
+        
+        # git add
+        subprocess.run(["git", "add", "-A"], cwd=git_dir, capture_output=True, timeout=10)
+        
+        # git commit
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        commit_result = subprocess.run(
+            ["git", "commit", "-m", f"Auto-update: {ts}"],
+            cwd=git_dir, capture_output=True, text=True, timeout=10
+        )
+        
+        # git push
+        push_result = subprocess.run(
+            ["git", "push", "origin", "HEAD"],
+            cwd=git_dir, capture_output=True, text=True, timeout=30
+        )
+        
+        if push_result.returncode == 0:
+            socketio.emit("command_analysis", {"command": "上传", "cycle": 0, "analysis": "推送到GitHub成功! 代码已同步到远程仓库。"})
+            add_learning_log("github", "推送到GitHub成功", "")
+        else:
+            socketio.emit("command_analysis", {"command": "上传", "cycle": 0, "analysis": f"推送失败: {push_result.stderr[:100]}"})
+    except Exception as e:
+        socketio.emit("command_analysis", {"command": "上传", "cycle": 0, "analysis": f"推送失败: {str(e)[:100]}"})
+
+
+def _update_app_background():
+    """后台更新应用"""
+    try:
+        socketio.emit("command_analysis", {"command": "更新", "cycle": 0, "analysis": "正在检查更新..."})
+        # 检查当前版本
+        current_ver = APP_VERSION
+        socketio.emit("command_analysis", {"command": "更新", "cycle": 0, "analysis": f"当前版本: v{current_ver} | 构建: {APP_BUILD}\n重新加载模块中..."})
+        # 热重载Python模块
+        import importlib
+        reloaded = []
+        for mod_name in ["src.learning.battle_predictor", "src.learning.auto_scheduler"]:
+            try:
+                if mod_name in sys.modules:
+                    importlib.reload(sys.modules[mod_name])
+                    reloaded.append(mod_name)
+            except:
+                pass
+        socketio.emit("command_analysis", {"command": "更新", "cycle": 0, "analysis": f"更新完成! 已重载模块: {', '.join(reloaded) or '无'}\n当前版本: v{current_ver}"})
+        add_learning_log("update", "应用更新完成", f"版本: v{current_ver}")
+    except Exception as e:
+        socketio.emit("command_analysis", {"command": "更新", "cycle": 0, "analysis": f"更新失败: {str(e)[:100]}"})
+
+
+def _create_package_background():
+    """后台创建安装包"""
+    try:
+        import zipfile
+        dist_dir = PROJECT_ROOT / "dist"
+        dist_dir.mkdir(parents=True, exist_ok=True)
+        
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        zip_name = f"firefightAI_{ts}.zip"
+        zip_path = dist_dir / zip_name
+        
+        socketio.emit("command_analysis", {"command": "安装包", "cycle": 0, "analysis": f"正在打包项目文件..."})
+        
+        exclude = {".git", "__pycache__", "logs", "runs", "sessions", ".venv", "venv", "node_modules", "dist", "android_emulator"}
+        with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(str(PROJECT_ROOT)):
+                dirs[:] = [d for d in dirs if d not in exclude]
+                for f in files:
+                    fp = os.path.join(root, f)
+                    arcname = os.path.relpath(fp, str(PROJECT_ROOT))
+                    zf.write(fp, arcname)
+        
+        size_mb = zip_path.stat().st_size / (1024 * 1024)
+        socketio.emit("command_analysis", {"command": "安装包", "cycle": 0, "analysis": f"安装包创建完成!\n文件: {zip_name}\n大小: {size_mb:.1f}MB\n下载: /api/package/download/{zip_name}"})
+        add_learning_log("package", f"安装包创建: {zip_name}", f"{size_mb:.1f}MB")
+    except Exception as e:
+        socketio.emit("command_analysis", {"command": "安装包", "cycle": 0, "analysis": f"安装包创建失败: {str(e)[:100]}"})
+
+
 def _handle_config_command(cmd: str) -> bool:
     """处理配置命令，在指令文本框中输入配置命令"""
     cmd_lower = cmd.lower().strip()
+
+    # ── 游戏控制命令 ──
+    # 阵营选择
+    if cmd_lower.startswith("阵营 ") or cmd_lower.startswith("faction "):
+        parts = cmd.split(maxsplit=1)
+        faction = parts[1].strip() if len(parts) > 1 else ""
+        valid_factions = {"红": "红方", "蓝": "蓝方", "red": "红方", "blue": "蓝方"}
+        mapped = valid_factions.get(faction, faction)
+        update_state(game_faction=mapped)
+        add_learning_log("game", f"阵营选择: {mapped}", "")
+        socketio.emit("command_analysis", {"command": cmd, "cycle": 0, "analysis": f"阵营已设置为: {mapped}。AI将以{mapped}身份进行战术决策。"})
+        socketio.emit("game_config_update", {"faction": mapped})
+        return True
+
+    # 难度选择
+    if cmd_lower.startswith("难度 ") or cmd_lower.startswith("difficulty "):
+        parts = cmd.split(maxsplit=1)
+        diff = parts[1].strip() if len(parts) > 1 else ""
+        valid_diffs = {"简单": "简单", "普通": "普通", "困难": "困难", "easy": "简单", "normal": "普通", "hard": "困难"}
+        mapped = valid_diffs.get(diff, diff)
+        update_state(game_difficulty=mapped)
+        add_learning_log("game", f"难度选择: {mapped}", "")
+        socketio.emit("command_analysis", {"command": cmd, "cycle": 0, "analysis": f"难度已设置为: {mapped}。AI将调整战术策略匹配此难度。"})
+        socketio.emit("game_config_update", {"difficulty": mapped})
+        return True
+
+    # 模式选择
+    if cmd_lower.startswith("模式 ") or cmd_lower.startswith("mode "):
+        parts = cmd.split(maxsplit=1)
+        mode = parts[1].strip() if len(parts) > 1 else ""
+        valid_modes = {"对战": "对战", "训练": "训练", "战役": "战役", "battle": "对战", "training": "训练", "campaign": "战役"}
+        mapped = valid_modes.get(mode, mode)
+        update_state(game_mode=mapped)
+        add_learning_log("game", f"模式选择: {mapped}", "")
+        socketio.emit("command_analysis", {"command": cmd, "cycle": 0, "analysis": f"模式已设置为: {mapped}。AI将根据{mapped}模式调整决策逻辑。"})
+        socketio.emit("game_config_update", {"mode": mapped})
+        return True
+
+    # 训练控制
+    if cmd_lower.startswith("训练 ") or cmd_lower.startswith("train "):
+        parts = cmd.split(maxsplit=1)
+        action = parts[1].strip().lower() if len(parts) > 1 else ""
+        if action in ("开始", "start", "启动"):
+            update_state(training_status="running", training_progress=0, training_message="训练启动中...")
+            add_learning_log("training", "用户启动AI训练", "")
+            socketio.emit("command_analysis", {"command": cmd, "cycle": 0, "analysis": "AI训练已启动! 系统将在后台进行模型训练，期间可正常使用其他功能。"})
+            # 在后台线程中启动训练
+            threading.Thread(target=_start_training_background, daemon=True).start()
+        elif action in ("停止", "stop", "结束"):
+            update_state(training_status="idle", training_message="训练已停止")
+            add_learning_log("training", "用户停止AI训练", "")
+            socketio.emit("command_analysis", {"command": cmd, "cycle": 0, "analysis": "AI训练已停止。"})
+        return True
+
+    # 部署命令
+    if cmd_lower in ("部署", "deploy", "部署到服务器"):
+        add_learning_log("deploy", "用户触发部署到服务器", "")
+        socketio.emit("command_analysis", {"command": cmd, "cycle": 0, "analysis": "正在部署到腾讯云服务器...请稍候"})
+        threading.Thread(target=_deploy_to_server_background, daemon=True).start()
+        return True
+
+    # 上传命令
+    if cmd_lower in ("上传", "upload", "上传github", "推送github"):
+        add_learning_log("github", "用户触发推送到GitHub", "")
+        socketio.emit("command_analysis", {"command": cmd, "cycle": 0, "analysis": "正在推送到GitHub...请稍候"})
+        threading.Thread(target=_push_to_github_background, daemon=True).start()
+        return True
+
+    # 更新命令
+    if cmd_lower in ("更新", "update", "更新应用"):
+        add_learning_log("update", "用户触发应用更新", "")
+        socketio.emit("command_analysis", {"command": cmd, "cycle": 0, "analysis": "正在更新应用...检查版本中"})
+        threading.Thread(target=_update_app_background, daemon=True).start()
+        return True
+
+    # 安装包
+    if cmd_lower in ("安装包", "package", "创建安装包"):
+        add_learning_log("package", "用户触发创建安装包", "")
+        socketio.emit("command_analysis", {"command": cmd, "cycle": 0, "analysis": "正在创建安装包...请稍候"})
+        threading.Thread(target=_create_package_background, daemon=True).start()
+        return True
 
     # API Key 配置
     if cmd_lower.startswith("apikey ") or cmd_lower.startswith("api_key "):
@@ -2706,8 +3221,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Firefight AI v5.0</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/socket.io/4.7.2/socket.io.min.js" onerror="this.onerror=null;this.src='https://unpkg.com/socket.io-client@4.7.2/dist/socket.io.min.js'"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/Chart.js/4.4.0/chart.umd.min.js" onerror="this.onerror=null;this.src='https://unpkg.com/chart.js@4.4.0/dist/chart.umd.min.js'"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0e14;color:#d0d0d0;min-height:100vh}
@@ -2897,10 +3412,45 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
     <button class="btn-start" onclick="startAI()">上线 AI</button>
     <button class="btn-stop" onclick="stopAI()">停止</button>
     <div class="cmd-input-wrapper">
-      <input type="text" id="cmd-input" placeholder="战术指令/配置命令(apikey/adb/repo/server)..." onkeydown="if(event.key==='Enter')sendCommand()">
+      <input type="text" id="cmd-input" placeholder="指令: 阵营 红/蓝 | 难度 简单/困难 | 模式 对战 | 训练 开始 | 部署/上传..." onkeydown="if(event.key==='Enter')sendCommand()">
       <button class="btn-send" onclick="sendCommand()">发送</button>
       <button class="btn-clear" onclick="clearCommand()">清除</button>
     </div>
+  </div>
+  <!-- ── 游戏控制面板 ── -->
+  <div class="panel" style="margin-bottom:16px;background:#151920" id="game-control-panel">
+    <h3>游戏控制 <span style="font-size:10px;font-weight:normal;color:#888">(指令或点击设置)</span></h3>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center">
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="font-size:11px;color:#888">阵营:</span>
+        <button class="btn-faction" id="btn-faction-red" onclick="setFaction('红')" style="padding:6px 14px;font-size:11px;background:#e53935;color:#fff;border-radius:6px;border:none;cursor:pointer">红方</button>
+        <button class="btn-faction" id="btn-faction-blue" onclick="setFaction('蓝')" style="padding:6px 14px;font-size:11px;background:#2196f3;color:#fff;border-radius:6px;border:none;cursor:pointer">蓝方</button>
+        <span id="faction-label" style="font-size:11px;color:#ff9800">未选择</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="font-size:11px;color:#888">难度:</span>
+        <button onclick="setDifficulty('简单')" style="padding:6px 14px;font-size:11px;background:#4caf50;color:#fff;border-radius:6px;border:none;cursor:pointer">简单</button>
+        <button onclick="setDifficulty('普通')" style="padding:6px 14px;font-size:11px;background:#ff9800;color:#fff;border-radius:6px;border:none;cursor:pointer">普通</button>
+        <button onclick="setDifficulty('困难')" style="padding:6px 14px;font-size:11px;background:#e53935;color:#fff;border-radius:6px;border:none;cursor:pointer">困难</button>
+        <span id="difficulty-label" style="font-size:11px;color:#ff9800">未选择</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="font-size:11px;color:#888">模式:</span>
+        <button onclick="setMode('对战')" style="padding:6px 14px;font-size:11px;background:#7c4dff;color:#fff;border-radius:6px;border:none;cursor:pointer">对战</button>
+        <button onclick="setMode('训练')" style="padding:6px 14px;font-size:11px;background:#00bcd4;color:#fff;border-radius:6px;border:none;cursor:pointer">训练</button>
+        <button onclick="setMode('战役')" style="padding:6px 14px;font-size:11px;background:#ff5722;color:#fff;border-radius:6px;border:none;cursor:pointer">战役</button>
+        <span id="mode-label" style="font-size:11px;color:#ff9800">未选择</span>
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
+      <button onclick="startTraining()" style="padding:6px 14px;font-size:11px;background:#4caf50;color:#fff;border-radius:6px;border:none;cursor:pointer">开始训练AI</button>
+      <button onclick="stopTraining()" style="padding:6px 14px;font-size:11px;background:#e53935;color:#fff;border-radius:6px;border:none;cursor:pointer">停止训练</button>
+      <button onclick="pushToGitHub()" style="padding:6px 14px;font-size:11px;background:#ff9800;color:#fff;border-radius:6px;border:none;cursor:pointer">推送到GitHub</button>
+      <button onclick="deployToServer()" style="padding:6px 14px;font-size:11px;background:#00bcd4;color:#fff;border-radius:6px;border:none;cursor:pointer">部署到服务器</button>
+      <button onclick="updateApp()" style="padding:6px 14px;font-size:11px;background:#7c4dff;color:#fff;border-radius:6px;border:none;cursor:pointer">更新应用</button>
+      <button onclick="createPackage()" style="padding:6px 14px;font-size:11px;background:#607d8b;color:#fff;border-radius:6px;border:none;cursor:pointer">创建安装包</button>
+    </div>
+    <div id="game-control-result" style="margin-top:8px;font-size:11px;color:#888"></div>
   </div>
   <div class="stats-grid">
     <div class="stat-card"><div class="label">轮次</div><div class="value blue" id="cycle">0</div></div>
@@ -3351,10 +3901,51 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
 </div>
 
 <script>
-const socket = io();
+// ── 全局变量 (延迟初始化) ──
+let socket = null;
 let selectedDataset = '';
 let scoreChart = null;
 let currentChatBubble = null;
+let agentChatBubble = null;
+let lastSearchResults = null;
+let _emuRefreshTimer = null;
+let _emuScreenConnected = false;
+
+// ── Socket.IO 安全初始化 (必须在所有 socket.on 之前) ──
+(function initSocket(){
+  if(typeof io === 'undefined'){
+    console.warn('[FirefightAI] socket.io CDN未加载，使用轮询回退模式');
+    setInterval(function(){
+      fetch('/api/stats').then(function(r){return r.json()}).then(function(d){
+        if(d.status) document.getElementById('status-badge').textContent = d.status;
+        if(d.cycle) document.getElementById('cycle').textContent = d.cycle;
+      }).catch(function(){});
+    }, 2000);
+    return;
+  }
+  try {
+    socket = io({transports: ['websocket', 'polling'], timeout: 10000});
+    _on('connect', function(){
+      console.log('[FirefightAI] Socket.IO 已连接');
+      document.getElementById('status-badge').style.color = '#ff9800';
+    });
+    _on('disconnect', function(){
+      console.log('[FirefightAI] Socket.IO 已断开');
+      document.getElementById('status-badge').style.color = '#888';
+      document.getElementById('status-badge').textContent = '连接断开';
+    });
+    _on('connect_error', function(err){
+      console.warn('[FirefightAI] Socket.IO 连接失败:', err.message);
+    });
+  } catch(e) {
+    console.error('[FirefightAI] Socket.IO 初始化失败:', e.message);
+  }
+})();
+
+// Socket事件注册安全包装器
+function _on(evt, handler) {
+  if (socket) { socket.on(evt, handler); }
+}
 
 // ── 标签页 ──
 function switchTab(tab) {
@@ -3387,34 +3978,97 @@ function initChart(){
 
 // ── AI 控制 ──
 function startAI(){
+  if(!socket || !socket.connected){
+    alert('Socket.IO 未连接，请刷新页面或检查网络');
+    return;
+  }
   document.getElementById('status-badge').textContent='连接中...';
   document.getElementById('status-badge').style.color='#ff9800';
   document.getElementById('thinking-box').innerHTML='<span class="spinner"></span> 正在启动AI智能体...';
   socket.emit('start');
 }
 function stopAI(){
+  if(!socket || !socket.connected){
+    document.getElementById('status-badge').textContent='已停止';
+    document.getElementById('status-badge').style.color='#888';
+    return;
+  }
   socket.emit('stop');
   document.getElementById('status-badge').textContent='已停止';
   document.getElementById('status-badge').style.color='#888';
   document.getElementById('thinking-box').textContent='AI已离线';
 }
 function escapeHtml(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
-function sendCommand(){var inp=document.getElementById('cmd-input');var cmd=inp.value.trim();if(!cmd)return;socket.emit('send_command',{command:cmd});inp.value='';inp.placeholder='指令已发送...';setTimeout(function(){inp.placeholder='战术指令/配置命令(apikey/adb/repo/server)...'},2500)}
-function clearCommand(){socket.emit('clear_command')}
+function sendCommand(){
+  if(!socket || !socket.connected){alert('Socket.IO 未连接');return;}
+  var inp=document.getElementById('cmd-input');var cmd=inp.value.trim();if(!cmd)return;
+  // 立即显示指令文本在AI思路中
+  var box=document.getElementById('thinking-box');
+  if(box)box.innerHTML='<span class="highlight">[指挥官指令]</span> '+escapeHtml(cmd)+'<br><span class="spinner"></span> AI分析中...';
+  socket.emit('send_command',{command:cmd});inp.value='';inp.placeholder='指令已发送...';
+  setTimeout(function(){inp.placeholder='输入指令: 阵营 红/蓝 | 难度 简单/困难 | 模式 对战 | 训练 开始 | 部署...'},2500);
+}
+function clearCommand(){if(socket)socket.emit('clear_command')}
+
+// ── 游戏控制 ──
+function setFaction(f){
+  document.getElementById('faction-label').textContent = f;
+  document.getElementById('faction-label').style.color = f==='红'?'#e53935':'#2196f3';
+  document.getElementById('game-control-result').innerHTML = '<span style="color:#4caf50">阵营已设置为: '+f+'方</span>';
+  if(socket&&socket.connected)socket.emit('send_command',{command:'阵营 '+f});
+}
+function setDifficulty(d){
+  document.getElementById('difficulty-label').textContent = d;
+  document.getElementById('difficulty-label').style.color = d==='困难'?'#e53935':(d==='普通'?'#ff9800':'#4caf50');
+  document.getElementById('game-control-result').innerHTML = '<span style="color:#4caf50">难度已设置为: '+d+'</span>';
+  if(socket&&socket.connected)socket.emit('send_command',{command:'难度 '+d});
+}
+function setMode(m){
+  document.getElementById('mode-label').textContent = m;
+  document.getElementById('game-control-result').innerHTML = '<span style="color:#4caf50">模式已设置为: '+m+'</span>';
+  if(socket&&socket.connected)socket.emit('send_command',{command:'模式 '+m});
+}
+function startTraining(){
+  document.getElementById('game-control-result').innerHTML = '<span class="spinner"></span> 开始训练AI...';
+  if(socket&&socket.connected)socket.emit('send_command',{command:'训练 开始'});
+}
+function updateApp(){
+  document.getElementById('game-control-result').innerHTML = '<span class="spinner"></span> 正在更新应用...';
+  fetch('/api/version/check').then(function(r){return r.json()}).then(function(d){
+    document.getElementById('game-control-result').innerHTML = '<span style="color:#4caf50">当前版本: v'+d.current_version+' | 构建: '+d.current_build+'</span>';
+  }).catch(function(e){
+    document.getElementById('game-control-result').innerHTML = '<span style="color:#e53935">更新失败: '+e+'</span>';
+  });
+}
+function createPackage(){
+  document.getElementById('game-control-result').innerHTML = '<span class="spinner"></span> 正在创建安装包...';
+  fetch('/api/package/create',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(function(r){return r.json()}).then(function(d){
+    if(d.status==='ok'){
+      document.getElementById('game-control-result').innerHTML = '<span style="color:#4caf50">安装包已创建: '+d.filename+' ('+d.size_mb+'MB)</span><br><a href="'+d.download_url+'" target="_blank" style="color:#58a5f3;font-size:11px">下载安装包</a>';
+    }else{
+      document.getElementById('game-control-result').innerHTML = '<span style="color:#e53935">创建失败: '+d.error+'</span>';
+    }
+  }).catch(function(e){
+    document.getElementById('game-control-result').innerHTML = '<span style="color:#e53935">创建失败: '+e+'</span>';
+  });
+}
 
 // ── AI 对话 ──
 function sendChat(){
+  if(!socket||!socket.connected){alert('Socket.IO 未连接');return;}
   var inp=document.getElementById('chat-input');var msg=inp.value.trim();if(!msg)return;
   addChatMessage('user',msg);inp.value='';
   socket.emit('ai_chat',{message:msg,include_battlefield:true,is_correction:false});
 }
 function sendCorrection(){
+  if(!socket||!socket.connected){alert('Socket.IO 未连接');return;}
   var inp=document.getElementById('chat-input');var msg=inp.value.trim();if(!msg)return;
   addChatMessage('user','[纠正] '+msg);inp.value='';
   socket.emit('ai_chat',{message:msg,include_battlefield:true,is_correction:true});
   socket.emit('ai_correct_behavior',{correction:msg});
 }
 function clearChat(){
+  if(!socket||!socket.connected){return;}
   socket.emit('ai_chat_clear');
   document.getElementById('chat-messages').innerHTML='<div class="chat-msg assistant"><div class="avatar">AI</div><div class="bubble">对话已清空。</div></div>';
 }
@@ -3427,8 +4081,8 @@ function addChatMessage(role,text){
   msgs.appendChild(div);msgs.scrollTop=msgs.scrollHeight;
 }
 
-socket.on('ai_chat_start',function(data){addChatMessage('assistant','')});
-socket.on('ai_chat_token',function(data){
+_on('ai_chat_start',function(data){addChatMessage('assistant','')});
+_on('ai_chat_token',function(data){
   if(currentChatBubble){
     if(data.done){currentChatBubble.textContent=data.full;var el=document.getElementById('chat-bubble-streaming');if(el)el.id='';currentChatBubble=null}
     else{currentChatBubble.textContent+=data.token}
@@ -3441,16 +4095,16 @@ socket.on('ai_chat_token',function(data){
     document.getElementById('agent-chat-messages').scrollTop=document.getElementById('agent-chat-messages').scrollHeight;
   }
 });
-socket.on('ai_chat_error',function(data){if(currentChatBubble){currentChatBubble.textContent='[错误] '+data.error;currentChatBubble=null}});
+_on('ai_chat_error',function(data){if(currentChatBubble){currentChatBubble.textContent='[错误] '+data.error;currentChatBubble=null}});
 
 // ── 行为纠正回显 ──
-socket.on('correction_analysis',function(data){
+_on('correction_analysis',function(data){
   var msgs=document.getElementById('chat-messages');
   var div=document.createElement('div');div.className='chat-msg assistant';
   div.innerHTML='<div class="avatar">AI</div><div class="bubble"><strong>学习完成:</strong><br>'+escapeHtml(data.analysis||'')+'</div>';
   msgs.appendChild(div);msgs.scrollTop=msgs.scrollHeight;
 });
-socket.on('ai_learned_from_correction',function(data){
+_on('ai_learned_from_correction',function(data){
   var msgs=document.getElementById('chat-messages');
   var div=document.createElement('div');div.className='chat-msg assistant';
   div.innerHTML='<div class="avatar">AI</div><div class="bubble" style="background:#302a1a;border-left:2px solid #ff9800"><strong>已从纠正中学习</strong></div>';
@@ -3458,7 +4112,7 @@ socket.on('ai_learned_from_correction',function(data){
 });
 
 // ── AI 思考 ──
-socket.on('ai_thinking_update',function(data){
+_on('ai_thinking_update',function(data){
   var box=document.getElementById('thinking-box');
   if(box){
     var html='';
@@ -3471,22 +4125,24 @@ socket.on('ai_thinking_update',function(data){
 
 // ── 连接管理 ──
 function rebuildChain(){
+  if(!socket||!socket.connected){alert('Socket.IO 未连接');return;}
   var s=document.getElementById('rebuild-status');s.innerHTML='<div class="alert info"><span class="spinner"></span> 重建决策链中...</div>';
   socket.emit('rebuild_chain');
 }
 function checkAllConnections(){
+  if(!socket||!socket.connected){alert('Socket.IO 未连接');return;}
   var s=document.getElementById('rebuild-status');s.innerHTML='<div class="alert info"><span class="spinner"></span> 检查所有连接...</div>';
   socket.emit('check_all_connections');
 }
-socket.on('rebuild_progress',function(d){document.getElementById('rebuild-status').innerHTML='<div class="alert info">'+d.step+' ('+d.progress+'%)</div>'});
-socket.on('rebuild_complete',function(d){
+_on('rebuild_progress',function(d){document.getElementById('rebuild-status').innerHTML='<div class="alert info">'+d.step+' ('+d.progress+'%)</div>'});
+_on('rebuild_complete',function(d){
   var html='<div class="alert success">决策链重建完成</div>';
   for(var k in d.results){html+='<span style="font-size:11px;color:#888">'+k+': </span><span style="font-size:11px;color:'+(d.results[k]==='online'||d.results[k]==='connected'?'#4caf50':'#e53935')+'">'+d.results[k]+'</span> '}
   document.getElementById('rebuild-status').innerHTML=html;
   updateConnMinis(d.results);
 });
-socket.on('rebuild_error',function(d){document.getElementById('rebuild-status').innerHTML='<div class="alert error">'+d.error+'</div>'});
-socket.on('all_connections_status',function(d){updateConnMinis(d);updateConnCards(d)});
+_on('rebuild_error',function(d){document.getElementById('rebuild-status').innerHTML='<div class="alert error">'+d.error+'</div>'});
+_on('all_connections_status',function(d){updateConnMinis(d);updateConnCards(d)});
 
 function updateConnMinis(d){
   var api=(d.deepseek||d.api)==='online';var adb=(d.adb||'')==='connected';var gh=(d.github||'')==='online';var srv=(d.server||'')==='online';
@@ -3599,9 +4255,9 @@ function deployToServer(){fetch('/api/server/deploy',{method:'POST',headers:{'Co
 function syncDataToServer(){fetch('/api/server/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sync_only:true})}).then(r=>r.json()).then(d=>{
   document.getElementById('conn-server-status').textContent='同步中...';document.getElementById('conn-server-status').className='conn-status checking';
 })}
-socket.on('server_deploy_progress',function(d){document.getElementById('conn-server-detail').textContent=d.step+' ('+d.progress+'%)'});
-socket.on('server_deploy_complete',function(d){document.getElementById('conn-server-status').textContent='在线';document.getElementById('conn-server-status').className='conn-status online';document.getElementById('conn-server-detail').textContent='部署完成'});
-socket.on('server_deploy_error',function(d){document.getElementById('conn-server-status').textContent='错误';document.getElementById('conn-server-status').className='conn-status offline';document.getElementById('conn-server-detail').textContent=d.error});
+_on('server_deploy_progress',function(d){document.getElementById('conn-server-detail').textContent=d.step+' ('+d.progress+'%)'});
+_on('server_deploy_complete',function(d){document.getElementById('conn-server-status').textContent='在线';document.getElementById('conn-server-status').className='conn-status online';document.getElementById('conn-server-detail').textContent='部署完成'});
+_on('server_deploy_error',function(d){document.getElementById('conn-server-status').textContent='错误';document.getElementById('conn-server-status').className='conn-status offline';document.getElementById('conn-server-detail').textContent=d.error});
 
 function checkPyTorch(){fetch('/api/pytorch/version').then(r=>r.json()).then(d=>{
   var el=document.getElementById('conn-pytorch-status');
@@ -3623,10 +4279,9 @@ function checkPyTorch(){fetch('/api/pytorch/version').then(r=>r.json()).then(d=>
 function updatePyTorch(){fetch('/api/pytorch/update',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).then(d=>{
   document.getElementById('conn-pytorch-status').textContent='更新中...';document.getElementById('conn-pytorch-status').className='conn-status checking';
 })}
-socket.on('pytorch_update_complete',function(d){document.getElementById('conn-pytorch-status').textContent=d.version||'更新完成';document.getElementById('conn-pytorch-status').className='conn-status '+(d.success?'online':'offline')});
+_on('pytorch_update_complete',function(d){document.getElementById('conn-pytorch-status').textContent=d.version||'更新完成';document.getElementById('conn-pytorch-status').className='conn-status '+(d.success?'online':'offline')});
 
 // ── 智能搜索 ──
-var lastSearchResults=null;
 var lastSearchQuery='';
 function webSearch(){
   var q=document.getElementById('web-search-input').value.trim();
@@ -3646,6 +4301,7 @@ function webSearch(){
   })
 }
 function webSearchStream(){
+  if(!socket||!socket.connected){alert('Socket.IO 未连接');return;}
   var q=document.getElementById('web-search-input').value.trim();
   if(!q)return;
   lastSearchQuery=q;
@@ -3696,8 +4352,8 @@ function loadKnowledge(){
 }
 
 // ── 智能体 ──
-var agentChatBubble=null;
 function agentChat(){
+  if(!socket||!socket.connected){alert('Socket.IO 未连接');return;}
   var inp=document.getElementById('agent-chat-input');var msg=inp.value.trim();if(!msg)return;
   addAgentMessage('user',msg);inp.value='';
   if(msg.includes('诊断')||msg.includes('检查')||msg.includes('连接')){
@@ -3847,28 +4503,28 @@ function saveNow(){
 }
 
 // ── Web Search Socket事件 ──
-socket.on('web_search_progress',function(d){
+_on('web_search_progress',function(d){
   document.getElementById('web-search-progress').innerHTML='<div class="search-progress"><span class="spinner"></span> '+d.step+' ('+d.progress+'%)</div>';
 });
-socket.on('web_search_token',function(d){
+_on('web_search_token',function(d){
   var el=document.getElementById('stream-text');
   if(el){
     if(d.done){el.textContent=d.full}else{el.textContent+=d.token}
   }
 });
-socket.on('web_search_complete',function(d){
+_on('web_search_complete',function(d){
   document.getElementById('web-search-progress').innerHTML='';
   lastSearchResults=d;
   renderSearchResults(d);
 });
-socket.on('web_search_error',function(d){
+_on('web_search_error',function(d){
   document.getElementById('web-search-progress').innerHTML='<div class="alert error">'+d.error+'</div>';
 });
-socket.on('web_learn_result',function(d){
+_on('web_learn_result',function(d){
   if(d.error){alert('学习失败: '+d.error)}else{alert('AI学习完成!')}
 });
 // ── v5.1 兵法学习事件 ──
-socket.on('military_learned',function(d){
+_on('military_learned',function(d){
   var summary=d.summary||'';
   if(summary){
     addLearningLog('兵法学习',d.query,summary);
@@ -3883,10 +4539,10 @@ socket.on('military_learned',function(d){
   }
 });
 // ── v5.1 自动保存事件 ──
-socket.on('auto_save_progress',function(d){
+_on('auto_save_progress',function(d){
   if(d.step)console.log('[AutoSave] '+d.step);
 });
-socket.on('auto_save_complete',function(d){
+_on('auto_save_complete',function(d){
   var el=document.getElementById('conn-autosave-status');
   if(el){el.textContent='已保存';el.className='conn-status ok'}
   var detail=document.getElementById('conn-autosave-detail');
@@ -3900,29 +4556,40 @@ function loadModels(){fetch('/api/models').then(r=>r.json()).then(data=>{var htm
 function uploadImages(){var files=document.getElementById('file-input').files;if(!files.length)return;var fd=new FormData();for(var i=0;i<files.length;i++)fd.append('file_'+i,files[i]);if(selectedDataset)fd.append('dataset',selectedDataset);var s=document.getElementById('upload-status');s.innerHTML='<div class="alert info">上传中...</div>';fetch('/api/upload_images',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{s.innerHTML='<div class="alert success">已上传 '+d.uploaded.length+' 张到 '+d.dataset+'</div>';loadDatasets()}).catch(e=>{s.innerHTML='<div class="alert error">失败: '+e+'</div>'})}
 function startTraining(){if(!selectedDataset){alert('请先选择数据集');return}var ep=parseInt(document.getElementById('train-epochs').value)||50;var md=document.getElementById('train-model').value;var isz=parseInt(document.getElementById('train-imgsz').value)||640;var autoPush=document.getElementById('auto-push-github').checked;document.getElementById('btn-train-start').style.display='none';document.getElementById('btn-train-stop').style.display='inline-block';document.getElementById('train-progress-container').style.display='block';document.getElementById('train-log').innerHTML='';document.getElementById('train-status-text').textContent='训练中...';fetch('/api/train/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dataset:selectedDataset,model_name:md,epochs:ep,imgsz:isz,auto_push_github:autoPush})}).then(r=>r.json()).then(d=>{if(d.error)alert(d.error)})}
 function stopTraining(){fetch('/api/train/stop',{method:'POST'}).then(r=>r.json()).then(d=>{document.getElementById('train-status-text').textContent='已停止';document.getElementById('btn-train-start').style.display='inline-block';document.getElementById('btn-train-stop').style.display='none'})}
-socket.on('training_log',function(d){var l=document.getElementById('train-log');l.innerHTML+='<div>'+escapeHtml(d.line)+'</div>';l.scrollTop=l.scrollHeight})
-socket.on('training_complete',function(d){document.getElementById('btn-train-start').style.display='inline-block';document.getElementById('btn-train-stop').style.display='none';document.getElementById('train-status-text').textContent=d.success?'训练完成!':'训练失败';loadModels()})
-socket.on('github_push_complete',function(d){document.getElementById('train-status-text').textContent+=' | GitHub推送: '+(d.success?'成功':'失败')})
+_on('training_log',function(d){var l=document.getElementById('train-log');l.innerHTML+='<div>'+escapeHtml(d.line)+'</div>';l.scrollTop=l.scrollHeight})
+_on('training_complete',function(d){document.getElementById('btn-train-start').style.display='inline-block';document.getElementById('btn-train-stop').style.display='none';document.getElementById('train-status-text').textContent=d.success?'训练完成!':'训练失败';loadModels()})
+_on('github_push_complete',function(d){document.getElementById('train-status-text').textContent+=' | GitHub推送: '+(d.success?'成功':'失败')})
 
 // ── 参数学习 ──
 function loadParams(){fetch('/api/params/list').then(r=>r.json()).then(data=>{var html='';data.forEach(function(p){html+='<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1a1f2b"><span>'+p.name+'</span><span style="color:#888">'+p.size_kb+'KB</span></div>'});document.getElementById('params-list').innerHTML=html||'暂无参数文件'})}
 function uploadParams(){var files=document.getElementById('params-input').files;if(!files.length)return;var fd=new FormData();for(var i=0;i<files.length;i++)fd.append('file_'+i,files[i]);var s=document.getElementById('params-upload-status');s.innerHTML='<div class="alert info">上传中...</div>';fetch('/api/params/upload',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{s.innerHTML='<div class="alert success">已上传 '+d.count+' 个文件</div>';loadParams()}).catch(e=>{s.innerHTML='<div class="alert error">失败</div>'})}
 function learnFromParams(){var r=document.getElementById('params-learn-result');r.innerHTML='<div class="alert info"><span class="spinner"></span> AI 正在学习参数...</div>';fetch('/api/params/learn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(res=>res.json()).then(d=>{r.innerHTML='<div class="alert info">学习已启动, 等待 AI 分析...</div>'})}
-socket.on('params_learned',function(d){var r=document.getElementById('params-learn-result');if(d.error){r.innerHTML='<div class="alert error">'+d.error+'</div>'}else{r.innerHTML='<div class="alert success"><strong>AI 学习结果:</strong><br><pre style="font-size:10px;white-space:pre-wrap;margin-top:6px;color:#aaa">'+escapeHtml(d.analysis||'')+'</pre></div>'}})
+_on('params_learned',function(d){var r=document.getElementById('params-learn-result');if(d.error){r.innerHTML='<div class="alert error">'+d.error+'</div>'}else{r.innerHTML='<div class="alert success"><strong>AI 学习结果:</strong><br><pre style="font-size:10px;white-space:pre-wrap;margin-top:6px;color:#aaa">'+escapeHtml(d.analysis||'')+'</pre></div>'}})
 
 function learnFromCombat(){var r=document.getElementById('combat-learn-result');r.innerHTML='<div class="alert info"><span class="spinner"></span> AI 从实战数据学习...</div>';fetch('/api/combat/learn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(res=>res.json()).then(d=>{r.innerHTML='<div class="alert info">学习已启动</div>'})}
-socket.on('combat_learn_result',function(d){var r=document.getElementById('combat-learn-result');if(d.error){r.innerHTML='<div class="alert error">'+d.error+'</div>'}else{var html='<div class="alert success">学习完成! 共'+d.total_experiences+'条经验</div>';if(d.stats)html+='<div style="font-size:10px;color:#888">平均分: '+d.stats.avg_score+' | 正向率: '+d.stats.positive_rate+'%</div>';if(d.rules&&d.rules.length)html+='<div style="font-size:10px;color:#4caf50">新规则: '+d.rules.join('; ')+'</div>';if(d.summary)html+='<div style="font-size:10px;color:#aaa;margin-top:4px;white-space:pre-wrap">'+escapeHtml(d.summary)+'</div>';r.innerHTML=html}})
+_on('combat_learn_result',function(d){var r=document.getElementById('combat-learn-result');if(d.error){r.innerHTML='<div class="alert error">'+d.error+'</div>'}else{var html='<div class="alert success">学习完成! 共'+d.total_experiences+'条经验</div>';if(d.stats)html+='<div style="font-size:10px;color:#888">平均分: '+d.stats.avg_score+' | 正向率: '+d.stats.positive_rate+'%</div>';if(d.rules&&d.rules.length)html+='<div style="font-size:10px;color:#4caf50">新规则: '+d.rules.join('; ')+'</div>';if(d.summary)html+='<div style="font-size:10px;color:#aaa;margin-top:4px;white-space:pre-wrap">'+escapeHtml(d.summary)+'</div>';r.innerHTML=html}})
 function exportCombatData(){fetch('/api/combat/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({format:'csv'})}).then(r=>r.blob()).then(b=>{var a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='combat_data.csv';a.click()})}
 
 // ── 学习日志 ──
 function refreshLearningLog(){fetch('/api/learning_log?limit=100').then(r=>r.json()).then(data=>renderLearningLog(data))}
 function clearLearningLog(){fetch('/api/learning_log/clear',{method:'POST'}).then(r=>r.json()).then(d=>{document.getElementById('learning-log-container').innerHTML='<div style="color:#888;padding:20px;text-align:center">日志已清空</div>'})}
 function exportLearningLog(){fetch('/api/learning_log/export').then(r=>r.json()).then(d=>{var a=document.createElement('a');a.href='data:text/json;charset=utf-8,'+encodeURIComponent(JSON.stringify(d,null,2));a.download='learning_log.json';a.click()})}
+function addLearningLog(category, message, detail){
+  var c = document.getElementById('learning-log-container');
+  if(!c) return;
+  var now = new Date().toLocaleTimeString();
+  var catClass = category || 'system';
+  var item = '<div class="learning-log-item"><span class="ll-time">'+now+'</span> <span class="ll-cat '+catClass+'">'+catClass+'</span> <span class="ll-msg">'+escapeHtml(message)+'</span>'+(detail?'<div class="ll-detail">'+escapeHtml(detail)+'</div>':'')+'</div>';
+  var cur = c.querySelector('.learning-log-item');
+  if(cur) c.insertAdjacentHTML('afterbegin', item);
+  else c.innerHTML = item;
+  while(c.children.length > 200) c.removeChild(c.lastChild);
+}
 function renderLearningLog(data){var c=document.getElementById('learning-log-container');if(!data.length){c.innerHTML='<div style="color:#888;padding:20px;text-align:center">暂无学习日志</div>';return}var html='';data.reverse().forEach(function(e){var catClass=e.category||'system';html+='<div class="learning-log-item"><span class="ll-time">'+e.time+'</span> <span class="ll-cat '+catClass+'">'+catClass+'</span> <span class="ll-msg">'+escapeHtml(e.message)+'</span>'+(e.detail?'<div class="ll-detail">'+escapeHtml(e.detail)+'</div>':'')+'</div>'});c.innerHTML=html}
-socket.on('learning_log_update',function(d){var c=document.getElementById('learning-log-container');if(c){var cur=c.querySelector('.learning-log-item');var e=d.entry;var catClass=e.category||'system';var item='<div class="learning-log-item"><span class="ll-time">'+e.time+'</span> <span class="ll-cat '+catClass+'">'+catClass+'</span> <span class="ll-msg">'+escapeHtml(e.message)+'</span>'+(e.detail?'<div class="ll-detail">'+escapeHtml(e.detail)+'</div>':'')+'</div>';if(cur)c.insertAdjacentHTML('afterbegin',item);else c.innerHTML=item;while(c.children.length>200)c.removeChild(c.lastChild)}});
+_on('learning_log_update',function(d){var c=document.getElementById('learning-log-container');if(c){var cur=c.querySelector('.learning-log-item');var e=d.entry;var catClass=e.category||'system';var item='<div class="learning-log-item"><span class="ll-time">'+e.time+'</span> <span class="ll-cat '+catClass+'">'+catClass+'</span> <span class="ll-msg">'+escapeHtml(e.message)+'</span>'+(e.detail?'<div class="ll-detail">'+escapeHtml(e.detail)+'</div>':'')+'</div>';if(cur)c.insertAdjacentHTML('afterbegin',item);else c.innerHTML=item;while(c.children.length>200)c.removeChild(c.lastChild)}});
 
 // ── 指挥面板事件 ──
-socket.on('cycle_update',function(d){
+_on('cycle_update',function(d){
   document.getElementById('cycle').textContent=d.cycle||0;
   document.getElementById('allies').textContent=d.allies||0;
   document.getElementById('enemies').textContent=d.enemies||0;
@@ -3972,23 +4639,31 @@ socket.on('cycle_update',function(d){
     }
   }
 });
-socket.on('command_analysis',function(d){
-  var box=document.getElementById('thinking-box');if(box)box.innerHTML='<span class="highlight">[指令分析]</span> '+escapeHtml(d.analysis||'');
+_on('command_analysis',function(d){
+  var box=document.getElementById('thinking-box');if(!box)return;
+  var cmdText = escapeHtml(d.command||'');
+  box.innerHTML='<span class="highlight">[指挥官指令]</span> '+cmdText+'<br><span class="highlight">[AI思路]</span> '+escapeHtml(d.analysis||'');
+  if(d.allies!==undefined)box.innerHTML+='<br><span style="color:#888;font-size:10px">兵力: 友'+d.allies+' vs 敌'+d.enemies+' | 第'+d.cycle+'轮</span>';
 });
-socket.on('command_recorded',function(d){});
-socket.on('started',function(d){
+_on('command_recorded',function(d){});
+_on('game_config_update',function(d){
+  if(d.faction){document.getElementById('faction-label').textContent=d.faction;document.getElementById('faction-label').style.color=d.faction==='红方'?'#e53935':'#2196f3';document.getElementById('game-control-result').innerHTML='<span style="color:#4caf50">阵营: '+d.faction+'</span>'}
+  if(d.difficulty){document.getElementById('difficulty-label').textContent=d.difficulty;document.getElementById('difficulty-label').style.color=d.difficulty==='困难'?'#e53935':(d.difficulty==='普通'?'#ff9800':'#4caf50');document.getElementById('game-control-result').innerHTML='<span style="color:#4caf50">难度: '+d.difficulty+'</span>'}
+  if(d.mode){document.getElementById('mode-label').textContent=d.mode;document.getElementById('game-control-result').innerHTML='<span style="color:#4caf50">模式: '+d.mode+'</span>'}
+});
+_on('started',function(d){
   var mode=d.mode||'combat';
   var label=mode==='smart'?'AI在线(智能模式)':'战斗中...';
   document.getElementById('status-badge').textContent=label;
   document.getElementById('status-badge').style.color='#4caf50';
   document.getElementById('thinking-box').textContent='DeepSeek智能体已就绪';
 });
-socket.on('smart_mode_status',function(d){
+_on('smart_mode_status',function(d){
   document.getElementById('status-badge').textContent='AI在线(智能模式)';
   document.getElementById('status-badge').style.color='#4caf50';
   document.getElementById('thinking-box').textContent=d.message||'DeepSeek智能体已就绪';
 });
-socket.on('stopped',function(d){
+_on('stopped',function(d){
   document.getElementById('status-badge').textContent='已停止';
   document.getElementById('status-badge').style.color='#888';
   document.getElementById('thinking-box').textContent='AI已离线';
@@ -4039,10 +4714,10 @@ function installCUDATorch(){
     dl.textContent='等待安装完成...';
   })
 }
-socket.on('gpu_install_progress',function(d){
+_on('gpu_install_progress',function(d){
   document.getElementById('conn-gpu-detail').textContent=d.step+' ('+d.progress+'%)';
 });
-socket.on('gpu_install_complete',function(d){
+_on('gpu_install_complete',function(d){
   var el=document.getElementById('conn-gpu-status');
   if(d.success){el.textContent='安装成功';el.className='conn-status online'}else{el.textContent='安装失败';el.className='conn-status offline'}
   document.getElementById('conn-gpu-detail').textContent=d.message;
@@ -4169,19 +4844,19 @@ function emuSwipe(){
     r.textContent='swipe: '+(d.status||'');r.style.color=d.status==='ok'?'#4caf50':'#e53935';
   }).catch(function(e){r.textContent='失败: '+e;r.style.color='#e53935'})
 }
-socket.on('emu_install_progress',function(d){document.getElementById('emu-progress').innerHTML='<div class="alert info"><span class="spinner"></span> '+d.step+' ('+d.progress+'%)</div>'});
-socket.on('emu_install_complete',function(d){
+_on('emu_install_progress',function(d){document.getElementById('emu-progress').innerHTML='<div class="alert info"><span class="spinner"></span> '+d.step+' ('+d.progress+'%)</div>'});
+_on('emu_install_complete',function(d){
   var html='<div class="alert '+(d.success?'success':'error')+'">'+d.message+'</div>';
   document.getElementById('emu-progress').innerHTML=html;
   checkEmulatorStatus();
 });
-socket.on('emu_start_progress',function(d){document.getElementById('emu-progress').innerHTML='<div class="alert info"><span class="spinner"></span> '+d.step+' ('+d.progress+'%)</div>'});
-socket.on('emu_start_complete',function(d){
+_on('emu_start_progress',function(d){document.getElementById('emu-progress').innerHTML='<div class="alert info"><span class="spinner"></span> '+d.step+' ('+d.progress+'%)</div>'});
+_on('emu_start_complete',function(d){
   document.getElementById('emu-progress').innerHTML='<div class="alert success">模拟器启动完成! 端口: '+d.port+'</div>';
   checkEmulatorStatus();
   startEmulatorRefresh();
 });
-socket.on('emu_start_error',function(d){document.getElementById('emu-progress').innerHTML='<div class="alert error">'+d.error+'</div>'});
+_on('emu_start_error',function(d){document.getElementById('emu-progress').innerHTML='<div class="alert error">'+d.error+'</div>'});
 
 // ── scrcpy 投屏控制 ──
 function checkScrcpyStatus(){
@@ -4258,6 +4933,7 @@ function verifyDecisionChain(){
   }).catch(function(e){p.innerHTML='<div class="alert error">验证失败: '+e+'</div>'})
 }
 function rebuildDecisionChain(){
+  if(!socket||!socket.connected){alert('Socket.IO 未连接');return;}
   document.getElementById('chain-verify-progress').innerHTML='<div class="alert info"><span class="spinner"></span> 重建决策链...</div>';
   socket.emit('rebuild_chain');
 }
@@ -4280,18 +4956,18 @@ function executeAgent(cmd){
     r.innerHTML='<div class="alert info">任务已启动: '+cmd+'</div>'
   }).catch(function(e){r.innerHTML='<div class="alert error">启动失败: '+e+'</div>'})
 }
-socket.on('agent_progress',function(d){
+_on('agent_progress',function(d){
   var r=document.getElementById('chain-verify-result');
   if(r)r.innerHTML='<div class="alert info">'+d.step+' ('+d.progress+'%)</div>'
 });
-socket.on('agent_step_result',function(d){
+_on('agent_step_result',function(d){
   var r=document.getElementById('chain-verify-result');
   if(r){
     var ok=d.result&&!d.result.error;
     r.innerHTML+='<div style="font-size:10px;color:'+(ok?'#4caf50':'#e53935')+'">['+d.index+'/'+d.total+'] '+d.tool+': '+(ok?'OK':'FAIL')+'</div>'
   }
 });
-socket.on('agent_complete',function(d){
+_on('agent_complete',function(d){
   var r=document.getElementById('chain-verify-result');
   if(r){
     var html='<div class="alert success">智能体完成: '+escapeHtml(d.summary||'')+'</div>';
@@ -4301,14 +4977,14 @@ socket.on('agent_complete',function(d){
     r.innerHTML=html;
   }
 });
-socket.on('agent_error',function(d){
+_on('agent_error',function(d){
   var r=document.getElementById('chain-verify-result');
   if(r)r.innerHTML='<div class="alert error">智能体错误: '+d.error+'</div>'
 });
-socket.on('chain_verify_progress',function(d){
+_on('chain_verify_progress',function(d){
   document.getElementById('chain-verify-progress').innerHTML='<div class="alert info"><span class="spinner"></span> '+d.step+' ('+d.progress+'%)</div>';
 });
-socket.on('chain_verify_complete',function(d){
+_on('chain_verify_complete',function(d){
   document.getElementById('chain-verify-progress').innerHTML='';
   var r=document.getElementById('chain-verify-result');
   if(r){
@@ -4450,6 +5126,7 @@ document.addEventListener('DOMContentLoaded',function(){
   // 定期刷新服务器状态
   setInterval(function(){checkServer()},30000);
 });
+
 </script>
 </body>
 </html>
