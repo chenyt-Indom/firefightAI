@@ -2078,6 +2078,24 @@ def on_check_all_connections():
 # AI 线程 + Patch
 # ═══════════════════════════════════════════════════════════════
 
+def _run_smart_mode(lc, dc, sc):
+    """智能模式：无需ADB/模拟器，AI直接通过DeepSeek响应用户"""
+    global _controller
+    _controller = None  # 无游戏控制器
+    
+    socketio.emit("smart_mode_status", {"message": "智能模式已启动，AI通过DeepSeek直接响应"})
+    
+    # 持续运行，保持AI在线状态
+    while get_state().get("running"):
+        time.sleep(1)
+        # 定期更新思考状态
+        cur = get_state().get("ai_thinking", "")
+        if not cur or cur.startswith("DeepSeek"):
+            update_state(ai_thinking="DeepSeek智能体已就绪，可直接对话和下达指令")
+    
+    update_state(running=False, status="已停止", ai_thinking="")
+    socketio.emit("stopped", {"status": "ok"})
+
 def _run_ai_loop():
     global _controller
     update_state(status="初始化组件...", ai_thinking="正在加载模型和连接设备...")
@@ -2112,9 +2130,13 @@ def _run_ai_loop():
     adb = ADBUtils(host=di.get("adb_host", "127.0.0.1"), port=di.get("adb_port", 7555), connect_timeout=dc["adb_connect_timeout"], command_timeout=dc["adb_command_timeout"], retry_count=dc["adb_retry_count"])
 
     if not adb.ensure_connected():
-        update_state(status="ADB连接失败", ai_thinking="", adb_status="disconnected")
-        add_learning_log("connection", "ADB连接失败", f"{di.get('adb_host','127.0.0.1')}:{di.get('adb_port',7555)}")
+        # ADB不可用，进入智能模式（不需要游戏模拟器）
+        update_state(status="AI在线(智能模式)", ai_thinking="DeepSeek智能体已就绪，可直接对话和下达指令", adb_status="disconnected")
+        add_learning_log("connection", "ADB未连接，进入智能模式", "AI可通过对话和指令交互，无需模拟器")
         socketio.emit("cycle_update", get_state())
+        socketio.emit("started", {"status": "ok", "mode": "smart"})
+        # 保持运行状态，等待用户指令
+        _run_smart_mode(lc, dc, sc)
         return
 
     update_state(adb_status="connected", status="ADB已连接, 加载模型...", ai_thinking="正在加载YOLO模型和OCR...")
@@ -3151,8 +3173,18 @@ function initChart(){
 }
 
 // ── AI 控制 ──
-function startAI(){socket.emit('start');document.getElementById('status-badge').textContent='连接中...';document.getElementById('status-badge').style.color='#ff9800'}
-function stopAI(){socket.emit('stop');document.getElementById('status-badge').textContent='已停止';document.getElementById('status-badge').style.color='#888'}
+function startAI(){
+  document.getElementById('status-badge').textContent='连接中...';
+  document.getElementById('status-badge').style.color='#ff9800';
+  document.getElementById('ai-thinking').innerHTML='<span class="spinner"></span> 正在启动AI智能体...';
+  socket.emit('start');
+}
+function stopAI(){
+  socket.emit('stop');
+  document.getElementById('status-badge').textContent='已停止';
+  document.getElementById('status-badge').style.color='#888';
+  document.getElementById('ai-thinking').textContent='AI已离线';
+}
 function escapeHtml(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function sendCommand(){var inp=document.getElementById('cmd-input');var cmd=inp.value.trim();if(!cmd)return;socket.emit('send_command',{command:cmd});inp.value='';inp.placeholder='指令已发送...';setTimeout(function(){inp.placeholder='战术指令/配置命令(apikey/adb/repo/server)...'},2500)}
 function clearCommand(){socket.emit('clear_command')}
@@ -3648,8 +3680,23 @@ socket.on('command_analysis',function(d){
   var box=document.getElementById('thinking-box');if(box)box.innerHTML='<span class="highlight">[指令分析]</span> '+escapeHtml(d.analysis||'');
 });
 socket.on('command_recorded',function(d){});
-socket.on('started',function(d){document.getElementById('status-badge').textContent='战斗中...';document.getElementById('status-badge').style.color='#4caf50'});
-socket.on('stopped',function(d){document.getElementById('status-badge').textContent='已停止';document.getElementById('status-badge').style.color='#888'});
+socket.on('started',function(d){
+  var mode=d.mode||'combat';
+  var label=mode==='smart'?'AI在线(智能模式)':'战斗中...';
+  document.getElementById('status-badge').textContent=label;
+  document.getElementById('status-badge').style.color='#4caf50';
+  document.getElementById('ai-thinking').textContent='DeepSeek智能体已就绪';
+});
+socket.on('smart_mode_status',function(d){
+  document.getElementById('status-badge').textContent='AI在线(智能模式)';
+  document.getElementById('status-badge').style.color='#4caf50';
+  document.getElementById('ai-thinking').textContent=d.message||'DeepSeek智能体已就绪';
+});
+socket.on('stopped',function(d){
+  document.getElementById('status-badge').textContent='已停止';
+  document.getElementById('status-badge').style.color='#888';
+  document.getElementById('ai-thinking').textContent='AI已离线';
+});
 
 // ── 版本/设置 ──
 function loadVersion(){fetch('/api/version').then(r=>r.json()).then(d=>{
