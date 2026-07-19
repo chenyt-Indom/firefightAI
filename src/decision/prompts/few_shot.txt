@@ -1,0 +1,72 @@
+## 示例0: 开局夺旗 (找旗+多路推进)
+### 战场
+友33vs敌0, 开局未知敌旗位置
+
+### 输出
+{
+  "analysis": "开局, zoom_out找旗点, 3路推进夺旗, 预测敌在远端设防",
+  "next_prediction": "敌军可能在旗点附近埋伏步兵反坦克",
+  "commands": [
+    {"action": "zoom_out", "reason": "缩小找敌方旗帜"},
+    {"action": "select", "unit_ids": [1,2,3], "reason": "左路步兵侦察"},
+    {"action": "select", "unit_ids": [5,6,7,8], "reason": "中路坦步协同"},
+    {"action": "select", "unit_ids": [10,11,12], "reason": "右路IFV快速穿插"},
+    {"action": "move", "unit_ids": [1], "target": [0.15, 0.30], "reason": "步兵左路侦察前出"},
+    {"action": "move", "unit_ids": [5], "target": [0.55, 0.35], "reason": "坦克向敌旗方向推进"}
+  ]
+}
+
+---
+## 示例1: 受袭响应 (己方减员→侦查+调整)
+### 战场
+友28vs敌16, 左翼被攻击, 己方-2
+
+### 输出
+{
+  "analysis": "左翼遭袭! zoom_in侦查→步兵反坦克→坦克后撤, 预测敌从左侧包抄",
+  "next_prediction": "敌军可能继续左路突破, 需加强左侧防御",
+  "commands": [
+    {"action": "zoom_in", "reason": "放大左翼查看敌情"},
+    {"action": "select", "unit_ids": [1,2,3,4], "reason": "左翼步兵反坦克"},
+    {"action": "select", "unit_ids": [7,8,9,10], "reason": "右翼趁敌攻左西进"},
+    {"action": "move", "unit_ids": [1], "target": [0.20, 0.45], "reason": "步兵左翼阻击敌坦克"},
+    {"action": "move", "unit_ids": [7], "target": [0.75, 0.35], "reason": "IFV右路穿插夺旗"}
+  ]
+}
+
+---
+## 示例2: 接敌全局调度 (33vs16, 4路包围)
+### 战场
+友33vs敌16, 敌在中央(0.50,0.45), 旗点(0.75,0.30)
+
+### 输出
+{
+  "analysis": "33vs16优势, 4路包围夺旗: 左步反坦+中坦火力+右IFV穿插+后路截断",
+  "next_prediction": "敌军可能坚守旗点附近, 需要步兵先侦察再坦克跟进",
+  "commands": [
+    {"action": "select", "unit_ids": [1,2,3,4], "reason": "左翼步兵反坦克"},
+    {"action": "select", "unit_ids": [6,7,8,9], "reason": "中路坦克火力压制"},
+    {"action": "select", "unit_ids": [11,12,13,14], "reason": "右翼IFV向旗点穿插"},
+    {"action": "select", "unit_ids": [16,17,18], "reason": "后方预备队防包抄"},
+    {"action": "move", "unit_ids": [1], "target": [0.20, 0.45], "reason": "步兵左路侦察反坦克"},
+    {"action": "move", "unit_ids": [11], "target": [0.70, 0.30], "reason": "IFV直插敌旗点"}
+  ]
+}
+
+---
+## 示例3: 持续进攻 (不给敌人喘息)
+### 战场
+友30vs敌6, 已在推近旗点(0.70,0.35)
+
+### 输出
+{
+  "analysis": "30vs6碾压, 3路持续进攻不给敌人组织防御, 预测敌人最后抵抗在旗点",
+  "next_prediction": "敌军可能集中最后力量死守旗点, 需分散避免被集中火力",
+  "commands": [
+    {"action": "select", "unit_ids": [1,2,3], "reason": "左路侧翼"},
+    {"action": "select", "unit_ids": [5,6,7,8], "reason": "中路主力冲旗"},
+    {"action": "select", "unit_ids": [10,11,12], "reason": "右路包抄断后"},
+    {"action": "move", "unit_ids": [5], "target": [0.72, 0.32], "reason": "坦克直冲旗点"},
+    {"action": "move", "unit_ids": [1], "target": [0.18, 0.38], "reason": "步兵左翼防敌增援"}
+  ]
+}

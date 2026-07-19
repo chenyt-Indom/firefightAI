@@ -1,0 +1,58 @@
+# UI元素坐标校准文件
+# 坐标均为归一化值(0-1), 基于1280x720分辨率
+# 使用 calibration.py 工具生成和更新
+
+# 暂停按钮
+pause_button:
+  x: 0.95
+  y: 0.05
+  description: "游戏暂停/恢复按钮,通常位于右上角"
+
+# 资源面板
+resource_panel:
+  credits_region: [0.05, 0.02, 0.15, 0.06]  # 资金显示区域
+  population_region: [0.20, 0.02, 0.30, 0.06]  # 人口显示区域
+
+# 单位选择
+unit_selection:
+  # 框选区域 - 屏幕中央主要战场区域
+  battlefield_region: [0.05, 0.10, 0.80, 0.90]
+  # 双击选中同类单位
+  double_tap_interval: 0.3  # 双击间隔秒数
+
+# 命令面板
+command_panel:
+  # 移动指令按钮
+  move_button: [0.05, 0.92, 0.12, 0.98]
+  # 攻击指令按钮
+  attack_button: [0.15, 0.92, 0.22, 0.98]
+  # 停止指令按钮
+  stop_button: [0.25, 0.92, 0.32, 0.98]
+  # 撤退指令按钮
+  retreat_button: [0.35, 0.92, 0.42, 0.98]
+  # 地面攻击按钮
+  attack_ground_button: [0.45, 0.92, 0.52, 0.98]
+
+# 单位信息面板(选中单位时显示)
+unit_info_panel:
+  health_bar_region: [0.02, 0.10, 0.25, 0.15]
+  unit_type_region: [0.02, 0.15, 0.25, 0.20]
+  ammo_region: [0.02, 0.20, 0.25, 0.25]
+
+# 小地图
+minimap:
+  region: [0.85, 0.75, 1.0, 1.0]
+  center_x: 0.925
+  center_y: 0.875
+
+# 游戏结束检测
+game_over:
+  victory_text_region: [0.30, 0.35, 0.70, 0.55]
+  defeat_text_region: [0.30, 0.35, 0.70, 0.55]
+  continue_button: [0.45, 0.60, 0.55, 0.68]
+
+# 部署阶段
+deployment:
+  unit_card_region: [0.02, 0.80, 0.98, 0.98]  # 底部单位卡片栏
+  deploy_button: [0.85, 0.92, 0.95, 0.98]  # 部署确认按钮
+  points_region: [0.70, 0.02, 0.85, 0.06]  # 部署点数显示

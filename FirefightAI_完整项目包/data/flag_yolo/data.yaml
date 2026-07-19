@@ -1,0 +1,22 @@
+names:
+  Balkans: 14
+  Baltic: 16
+  CentralEU: 15
+  China: 7
+  France: 3
+  Germany: 9
+  Italy: 10
+  Japan: 6
+  Korea: 8
+  MidEast: 13
+  ODKB: 4
+  Poland: 1
+  Scandinavia: 12
+  UK: 2
+  UN: 0
+  USA: 5
+  Ukraine: 11
+nc: 17
+path: C:\Users\19853\WorkBuddy\2026-07-18-07-52-25\firefightAI\data\flag_yolo
+train: images
+val: images

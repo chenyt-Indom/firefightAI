@@ -1,0 +1,111 @@
+# Firefight AI 指挥系统 - 主配置文件 (示例)
+# 复制此文件为 config/settings.yaml 并填入你的配置
+
+# 游戏信息
+game:
+  package_name: "com.windowsgames.firefightbw"
+  activity_name: "com.windowsgames.firefight.MyGame"
+  screen_width: 1280
+  screen_height: 720
+  modern_mod: true  # 现代MOD模式,非WW2
+
+# 设备连接
+device:
+  # 当前使用设备: "mumu" 或 "phone"
+  active: "mumu"
+  # MuMu模拟器 (测试用)
+  mumu:
+    adb_host: "127.0.0.1"
+    adb_port: 7555
+  # 手机 (正式使用)
+  phone:
+    adb_host: "192.168.1.100"
+    adb_port: 5555
+  adb_connect_timeout: 10
+  adb_command_timeout: 5
+  adb_retry_count: 3
+  use_wireless: true
+
+# scrcpy 录屏
+scrcpy:
+  max_fps: 15
+  bitrate: 8000000
+  max_width: 1280
+  max_height: 720
+  crop: null
+  no_control: true
+  timeout: 5
+
+# YOLO 视觉检测
+yolo:
+  model_path: "models/best.engine"
+  fallback_model_path: "models/best.pt"
+  confidence_threshold: 0.5
+  iou_threshold: 0.45
+  image_size: 640
+  device: "cpu"
+  classes:
+    0: "tank"
+    1: "infantry"
+
+# ByteTrack 跟踪
+bytetrack:
+  track_activation_threshold: 0.5
+  lost_track_buffer: 30
+  minimum_matching_threshold: 0.8
+  frame_rate: 30
+
+# PaddleOCR
+ocr:
+  use_angle_cls: true
+  lang: "en"
+  det_db_thresh: 0.3
+  rec_batch_num: 6
+  ui_regions:
+    resource_bar: [0.05, 0.02, 0.95, 0.08]
+    unit_info: [0.02, 0.08, 0.30, 0.25]
+    minimap: [0.85, 0.75, 1.0, 1.0]
+
+# LLM 决策 (DeepSeek)
+llm:
+  provider: "deepseek"
+  model: "deepseek-chat"
+  api_key: "YOUR_DEEPSEEK_API_KEY"  # 替换为你的API Key
+  api_base: "https://api.deepseek.com/v1"
+  temperature: 0.3
+  max_tokens: 2048
+  timeout: 15
+  retry_count: 3
+  # 备用模型
+  fallback_provider: "zhipu"
+  fallback_model: "glm-4-flash"
+  fallback_api_key: "YOUR_GLM_API_KEY"
+  fallback_api_base: "https://open.bigmodel.cn/api/paas/v4"
+
+# 游戏循环
+game_loop:
+  pause_button_x: 0.95
+  pause_button_y: 0.05
+  cycle_interval: 3.0
+  max_cycles: 200
+  game_over_timeout: 600
+
+# 敌我识别
+team_detection:
+  method: "position"
+  ally_region: [0.0, 0.55, 1.0, 1.0]
+  enemy_region: [0.0, 0.0, 1.0, 0.45]
+
+# 日志
+logging:
+  level: "INFO"
+  session_dir: "sessions"
+  save_screenshots: true
+  save_replay: true
+  max_session_files: 50
+
+# 调试
+debug:
+  show_detection_window: false
+  save_intermediate_frames: false
+  step_by_step: false

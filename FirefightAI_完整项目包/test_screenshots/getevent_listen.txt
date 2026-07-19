@@ -1,0 +1,4 @@
+[     222.430217] EV_KEY       KEY_BACKSPACE        DOWN                
+[     222.430217] EV_SYN       SYN_REPORT           00000000            
+[     222.640516] EV_KEY       KEY_BACKSPACE        UP                  
+[     222.640516] EV_SYN       SYN_REPORT           00000000            

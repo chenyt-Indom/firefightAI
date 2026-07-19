@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Firefight UI 标注工具</title>
+<style>
+*{margin:0;box-sizing:border-box}
+body{background:#1a1a2e;color:#fff;font-family:Microsoft YaHei,Arial;height:100vh;display:flex;flex-direction:column}
+#toolbar{background:#16213e;padding:8px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;min-height:45px}
+#toolbar h3{margin:0;color:#00bfff;font-size:15px;white-space:nowrap}
+select{padding:5px;background:#333;color:#fff;border:none;border-radius:4px;font-size:12px}
+.btn{padding:6px 12px;border:none;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap}
+.btn-save{background:#00cc66;color:#000}
+.btn-del{background:#cc3333;color:#fff}
+.btn-clear{background:#ff6600;color:#fff}
+.btn-export{background:#0066ff;color:#fff}
+.btn-import{background:#8e44ad;color:#fff}
+#main-area{flex:1;overflow:auto;position:relative;display:flex;flex-direction:column}
+#image-panel{display:flex;flex:1;overflow:hidden;min-height:0}
+#sidebar{width:240px;background:#0d1117;overflow-y:auto;border-right:1px solid #333;padding:0}
+#sidebar h4{padding:10px;margin:0;color:#888;font-size:13px;border-bottom:1px solid #222}
+#thumb-list{display:flex;flex-direction:column}
+.thumb-item{padding:8px 10px;border-bottom:1px solid #1a1f2b;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:8px}
+.thumb-item:hover{background:#1a1f2b}
+.thumb-item.active{background:#1a3a5c;border-left:3px solid #00bfff}
+.thumb-item .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ccc}
+.thumb-item .count{color:#888;font-size:11px}
+.thumb-item .del{color:#cc3333;cursor:pointer;font-size:14px;opacity:0.5}
+.thumb-item .del:hover{opacity:1}
+#viewer{flex:1;overflow:auto;position:relative;display:flex;justify-content:center;align-items:flex-start;background:#111;min-height:0}
+#image-container{position:relative;display:inline-block;margin:5px}
+canvas{position:absolute;top:0;left:0}
+img{display:block;max-width:100vw;max-height:70vh}
+#meta-bar{background:#16213e;padding:6px 12px;display:flex;gap:10px;align-items:center;font-size:12px;border-top:1px solid #222;flex-wrap:wrap;flex-shrink:0;min-height:36px}
+#meta-bar input{background:#1a1f2b;border:1px solid #333;color:#fff;padding:4px 8px;border-radius:3px;font-size:12px}
+#descInput{flex:1;min-width:200px}
+#status{position:fixed;bottom:8px;left:10px;background:rgba(22,33,62,0.95);padding:6px 14px;border-radius:5px;font-size:13px;z-index:99}
+#info{font-size:12px;color:#aaa}
+.drop-hint{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#555;font-size:18px;pointer-events:none}
+</style></head><body>
+
+<div id="toolbar">
+  <h3>🔥 Firefight UI 标注</h3>
+  <label class="btn btn-import" style="cursor:pointer;display:inline-block">
+    📁 导入截图
+    <input type="file" id="fileInput" accept="image/*" multiple style="display:none" onchange="importFiles(this.files)">
+  </label>
+  <select id="classSelect">
+    <option value="0">0-You阵营国旗</option>
+    <option value="1">1-Enemy阵营国旗</option>
+    <option value="2">2-阵营下拉列表区</option>
+    <option value="3">3-OK/确认按钮</option>
+    <option value="4">4-单位选择区</option>
+    <option value="5">5-开始战斗按钮</option>
+    <option value="6">6-旗点</option>
+    <option value="7">7-其他按钮</option>
+    <option value="8">8-敌方阵营选择区</option>
+  </select>
+  <button class="btn btn-save" onclick="saveLabels()">💾 保存</button>
+  <button class="btn btn-del" onclick="delLast()">✕ 删最后</button>
+  <button class="btn btn-clear" onclick="clearAll()">清空</button>
+  <button class="btn btn-export" onclick="exportYOLO()">📦 导出YOLO</button>
+  <button class="btn btn-export" style="background:#00b894" onclick="exportAllData()">💿 全量导出</button>
+  <span style="color:#888;font-size:11px">Ctrl+S保存 | Ctrl+Z删除 | 0-8切换类别 | 拖拽框选 | 支持拖放导入</span>
+</div>
+
+<!-- 🔥 命名栏 - 独占一行，超醒目 -->
+<div style="background:#332200;border-bottom:3px solid #ffaa00;padding:8px 12px;display:flex;gap:10px;align-items:center;flex-shrink:0">
+  <span style="font-size:15px">🏷️</span>
+  <span style="color:#ffaa00;font-weight:bold;font-size:14px;white-space:nowrap">框名称:</span>
+  <input type="text" id="boxLabelInput" placeholder="← 先在图上点击一个框，然后在这里输入它的名称" style="flex:1;background:#1a1a2e;border:2px solid #ffaa00;color:#ffaa00;padding:8px 12px;border-radius:4px;font-size:14px;outline:none;font-weight:bold" onchange="updateBoxLabel()" onkeydown="if(event.key==='Enter')updateBoxLabel()">
+  <span id="boxLabelHint" style="color:#cc8800;font-size:12px">未选中框</span>
+</div>
+
+<div id="main-area">
+  <div id="image-panel">
+    <div id="sidebar">
+      <h4>📸 截图列表 (<span id="imgCount">0</span>)</h4>
+      <div id="thumb-list"></div>
+    </div>
+    <div id="viewer">
+      <div id="image-container">
+        <div class="drop-hint" id="dropHint">📁 拖放截图到此处<br><small>或点击上方「导入截图」</small></div>
+        <img id="mainImage" style="display:none">
+        <canvas id="canvas" style="display:none"></canvas>
+      </div>
+    </div>
+  </div>
+  <div id="meta-bar">
+    <span>📝 截图说明:</span>
+    <input type="text" id="descInput" placeholder="描述这张截图是什么界面/状态..." onchange="updateDesc()">
+    <span style="color:#888;font-size:11px">例如: "阵营选择-美国vs中国" / "选兵界面" / "部署阶段"</span>
+  </div>
+</div>
+<div id="status">就绪 - 导入截图开始标注</div>
+
+<script>
+const CLASS_NAMES = ['You国旗','Enemy国旗','下拉列表','OK按钮','单位区','开始按钮','旗点','其他','敌阵营区'];
+const COLORS = ['#ff6b6b','#4ecdc4','#ffe66d','#a29bfe','#fd79a8','#00b894','#e17055','#6c5ce7','#636e72'];
+
+// 所有截图数据
+let project = {
+  images: {},  // {id: {name, desc, dataUrl, boxes: [{cls,x,y,w,h}]}}
+  order: [],   // [id, ...]
+  activeId: null
+};
+
+let boxes = [];     // 当前图的boxes(引用project.images[activeId].boxes)
+let drawing = null;
+let selectedBox = -1;  // 当前选中的框索引
+
+const imgEl = document.getElementById('mainImage');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const dropHint = document.getElementById('dropHint');
+
+// ── 导入 ──
+document.getElementById('fileInput').addEventListener('change', function() {
+  importFiles(this.files);
+  this.value = '';
+});
+
+// 拖放导入
+const viewer = document.getElementById('viewer');
+viewer.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); });
+viewer.addEventListener('drop', e => {
+  e.preventDefault(); e.stopPropagation();
+  if (e.dataTransfer.files.length) importFiles(e.dataTransfer.files);
+});
+
+const imageContainer = document.getElementById('image-container');
+imageContainer.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); });
+imageContainer.addEventListener('drop', e => {
+  e.preventDefault(); e.stopPropagation();
+  if (e.dataTransfer.files.length) importFiles(e.dataTransfer.files);
+});
+
+function importFiles(fileList) {
+  let count = 0;
+  for (let f of fileList) {
+    if (!f.type.startsWith('image/')) continue;
+    let reader = new FileReader();
+    reader.onload = function(e) {
+      let id = 'img_' + Date.now() + '_' + Math.random().toString(36).slice(2,6);
+      project.images[id] = {
+        name: f.name,
+        desc: '',
+        dataUrl: e.target.result,
+        boxes: []
+      };
+      project.order.push(id);
+      count++;
+      if (count === 1 || project.order.length === 1) switchTo(id);
+      renderSidebar();
+    };
+    reader.readAsDataURL(f);
+  }
+  document.getElementById('status').textContent = '⏳ 导入中...';
+}
+
+// ── 侧边栏 ──
+function renderSidebar() {
+  let list = document.getElementById('thumb-list');
+  list.innerHTML = '';
+  document.getElementById('imgCount').textContent = project.order.length;
+  for (let id of project.order) {
+    let img = project.images[id];
+    let div = document.createElement('div');
+    div.className = 'thumb-item' + (id === project.activeId ? ' active' : '');
+    div.innerHTML = `
+      <span class="name" title="${img.desc || img.name}">📸 ${img.name}</span>
+      <span class="count">${img.boxes.length}框</span>
+      <span class="del" onclick="event.stopPropagation();deleteImg('${id}')">✕</span>
+    `;
+    div.onclick = () => switchTo(id);
+    list.appendChild(div);
+  }
+  if (!project.order.length) {
+    dropHint.style.display = '';
+  }
+}
+
+function switchTo(id) {
+  project.activeId = id;
+  let img = project.images[id];
+  boxes = img.boxes;
+  selectedBox = -1;
+  document.getElementById('boxLabelInput').value = '';
+  document.getElementById('boxLabelInput').placeholder = '先点框，再输入名称...';
+  imgEl.src = img.dataUrl;
+  document.getElementById('descInput').value = img.desc || '';
+  document.getElementById('status').textContent = '切换到: ' + img.name;
+  renderSidebar();
+}
+
+function deleteImg(id) {
+  if (!confirm('删除 ' + project.images[id].name + ' 及其所有标注？')) return;
+  delete project.images[id];
+  project.order = project.order.filter(x => x !== id);
+  if (project.activeId === id) {
+    project.activeId = project.order[0] || null;
+    if (project.activeId) {
+      switchTo(project.activeId);
+    } else {
+      imgEl.style.display = 'none';
+      canvas.style.display = 'none';
+      dropHint.style.display = '';
+      boxes = [];
+    }
+  }
+  renderSidebar();
+}
+
+function updateDesc() {
+  if (!project.activeId) return;
+  project.images[project.activeId].desc = document.getElementById('descInput').value;
+  renderSidebar();
+}
+
+// ── 图片加载 ──
+imgEl.onload = function() {
+  dropHint.style.display = 'none';
+  imgEl.style.display = '';
+  canvas.style.display = '';
+  canvas.width = imgEl.naturalWidth;
+  canvas.height = imgEl.naturalHeight;
+  canvas.style.width = imgEl.clientWidth + 'px';
+  canvas.style.height = imgEl.clientHeight + 'px';
+  drawAll();
+};
+
+// ── 绘制 ──
+function drawAll() {
+  if (!imgEl.naturalWidth) return;
+  let W = imgEl.naturalWidth, H = imgEl.naturalHeight;
+  ctx.clearRect(0, 0, W, H);
+  for (let i = 0; i < boxes.length; i++) {
+    let b = boxes[i];
+    let isSelected = (i === selectedBox);
+    let color = COLORS[b.cls];
+    ctx.strokeStyle = isSelected ? '#ffffff' : color;
+    ctx.lineWidth = isSelected ? 3.5 : 2.5;
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    // 标签背景
+    let displayLabel = b.label || CLASS_NAMES[b.cls];
+    let prefix = isSelected ? '★ ' : '';
+    let label = `[${i+1}] ${prefix}${displayLabel}`;
+    ctx.font = isSelected ? 'bold 13px Microsoft YaHei' : '12px Microsoft YaHei';
+    let tw = ctx.measureText(label).width + 8;
+    let th = isSelected ? 20 : 16;
+    ctx.fillStyle = isSelected ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.75)';
+    ctx.fillRect(b.x, b.y - th, tw, th);
+    ctx.fillStyle = isSelected ? '#ffffff' : color;
+    ctx.fillText(label, b.x + 3, b.y - 4);
+  }
+}
+
+// ── 坐标转换 ──
+function toImgCoords(clientX, clientY) {
+  let rect = imgEl.getBoundingClientRect();
+  return {
+    x: (clientX - rect.left) * (imgEl.naturalWidth / imgEl.clientWidth),
+    y: (clientY - rect.top) * (imgEl.naturalHeight / imgEl.clientHeight)
+  };
+}
+
+// ── 鼠标事件 ──
+canvas.addEventListener('mousedown', e => {
+  if (!project.activeId) return;
+  let p = toImgCoords(e.clientX, e.clientY);
+  
+  // 先检查是否点击了已有框 (选中)
+  let hit = -1;
+  for (let i = boxes.length - 1; i >= 0; i--) {
+    let b = boxes[i];
+    if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) {
+      hit = i;
+      break;
+    }
+  }
+  
+  if (hit >= 0) {
+    // 点击已有框 → 选中它
+    selectBox(hit);
+    return;
+  }
+  
+  // 点击空白 → 取消选中 + 开始画新框
+  selectBox(-1);
+  let cls = parseInt(document.getElementById('classSelect').value);
+  boxes.push({cls, x: p.x, y: p.y, w: 0, h: 0, label: ''});
+  drawing = {startX: p.x, startY: p.y, idx: boxes.length - 1};
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (!drawing) return;
+  let p = toImgCoords(e.clientX, e.clientY);
+  let b = boxes[drawing.idx];
+  b.x = Math.min(drawing.startX, p.x);
+  b.y = Math.min(drawing.startY, p.y);
+  b.w = Math.abs(p.x - drawing.startX);
+  b.h = Math.abs(p.y - drawing.startY);
+  drawAll();
+});
+
+canvas.addEventListener('mouseup', e => {
+  if (!drawing) return;
+  let b = boxes[drawing.idx];
+  if (b.w < 5 || b.h < 5) {
+    boxes.pop();
+    selectBox(-1);
+  }
+  drawing = null;
+  drawAll();
+  updateStatus();
+  renderSidebar();
+});
+
+function updateStatus() {
+  let img = project.activeId ? project.images[project.activeId] : null;
+  let name = img ? img.name : '无图';
+  document.getElementById('status').textContent = 
+    boxes.length + '个标注 | ' + CLASS_NAMES[parseInt(document.getElementById('classSelect').value)] + ' | ' + name;
+}
+
+// ── 框选中 + 命名 ──
+function selectBox(idx) {
+  selectedBox = idx;
+  let input = document.getElementById('boxLabelInput');
+  let hint = document.getElementById('boxLabelHint');
+  if (idx >= 0 && idx < boxes.length) {
+    input.value = boxes[idx].label || '';
+    input.placeholder = '框#' + (idx+1) + ': ' + CLASS_NAMES[boxes[idx].cls] + ' — 输入名称';
+    hint.textContent = '✅ 已选中 框#' + (idx+1);
+    hint.style.color = '#00ff88';
+    input.focus();
+  } else {
+    input.value = '';
+    input.placeholder = '← 先在图上点击一个框，然后在这里输入它的名称';
+    hint.textContent = '未选中框';
+    hint.style.color = '#cc8800';
+  }
+  drawAll();
+}
+
+function updateBoxLabel() {
+  if (selectedBox < 0 || selectedBox >= boxes.length) return;
+  let val = document.getElementById('boxLabelInput').value.trim();
+  boxes[selectedBox].label = val;
+  drawAll();
+  document.getElementById('status').textContent = 
+    '✅ 框#' + (selectedBox+1) + ' 已命名: ' + (val || CLASS_NAMES[boxes[selectedBox].cls]);
+  renderSidebar();
+}
+
+// ── 操作按钮 ──
+function saveLabels() {
+  if (!project.activeId) return;
+  renderSidebar();
+  document.getElementById('status').textContent = '✅ 已保存 ' + boxes.length + '个标注';
+}
+
+function delLast() {
+  if (selectedBox >= 0 && selectedBox < boxes.length) {
+    // 删除选中的框
+    boxes.splice(selectedBox, 1);
+    selectBox(-1);
+  } else {
+    boxes.pop();
+  }
+  drawAll();
+  updateStatus();
+  renderSidebar();
+}
+
+function clearAll() {
+  if (!boxes.length) return;
+  if (!confirm('确定清空当前图所有 ' + boxes.length + ' 个标注？')) return;
+  boxes.length = 0;
+  drawAll();
+  updateStatus();
+  renderSidebar();
+}
+
+function exportYOLO() {
+  if (!project.activeId || !boxes.length) {
+    alert('⚠️ 当前无标注');
+    return;
+  }
+  let img = project.images[project.activeId];
+  let W = imgEl.naturalWidth, H = imgEl.naturalHeight;
+  let lines = [];
+  let summary = `=== ${img.name} (${img.desc || '无说明'}) ===\n`;
+  for (let i = 0; i < boxes.length; i++) {
+    let b = boxes[i];
+    if (b.w < 3 || b.h < 3) continue;
+    let cx = ((b.x + b.w / 2) / W).toFixed(6);
+    let cy = ((b.y + b.h / 2) / H).toFixed(6);
+    let nw = (b.w / W).toFixed(6);
+    let nh = (b.h / H).toFixed(6);
+    lines.push(b.cls + ' ' + cx + ' ' + cy + ' ' + nw + ' ' + nh);
+    let name = b.label || CLASS_NAMES[b.cls];
+    summary += `  #${i+1} [${name}] ` +
+      `(${Math.round(b.x+b.w/2)},${Math.round(b.y+b.h/2)}) ` +
+      `${Math.round(b.w)}x${Math.round(b.h)}\n`;
+  }
+
+  let blob = new Blob([lines.join('\n')], {type:'text/plain'});
+  let url = URL.createObjectURL(blob);
+  let a = document.createElement('a');
+  a.href = url;
+  a.download = img.name.replace(/\.\w+$/,'') + '_yolo.txt';
+  a.click();
+  alert(summary);
+  document.getElementById('status').textContent = '✅ 已导出YOLO格式';
+}
+
+function exportAllData() {
+  if (!project.order.length) { alert('无数据可导出'); return; }
+  let data = {exportTime: new Date().toISOString(), images: {}};
+  for (let id of project.order) {
+    let img = project.images[id];
+    data.images[id] = {
+      name: img.name,
+      desc: img.desc,
+      boxes: img.boxes
+    };
+  }
+  let blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+  let url = URL.createObjectURL(blob);
+  let a = document.createElement('a');
+  a.href = url;
+  a.download = 'firefight_labels_' + new Date().toISOString().slice(0,10) + '.json';
+  a.click();
+  document.getElementById('status').textContent = '✅ 全量导出: ' + project.order.length + '张图, ' +
+    Object.values(data.images).reduce((s, v) => s + v.boxes.length, 0) + '个标注';
+}
+
+// ── 键盘 ──
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;  // 不在输入框中响应
+  if (e.key === 's' && e.ctrlKey) { e.preventDefault(); saveLabels(); }
+  if (e.key === 'z' && e.ctrlKey) { e.preventDefault(); delLast(); }
+  if (e.key === 'e' && e.ctrlKey) { e.preventDefault(); exportYOLO(); }
+  if (e.key >= '0' && e.key <= '8' && !e.ctrlKey) {
+    document.getElementById('classSelect').value = e.key;
+    updateStatus();
+  }
+});
+
+// ── 尝试从 localStorage 恢复 ──
+try {
+  let saved = localStorage.getItem('firefight_project');
+  if (saved) {
+    let data = JSON.parse(saved);
+    project.images = data.images || {};
+    project.order = data.order || [];
+    // dataUrl太长不能存localStorage，仅恢复结构不恢复图片
+    project.images = {};
+    project.order = [];
+    console.log('已清除旧缓存，请重新导入截图');
+  }
+} catch(e) {}
+
+renderSidebar();
+</script>
+</body></html>

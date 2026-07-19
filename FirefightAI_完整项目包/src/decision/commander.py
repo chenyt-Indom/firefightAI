@@ -1,0 +1,287 @@
+"""战术指挥官 - 调用DeepSeek LLM进行战术决策"""
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+from typing import Optional
+
+from loguru import logger
+from openai import OpenAI
+
+from src.state.models import GameState, LLMResponse, Command as CmdModel
+from src.utils.logger import log_decision
+
+
+class TacticalCommander:
+    """LLM战术决策引擎,支持DeepSeek主模型和GLM-4备用"""
+
+    def __init__(
+        self,
+        provider: str = "deepseek",
+        model: str = "deepseek-chat",
+        api_key: str = "",
+        api_base: str = "https://api.deepseek.com/v1",
+        temperature: float = 0.3,
+        max_tokens: int = 2048,
+        timeout: int = 15,
+        retry_count: int = 3,
+        # 备用模型配置
+        fallback_provider: str = "zhipu",
+        fallback_model: str = "glm-4-flash",
+        fallback_api_key: str = "",
+        fallback_api_base: str = "https://open.bigmodel.cn/api/paas/v4",
+    ):
+        self.provider = provider
+        self.model = model
+        self.api_key = api_key
+        self.api_base = api_base
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.timeout = timeout
+        self.retry_count = retry_count
+
+        self.fallback_provider = fallback_provider
+        self.fallback_model = fallback_model
+        self.fallback_api_key = fallback_api_key
+        self.fallback_api_base = fallback_api_base
+
+        self._client: Optional[OpenAI] = None
+        self._fallback_client: Optional[OpenAI] = None
+        self._system_prompt: str = ""
+        self._few_shot_examples: str = ""
+        self._tactics_rules: str = ""       # L2 提炼的持久化规则
+        self._learned_examples: str = ""    # L1 当前轮注入的动态示例
+        self._decision_count = 0
+        self._total_decision_time = 0.0
+
+    def load_prompts(self) -> None:
+        """加载prompt模板"""
+        prompts_dir = Path(__file__).parent / "prompts"
+
+        system_path = prompts_dir / "system.txt"
+        if system_path.exists():
+            self._system_prompt = system_path.read_text(encoding="utf-8")
+            logger.info(f"系统prompt加载成功: {len(self._system_prompt)}字符")
+        else:
+            logger.warning("系统prompt文件不存在,使用默认prompt")
+            self._system_prompt = "你是一名经验丰富的现代战术指挥官。"
+
+        few_shot_path = prompts_dir / "few_shot.txt"
+        if few_shot_path.exists():
+            self._few_shot_examples = few_shot_path.read_text(encoding="utf-8")
+            logger.info(f"Few-shot示例加载成功: {len(self._few_shot_examples)}字符")
+        else:
+            self._few_shot_examples = ""
+
+        # 加载学习到的模式 (从玩家操作中学到的战术)
+        learned_path = prompts_dir / "few_shot_learned.txt"
+        if learned_path.exists():
+            learned_content = learned_path.read_text(encoding="utf-8")
+            self._few_shot_examples += "\n\n---\n\n" + learned_content
+            logger.info(f"学习到的模式加载成功: {len(learned_content)}字符")
+
+        # 加载 L2 提炼的战术规则
+        self._tactics_rules = ""
+        self.reload_tactics_rules()
+
+    def reload_tactics_rules(self) -> None:
+        """重新加载 L2 提炼的战术规则 (策略提炼后调用)"""
+        from src.learning.strategy_compressor import StrategyCompressor
+        self._tactics_rules = StrategyCompressor.load_rules()
+        if self._tactics_rules:
+            logger.info(f"战术规则加载成功: {len(self._tactics_rules)}字符")
+
+    def set_learned_examples(
+        self,
+        memory_retriever,
+        state_hash: str,
+        ally_count: int,
+        enemy_count: int,
+    ) -> None:
+        """设置动态学习的 few-shot 示例 (每轮 LLM 调用前由 controller 调用)
+
+        从经验库检索相似案例, 格式化为 few-shot, 注入到 prompt 中。
+        """
+        self._learned_examples = memory_retriever.format_as_few_shot(
+            memory_retriever.retrieve(state_hash, ally_count, enemy_count)
+        )
+
+    def decide(self, game_state: GameState) -> Optional[LLMResponse]:
+        """主决策入口: 调用LLM进行战术决策
+
+        Args:
+            game_state: 当前游戏状态
+
+        Returns:
+            LLMResponse或None(失败时)
+        """
+        # 尝试主模型
+        result = self._call_llm(game_state, use_fallback=False)
+        if result is not None:
+            return result
+
+        # 降级到备用模型
+        logger.warning("主模型调用失败,降级到备用模型")
+        result = self._call_llm(game_state, use_fallback=True)
+        return result
+
+    def _call_llm(self, game_state: GameState, use_fallback: bool = False) -> Optional[LLMResponse]:
+        """调用LLM API"""
+        client = self._get_client(use_fallback)
+        model = self.fallback_model if use_fallback else self.model
+        provider_name = self.fallback_provider if use_fallback else self.provider
+
+        if client is None:
+            logger.error(f"LLM客户端未初始化 ({provider_name})")
+            return None
+
+        # 构建消息
+        state_text = game_state.to_llm_text()
+        user_message = self._build_user_message(state_text)
+
+        # 拼接 system prompt: 基础 prompt + L2 战术规则
+        system_content = self._system_prompt
+        if self._tactics_rules:
+            system_content += self._tactics_rules
+
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_message},
+        ]
+
+        for attempt in range(1, self.retry_count + 1):
+            try:
+                start_time = time.time()
+                log_decision(
+                    f"[{provider_name}/{model}] 第{attempt}次请求, "
+                    f"友方={game_state.ally_count}, 敌方={game_state.enemy_count}"
+                )
+
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                    timeout=self.timeout,
+                    response_format={"type": "json_object"},
+                )
+
+                elapsed = (time.time() - start_time) * 1000
+                self._decision_count += 1
+                self._total_decision_time += elapsed
+
+                raw_text = response.choices[0].message.content
+                if raw_text is None:
+                    logger.warning(f"LLM返回空内容 (第{attempt}次)")
+                    continue
+
+                log_decision(f"LLM响应 ({elapsed:.0f}ms): {raw_text[:200]}...")
+
+                # 解析为LLMResponse
+                llm_response = self._parse_response(raw_text)
+                if llm_response is not None:
+                    log_decision(
+                        f"决策完成: {llm_response.analysis[:100]}... "
+                        f"({len(llm_response.commands)}条指令)"
+                    )
+                    return llm_response
+
+                # 解析失败,在下一次重试时反馈错误
+                logger.warning(f"LLM输出格式错误 (第{attempt}次),将重试")
+                messages.append({
+                    "role": "user",
+                    "content": "你的输出格式不符合JSON schema要求。请严格按照指定格式输出JSON,不要包含额外内容。"
+                })
+
+            except Exception as e:
+                logger.error(f"LLM API调用失败 (第{attempt}次): {e}")
+                if attempt < self.retry_count:
+                    time.sleep(1)
+
+        logger.error(f"LLM重试{self.retry_count}次后仍失败")
+        return None
+
+    def _build_user_message(self, state_text: str) -> str:
+        """构建用户消息: 状态 + 静态few-shot + 动态学习示例"""
+        parts = [state_text]
+
+        if self._few_shot_examples:
+            parts.append("\n---\n")
+            parts.append("## 参考示例(Few-shot)")
+            parts.append(self._few_shot_examples)
+
+        # L1 动态注入: 本轮检索到的相似成功案例
+        if self._learned_examples:
+            parts.append("\n---\n")
+            parts.append(self._learned_examples)
+
+        parts.append("\n---\n")
+        parts.append("请根据以上战场状态,输出你的战术决策(JSON格式)。")
+
+        # 每轮调用后清空动态示例 (避免累积)
+        self._learned_examples = ""
+
+        return "\n".join(parts)
+
+    def _parse_response(self, raw_text: str) -> Optional[LLMResponse]:
+        """解析LLM响应为LLMResponse"""
+        try:
+            # 清理可能的markdown代码块标记
+            text = raw_text.strip()
+            if text.startswith("```"):
+                # 移除markdown代码块
+                lines = text.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                text = "\n".join(lines)
+
+            data = json.loads(text)
+
+            # 使用pydantic校验
+            llm_response = LLMResponse.model_validate(data)
+            return llm_response
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON解析失败: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"LLMResponse校验失败: {e}")
+            return None
+
+    def _get_client(self, use_fallback: bool = False) -> Optional[OpenAI]:
+        """获取OpenAI客户端"""
+        if use_fallback:
+            if self._fallback_client is None:
+                if not self.fallback_api_key or self.fallback_api_key == "YOUR_GLM_API_KEY":
+                    logger.error("备用模型API Key未配置")
+                    return None
+                self._fallback_client = OpenAI(
+                    api_key=self.fallback_api_key,
+                    base_url=self.fallback_api_base,
+                    timeout=self.timeout,
+                )
+            return self._fallback_client
+        else:
+            if self._client is None:
+                if not self.api_key or self.api_key == "YOUR_DEEPSEEK_API_KEY":
+                    logger.error("主模型API Key未配置")
+                    return None
+                self._client = OpenAI(
+                    api_key=self.api_key,
+                    base_url=self.api_base,
+                    timeout=self.timeout,
+                )
+            return self._client
+
+    @property
+    def avg_decision_time(self) -> float:
+        if self._decision_count == 0:
+            return 0.0
+        return self._total_decision_time / self._decision_count
+
+    @property
+    def decision_count(self) -> int:
+        return self._decision_count
