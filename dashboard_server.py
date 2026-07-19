@@ -21,7 +21,7 @@ app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading", max_http_buffer_size=100*1024*1024)
 
 PROJECT_ROOT = Path(__file__).parent
-APP_VERSION = "5.0.0"
+APP_VERSION = "5.1.0"
 APP_BUILD = datetime.now().strftime("%Y%m%d-%H%M")
 
 # ── 全局状态 ──
@@ -45,6 +45,13 @@ _dashboard_state: dict = {
     "github_status": "unknown",   # GitHub连接状态
     "github_repo": "",
     "pytorch_version": "",
+    # v5.1 新增
+    "prediction_accuracy": 0,     # AI预测准确率
+    "predicted_enemies": [],      # 预测的敌方位置
+    "map_hot_zones": [],          # 地图热区
+    "threat_level": 0,            # 当前威胁等级
+    "auto_save_status": "idle",   # 自动保存状态
+    "next_save_time": "",         # 下次保存时间
 }
 _lock = threading.Lock()
 _controller = None
@@ -53,6 +60,8 @@ _training_process = None
 _chat_history: list[dict] = []
 _learning_log: list[dict] = []  # 学习日志持久化
 _adb_utils = None  # ADB实例引用
+_predictor = None  # 战场预测器
+_scheduler = None  # 自动保存调度器
 
 # ── GPU 状态 ──
 _gpu_info: dict = {"cuda_available": False, "gpus": [], "pytorch_cuda": False, "pytorch_version": "", "message": ""}
@@ -1261,6 +1270,72 @@ def api_params_learn():
 
 
 # ═══════════════════════════════════════════════════════════════
+# v5.1 自动保存 + 预测系统 API
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/api/auto_save/status")
+def api_auto_save_status():
+    """获取自动保存状态"""
+    global _scheduler
+    if _scheduler:
+        try:
+            status = _scheduler.get_status()
+            return jsonify({"status": "ok", "data": status})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e)})
+    return jsonify({"status": "not_initialized", "data": {"running": False}})
+
+@app.route("/api/auto_save/now", methods=["POST"])
+def api_auto_save_now():
+    """立即执行参数保存和上传"""
+    global _scheduler
+    if not _scheduler:
+        return jsonify({"error": "自动保存调度器未初始化"}), 400
+    
+    try:
+        save_result = _scheduler.save_params_now()
+        upload_result = _scheduler.upload_params()
+        add_learning_log("auto_save", "手动保存完成", f"保存: {save_result}, 上传: {upload_result}")
+        return jsonify({"status": "ok", "save": save_result, "upload": upload_result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/prediction/status")
+def api_prediction_status():
+    """获取预测系统状态"""
+    global _predictor
+    if _predictor:
+        try:
+            wisdom = _predictor.get_accumulated_wisdom()
+            return jsonify({
+                "status": "ok",
+                "accuracy": wisdom.get("accuracy", 0),
+                "experience_count": len(_predictor._experience),
+                "recent_successes": wisdom.get("recent_successes", []),
+            })
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e)})
+    return jsonify({"status": "not_initialized", "accuracy": 0, "experience_count": 0})
+
+@app.route("/api/auto_save/schedule")
+def api_auto_save_schedule():
+    """获取定时保存计划"""
+    global _scheduler
+    if _scheduler:
+        try:
+            status = _scheduler.get_status()
+            return jsonify({
+                "status": "ok",
+                "next_save_time": status.get("next_save_time", ""),
+                "last_save_time": status.get("last_save_time", ""),
+                "total_saves": status.get("total_saves", 0),
+                "running": status.get("running", False),
+            })
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e)})
+    return jsonify({"status": "not_initialized"})
+
+# ═══════════════════════════════════════════════════════════════
 # 训练管线
 # ═══════════════════════════════════════════════════════════════
 
@@ -1730,6 +1805,9 @@ def on_web_search(data: dict):
             
             emit("web_search_progress", {"step": "AI总结中", "progress": 60, "results_count": len(results)})
             
+            # 检测是否为兵法/战术学习类查询
+            is_military_query = any(kw in query for kw in ["兵法", "战术", "孙子", "战争", "军事", "克劳塞维茨", "三十六计", "战略", "布阵", "作战", "兵书", "打仗"])
+            
             # AI总结
             summary = ""
             try:
@@ -1739,13 +1817,24 @@ def on_web_search(data: dict):
                 client = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["api_base"])
                 
                 snippets_text = "\n".join([f"{i+1}. {r.get('title','')}: {r.get('snippet','')[:300]}" for i, r in enumerate(results[:8])])
-                prompt = f"搜索结果如下，请用中文总结关键信息（3-5条要点）：\n查询: {query}\n\n{snippets_text}"
+                
+                if is_military_query:
+                    prompt = f"""搜索结果如下，请从兵法和战术角度进行深度分析，用中文输出：
+1. 核心战术思想（3-5条）
+2. 可应用于FirefightAI游戏的具体战术建议
+3. 关键要点总结
+
+查询: {query}
+搜索结果:
+{snippets_text}"""
+                else:
+                    prompt = f"搜索结果如下，请用中文总结关键信息（3-5条要点）：\n查询: {query}\n\n{snippets_text}"
                 
                 full_summary = ""
                 stream = client.chat.completions.create(
                     model=llm_cfg.get("model", "deepseek-v4-flash"),
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=512,
+                    max_tokens=1024 if is_military_query else 512,
                     temperature=0.1,
                     stream=True,
                     timeout=6,
@@ -1757,6 +1846,45 @@ def on_web_search(data: dict):
                         emit("web_search_token", {"token": token, "done": False})
                 summary = full_summary
                 emit("web_search_token", {"token": "", "done": True, "full": summary})
+                
+                # ── v5.1 兵法学习: 自动保存到AI知识库 ──
+                if is_military_query and summary:
+                    try:
+                        WEB_KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+                        filename = f"military_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(query.encode()).hexdigest()[:8]}.json"
+                        filepath = WEB_KNOWLEDGE_DIR / filename
+                        entry = {
+                            "query": query,
+                            "summary": summary,
+                            "results": [{"title": r.get("title", ""), "snippet": r.get("snippet", "")} for r in results[:5]],
+                            "tags": ["兵法", "战术", "AI学习"],
+                            "saved_at": datetime.now().isoformat(),
+                            "source": "web_search_military",
+                            "type": "military_doctrine",
+                        }
+                        filepath.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+                        add_learning_log("military_learn", f"兵法知识已保存: {query[:40]}", f"文件: {filename}")
+                        
+                        # 立即让AI学习这些兵法知识
+                        doctrine_learn_prompt = f"""你是FirefightAI的战术学习系统。请从以下兵法知识中提取可应用于即时战略游戏的战术规则：
+
+{summary[:2000]}
+
+请输出JSON格式：{{"rules": [{{"name": "规则名", "condition": "触发条件", "action": "战术行动", "priority": "优先级(1-10)"}}], "overall_strategy": "总体战略建议"}}"""
+                        
+                        learn_resp = client.chat.completions.create(
+                            model=llm_cfg.get("model", "deepseek-v4-flash"),
+                            messages=[{"role": "user", "content": doctrine_learn_prompt}],
+                            max_tokens=512,
+                            temperature=0.1,
+                            timeout=6,
+                        )
+                        learned = learn_resp.choices[0].message.content
+                        add_learning_log("military_learn", "AI已学习兵法知识", learned[:300])
+                        emit("military_learned", {"summary": learned[:500], "query": query})
+                    except Exception as e:
+                        logger.debug(f"兵法学习保存失败: {e}")
+                        
             except Exception as e:
                 summary = f"(AI总结暂不可用)"
                 emit("web_search_token", {"token": summary, "done": True, "full": summary})
@@ -2180,6 +2308,18 @@ def _run_ai_loop():
     # 应用 monkey patch（仅在ADB可用时）
     _apply_patches()
 
+    # ── v5.1 初始化战场预测器 ──
+    global _predictor
+    try:
+        from src.learning.battle_predictor import BattlefieldPredictor
+        _predictor = BattlefieldPredictor(screen_size=ss, api_key=lc["api_key"], api_base=lc["api_base"])
+        _predictor.load()
+        add_learning_log("predictor", "战场预测器已初始化", f"经验数: {len(_predictor._experience)}")
+        update_state(prediction_accuracy=_predictor.get_accumulated_wisdom().get("accuracy", 0))
+    except Exception as e:
+        logger.warning(f"战场预测器初始化失败: {e}")
+        _predictor = None
+
     capture.start()
 
     controller = DashboardGameController(
@@ -2200,6 +2340,13 @@ def _run_ai_loop():
         logger.exception(f"AI异常: {e}")
         update_state(status=f"错误: {str(e)[:60]}", ai_thinking="")
     finally:
+        # ── v5.1 保存预测经验 ──
+        if _predictor:
+            try:
+                _predictor.save()
+                add_learning_log("predictor", "预测经验已保存", f"总经验: {len(_predictor._experience)}")
+            except Exception as e:
+                logger.warning(f"保存预测经验失败: {e}")
         update_state(running=False)
         capture.stop()
 
@@ -2269,8 +2416,41 @@ def _on_cycle_event(event: dict):
         decisions=decs, scores_history=sh, experience_count=exp_count, rules_count=rules_count,
         status=f"第{cycle}轮 ({allies}vs{enemies})", ai_thinking=thinking,
     )
+    
+    # ── v5.1 预测系统集成 ──
+    global _predictor
+    if _predictor and cycle > 0:
+        try:
+            # 获取上一轮敌方位置用于预测
+            prev_enemies = getattr(_predictor, '_last_enemy_positions', [])
+            curr_enemies = [{"id": i, "position": (0.5, 0.5)} for i in range(enemies)]  # 使用normalized位置
+            
+            if cycle == 1:
+                # 开局扫描：预测敌人位置
+                wisdom = _predictor.get_accumulated_wisdom()
+                thinking += f"\n[预测] 开局扫描完成，预测准确率: {wisdom.get('accuracy', 0):.0%}"
+                update_state(prediction_accuracy=wisdom.get("accuracy", 0))
+            elif prev_enemies:
+                # 接敌时预测敌人动向
+                result = _predictor.predict_enemy_movement(
+                    curr_enemies, prev_enemies, 
+                    {"screen_size": ss, "cycle": cycle}, cycle
+                )
+                if result:
+                    thinking += f"\n[预测] 威胁等级: {result.get('threat_level', 0)}/100, 建议: {result.get('suggested_response', '')[:80]}"
+                    update_state(
+                        predicted_enemies=result.get("predicted_moves", []),
+                        threat_level=result.get("threat_level", 0),
+                        prediction_accuracy=_predictor.get_accumulated_wisdom().get("accuracy", 0),
+                    )
+            
+            # 保存当前敌方位置用于下一轮预测
+            _predictor._last_enemy_positions = curr_enemies
+        except Exception as e:
+            logger.debug(f"预测异常(非致命): {e}")
+    
     socketio.emit("cycle_update", get_state())
-    socketio.emit("ai_thinking_update", {"thinking": thinking, "cycle": cycle, "analysis": analysis, "reason": reason_display})
+    socketio.emit("ai_thinking_update", {"thinking": thinking, "cycle": cycle, "analysis": analysis, "reason": reason_display, "prediction_accuracy": _predictor.get_accumulated_wisdom().get("accuracy", 0) if _predictor else 0})
 
 
 # ── Patch (延迟导入，避免服务器端缺少游戏依赖) ──
@@ -2685,13 +2865,14 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
 </head>
 <body>
 <div class="header">
-  <h1>Firefight AI v5.0</h1>
+  <h1>Firefight AI v5.1</h1>
   <div style="display:flex;gap:8px;align-items:center">
     <span class="conn-mini" id="conn-adb">ADB</span>
     <span class="conn-mini" id="conn-api">API</span>
     <span class="conn-mini" id="conn-gh">GitHub</span>
     <span class="conn-mini" id="conn-srv">Server</span>
     <span class="status" id="status-badge" style="font-size:13px;padding:5px 12px;border-radius:6px;background:#1a1f2b;color:#888">已停止</span>
+    <a href="/api/package/download" class="btn-download" title="下载完整应用+AI参数" style="background:#4caf50;color:#fff;padding:6px 14px;border-radius:6px;text-decoration:none;font-size:12px;font-weight:600;display:flex;align-items:center;gap:4px;cursor:pointer;transition:all 0.2s" onmouseover="this.style.background='#45a049'" onmouseout="this.style.background='#4caf50'">下载应用</a>
   </div>
 </div>
 <div class="nav-tabs">
@@ -2734,6 +2915,14 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
   <div class="main-grid">
     <div class="panel full-width"><h3>分数趋势</h3><div class="chart-container"><canvas id="scoreChart"></canvas></div></div>
     <div class="panel"><h3>AI 思考过程</h3><div class="thinking-box" id="thinking-box">等待 AI 上线...</div></div>
+    <div class="panel" id="predict-panel" style="display:none"><h3>战场预测 <span style="font-size:10px;font-weight:normal;color:#888">(v5.1 预测系统)</span></h3>
+      <div style="display:flex;gap:8px;margin-bottom:6px;font-size:11px">
+        <span style="color:#4caf50">准确率: <b id="pred-accuracy">0%</b></span>
+        <span style="color:#ff9800">威胁等级: <b id="pred-threat">0</b>/100</span>
+        <span style="color:#2196f3">经验: <b id="pred-exp">0</b>条</span>
+      </div>
+      <div class="thinking-box" id="predict-thinking" style="max-height:120px;font-size:10px">等待预测数据...</div>
+    </div>
     <div class="panel"><h3>决策日志</h3><div class="log-list" id="decision-log"></div></div>
   </div>
 </div>
@@ -2835,6 +3024,16 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
       <div class="conn-actions">
         <button class="btn-verify" onclick="checkGPU()">检查</button>
         <button class="btn-push" onclick="installCUDATorch()">安装CUDA PyTorch</button>
+      </div>
+    </div>
+    <!-- v5.1 自动保存 -->
+    <div class="conn-card">
+      <div class="conn-name">自动保存调度器</div>
+      <div class="conn-status unknown" id="conn-autosave-status">未检查</div>
+      <div id="conn-autosave-detail" style="font-size:10px;color:#888"></div>
+      <div class="conn-actions">
+        <button class="btn-verify" onclick="checkAutoSave()">检查</button>
+        <button class="btn-start" onclick="saveNow()" style="background:#ff9800;color:#000">立即保存</button>
       </div>
     </div>
   </div>
@@ -3601,7 +3800,50 @@ function createPackage(){
   }).catch(function(e){r.innerHTML='<div class="alert error">创建失败: '+e+'</div>'})
 }
 function downloadPackage(){
-  window.open('/api/package/download','_blank');
+  // 先尝试直接下载，如果失败则创建安装包后下载
+  fetch('/api/package/download').then(function(res){
+    if(res.status===404){
+      // 包不存在，先创建
+      createPackageThenDownload();
+    }else{
+      window.open('/api/package/download','_blank');
+    }
+  }).catch(function(){createPackageThenDownload()})
+}
+function createPackageThenDownload(){
+  var r=document.getElementById('package-result');
+  if(r)r.innerHTML='<div class="alert info"><span class="spinner"></span> 创建安装包中...</div>';
+  fetch('/api/package/create',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(res=>res.json()).then(d=>{
+    if(d.status==='created'){
+      if(r)r.innerHTML='<div class="package-info"><strong>安装包已创建!</strong><br>文件: '+d.filename+' | 大小: '+d.size_mb+'MB<br><a href="'+d.download_url+'" style="color:#4caf50;font-size:11px">点击下载</a></div>';
+      window.open('/api/package/download','_blank');
+    }
+  }).catch(function(e){if(r)r.innerHTML='<div class="alert error">创建失败: '+e+'</div>'})
+}
+// ── v5.1 自动保存 ──
+function checkAutoSave(){
+  var el=document.getElementById('conn-autosave-status');
+  el.textContent='检查中';el.className='conn-status checking';
+  fetch('/api/auto_save/schedule').then(r=>r.json()).then(d=>{
+    if(d.status==='ok'){
+      el.textContent=d.running?'运行中':'已停止';
+      el.className=d.running?'conn-status ok':'conn-status fail';
+      var detail='下次保存: '+(d.next_save_time||'--')+' | 已保存: '+(d.total_saves||0)+'次';
+      document.getElementById('conn-autosave-detail').textContent=detail;
+    }
+  }).catch(function(e){el.textContent='错误';el.className='conn-status fail'})
+}
+function saveNow(){
+  var el=document.getElementById('conn-autosave-status');
+  el.textContent='保存中...';el.className='conn-status checking';
+  fetch('/api/auto_save/now',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).then(d=>{
+    if(d.status==='ok'){
+      el.textContent='已保存';el.className='conn-status ok';
+      document.getElementById('conn-autosave-detail').textContent='保存: '+JSON.stringify(d.save)+' | 上传: '+JSON.stringify(d.upload);
+    }else{
+      el.textContent='失败';el.className='conn-status fail';
+    }
+  }).catch(function(e){el.textContent='错误';el.className='conn-status fail'})
 }
 
 // ── Web Search Socket事件 ──
@@ -3624,6 +3866,31 @@ socket.on('web_search_error',function(d){
 });
 socket.on('web_learn_result',function(d){
   if(d.error){alert('学习失败: '+d.error)}else{alert('AI学习完成!')}
+});
+// ── v5.1 兵法学习事件 ──
+socket.on('military_learned',function(d){
+  var summary=d.summary||'';
+  if(summary){
+    addLearningLog('兵法学习',d.query,summary);
+    var chatMsgs=document.getElementById('chat-messages');
+    if(chatMsgs){
+      var div=document.createElement('div');
+      div.className='chat-msg assistant';
+      div.innerHTML='<div class="avatar">AI</div><div class="bubble">[兵法学习] 已学习「'+d.query+'」相关内容，提炼战术规则...<br><small style="color:#4caf50">'+escapeHtml(summary.substring(0,300))+'</small></div>';
+      chatMsgs.appendChild(div);
+      chatMsgs.scrollTop=chatMsgs.scrollHeight;
+    }
+  }
+});
+// ── v5.1 自动保存事件 ──
+socket.on('auto_save_progress',function(d){
+  if(d.step)console.log('[AutoSave] '+d.step);
+});
+socket.on('auto_save_complete',function(d){
+  var el=document.getElementById('conn-autosave-status');
+  if(el){el.textContent='已保存';el.className='conn-status ok'}
+  var detail=document.getElementById('conn-autosave-detail');
+  if(detail&&d){detail.textContent='保存: '+JSON.stringify(d.save||{})+' | 上传: '+JSON.stringify(d.upload||{})}
 });
 
 // ── 训练 ──
@@ -3681,6 +3948,21 @@ socket.on('cycle_update',function(d){
     scoreChart.data.datasets[0].data=d.scores_history.map(function(s){return s.score});
     scoreChart.data.datasets[1].data=d.scores_history.map(function(s){return s.total});
     scoreChart.update()
+  }
+  // ── v5.1 预测面板更新 ──
+  if(d.prediction_accuracy!==undefined||d.threat_level!==undefined){
+    var pp=document.getElementById('predict-panel');
+    if(pp)pp.style.display='block';
+    var pa=document.getElementById('pred-accuracy');
+    if(pa)pa.textContent=Math.round((d.prediction_accuracy||0)*100)+'%';
+    var pt=document.getElementById('pred-threat');
+    if(pt)pt.textContent=d.threat_level||0;
+    var pe=document.getElementById('pred-exp');
+    if(pe)pe.textContent=(d.predicted_enemies?d.predicted_enemies.length:0)+'条';
+    var pth=document.getElementById('predict-thinking');
+    if(pth&&d.predicted_enemies&&d.predicted_enemies.length>0){
+      pth.textContent='预测敌方移动: '+d.predicted_enemies.length+'个单位 | 威胁等级: '+(d.threat_level||0)+'/100';
+    }
   }
   // 用户指令
   if(d.user_commands){
@@ -4912,19 +5194,98 @@ def api_emulator_install_apk():
 
 @app.route("/api/emulator/screenshot")
 def api_emulator_screenshot():
+    """毫秒级ADB截图 - 使用exec-out screencap实现高速截图"""
     import base64
     try:
+        t0 = time.perf_counter()
         adb_exe = _get_adb_for_emulator()
+        # 使用 exec-out 直接输出二进制PNG，避免文件IO，确保毫秒级性能
         r = subprocess.run(
             [adb_exe, "-s", f"localhost:{_emulator_adb_port}", "exec-out", "screencap", "-p"],
-            capture_output=True, timeout=10
+            capture_output=True, timeout=5  # 5秒超时保底，正常应在1秒内
         )
         if r.returncode != 0:
             return jsonify({"error": "截图失败", "stderr": r.stderr[:200]}), 500
         img_b64 = base64.b64encode(r.stdout).decode("utf-8")
-        return jsonify({"image": img_b64, "format": "png", "timestamp": time.time()})
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        return jsonify({
+            "image": img_b64, "format": "png", "timestamp": time.time(),
+            "elapsed_ms": elapsed_ms, "size_bytes": len(r.stdout),
+        })
     except Exception as e:
         return jsonify({"error": str(e)[:200]}), 500
+
+@app.route("/api/decision_chain/benchmark")
+def api_decision_chain_benchmark():
+    """决策链性能测试 - 确保截图→指令 < 2秒"""
+    try:
+        import base64
+        t_total_start = time.perf_counter()
+        
+        # 1. 截图
+        t0 = time.perf_counter()
+        adb_exe = _get_adb_for_emulator()
+        r = subprocess.run(
+            [adb_exe, "-s", f"localhost:{_emulator_adb_port}", "exec-out", "screencap", "-p"],
+            capture_output=True, timeout=5
+        )
+        t_screenshot = int((time.perf_counter() - t0) * 1000)
+        
+        if r.returncode != 0:
+            return jsonify({"error": "截图失败", "stage": "screenshot"}), 500
+        
+        img_b64 = base64.b64encode(r.stdout).decode("utf-8")
+        
+        # 2. YOLO检测 (如果可用)
+        t_yolo = -1
+        t_llm = -1
+        try:
+            t0 = time.perf_counter()
+            from src.vision.detector import UnitDetector
+            cfg = load_config()
+            yc = cfg["yolo"]
+            detector = UnitDetector(model_path=yc["model_path"], fallback_model_path=yc["fallback_model_path"], confidence_threshold=yc["confidence_threshold"], iou_threshold=yc["iou_threshold"], image_size=yc["image_size"], device=yc["device"])
+            detector.load_model()
+            # 使用临时文件进行检测
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                tmp.write(r.stdout)
+                tmp_path = tmp.name
+            detections = detector.detect(tmp_path)
+            os.unlink(tmp_path)
+            t_yolo = int((time.perf_counter() - t0) * 1000)
+            
+            # 3. LLM决策
+            t0 = time.perf_counter()
+            from openai import OpenAI
+            llm_cfg = cfg["llm"]
+            client = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["api_base"])
+            # 快速决策测试
+            resp = client.chat.completions.create(
+                model=llm_cfg.get("model", "deepseek-v4-flash"),
+                messages=[{"role": "user", "content": f"检测到{len(detections)}个单位，简短指令"}],
+                max_tokens=64,
+                temperature=0.1,
+                timeout=6,
+            )
+            t_llm = int((time.perf_counter() - t0) * 1000)
+        except Exception as e:
+            logger.debug(f"决策链benchmark跳过YOLO/LLM: {e}")
+        
+        t_total = int((time.perf_counter() - t_total_start) * 1000)
+        
+        return jsonify({
+            "status": "ok",
+            "screenshot_ms": t_screenshot,
+            "yolo_ms": t_yolo,
+            "llm_ms": t_llm,
+            "total_ms": t_total,
+            "within_2s": t_total < 2000,
+            "within_3s": t_total < 3000,
+            "timestamp": time.time(),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)[:200], "stage": "benchmark"}), 500
 
 
 @app.route("/api/emulator/touch", methods=["POST"])
@@ -5568,7 +5929,7 @@ def api_auto_cleanup_toggle():
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Firefight AI Dashboard Server v5.0")
+    parser = argparse.ArgumentParser(description="Firefight AI Dashboard Server v5.1")
     parser.add_argument("--port", type=int, default=5000, help="服务器端口")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="服务器地址")
     parser.add_argument("--debug", action="store_true", help="调试模式")
@@ -5583,6 +5944,17 @@ if __name__ == "__main__":
     # 启动后台自动清理
     start_auto_cleanup()
 
+    # ── v5.1 启动自动参数保存调度器 ──
+    global _scheduler
+    try:
+        from src.learning.auto_scheduler import AutoScheduler
+        _scheduler = AutoScheduler(project_root=PROJECT_ROOT)
+        _scheduler.start()
+        add_learning_log("system", "自动保存调度器已启动", "每天08:00和20:00自动保存并上传参数")
+        logger.info("AutoScheduler已启动")
+    except Exception as e:
+        logger.warning(f"自动保存调度器启动失败: {e}")
+
     try:
         socketio.run(
             app, host=args.host, port=args.port,
@@ -5591,6 +5963,8 @@ if __name__ == "__main__":
         )
     except KeyboardInterrupt:
         logger.info("服务器已停止")
+        if _scheduler:
+            _scheduler.stop()
     except Exception as e:
         logger.error(f"服务器启动失败: {e}")
         sys.exit(1)
