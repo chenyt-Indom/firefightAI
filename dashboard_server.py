@@ -2084,6 +2084,7 @@ def _run_smart_mode(lc, dc, sc):
     _controller = None  # 无游戏控制器
     
     socketio.emit("smart_mode_status", {"message": "智能模式已启动，AI通过DeepSeek直接响应"})
+    add_learning_log("combat", "智能模式已启动", "无需模拟器，DeepSeek直接响应")
     
     # 持续运行，保持AI在线状态
     while get_state().get("running"):
@@ -2101,8 +2102,42 @@ def _run_ai_loop():
     update_state(status="初始化组件...", ai_thinking="正在加载模型和连接设备...")
     add_learning_log("combat", "AI上线，初始化组件", "")
 
+    cfg = load_config()
+    gc = cfg["game"]
+    dc = cfg["device"]
+    lc = cfg["llm"]
+    lpc = cfg["game_loop"]
+    yc = cfg["yolo"]
+    sc = cfg["scrcpy"]
+    lnc = cfg.get("learning", {})
+    ss = (gc["screen_width"], gc["screen_height"])
+
+    # 先检查ADB连接，避免导入不存在的MuMu模块
     from src.execution.adb_utils import ADBUtils
-    from src.execution.mumu_manager import MuMuManagerTouch
+    ad = dc.get("active", "mumu")
+    di = dc.get(ad, {})
+    adb = ADBUtils(host=di.get("adb_host", "127.0.0.1"), port=di.get("adb_port", 7555), connect_timeout=dc["adb_connect_timeout"], command_timeout=dc["adb_command_timeout"], retry_count=dc["adb_retry_count"])
+
+    if not adb.ensure_connected():
+        # ADB不可用，进入智能模式（不需要游戏模拟器，纯DeepSeek直连）
+        update_state(status="AI在线(智能模式)", ai_thinking="DeepSeek智能体已就绪，可直接对话和下达指令", adb_status="disconnected")
+        add_learning_log("connection", "ADB未连接，进入智能模式", "AI可通过对话和指令交互，无需模拟器")
+        socketio.emit("cycle_update", get_state())
+        socketio.emit("started", {"status": "ok", "mode": "smart"})
+        _run_smart_mode(lc, dc, sc)
+        return
+
+    update_state(adb_status="connected", status="ADB已连接, 加载模型...", ai_thinking="正在加载YOLO模型和OCR...")
+    add_learning_log("connection", "ADB连接成功", "")
+
+    # ADB已连接，才导入需要模拟器的模块
+    try:
+        from src.execution.mumu_manager import MuMuManagerTouch
+        _mumu_available = True
+    except ImportError:
+        _mumu_available = False
+        logger.warning("MuMuManagerTouch不可用，将使用ADB触控替代")
+
     from src.screen.capture import ScreenCapture
     from src.vision.detector import UnitDetector
     from src.vision.ocr_reader import UIReader
@@ -2114,33 +2149,6 @@ def _run_ai_loop():
     from src.learning.outcome_eval import OutcomeEvaluator
     from src.learning.memory_retriever import MemoryRetriever
     from src.learning.strategy_compressor import StrategyCompressor
-
-    cfg = load_config()
-    gc = cfg["game"]
-    dc = cfg["device"]
-    lc = cfg["llm"]
-    lpc = cfg["game_loop"]
-    yc = cfg["yolo"]
-    sc = cfg["scrcpy"]
-    lnc = cfg.get("learning", {})
-    ss = (gc["screen_width"], gc["screen_height"])
-
-    ad = dc.get("active", "mumu")
-    di = dc.get(ad, {})
-    adb = ADBUtils(host=di.get("adb_host", "127.0.0.1"), port=di.get("adb_port", 7555), connect_timeout=dc["adb_connect_timeout"], command_timeout=dc["adb_command_timeout"], retry_count=dc["adb_retry_count"])
-
-    if not adb.ensure_connected():
-        # ADB不可用，进入智能模式（不需要游戏模拟器）
-        update_state(status="AI在线(智能模式)", ai_thinking="DeepSeek智能体已就绪，可直接对话和下达指令", adb_status="disconnected")
-        add_learning_log("connection", "ADB未连接，进入智能模式", "AI可通过对话和指令交互，无需模拟器")
-        socketio.emit("cycle_update", get_state())
-        socketio.emit("started", {"status": "ok", "mode": "smart"})
-        # 保持运行状态，等待用户指令
-        _run_smart_mode(lc, dc, sc)
-        return
-
-    update_state(adb_status="connected", status="ADB已连接, 加载模型...", ai_thinking="正在加载YOLO模型和OCR...")
-    add_learning_log("connection", "ADB连接成功", "")
 
     capture = ScreenCapture(adb=adb, max_fps=sc["max_fps"], bitrate=sc["bitrate"], max_width=sc["max_width"], max_height=sc["max_height"], timeout=sc["timeout"])
     detector = UnitDetector(model_path=yc["model_path"], fallback_model_path=yc["fallback_model_path"], confidence_threshold=yc["confidence_threshold"], iou_threshold=yc["iou_threshold"], image_size=yc["image_size"], device=yc["device"])
@@ -2159,10 +2167,15 @@ def _run_ai_loop():
     scm = StrategyCompressor(battle_memory=bm, api_key=lc["api_key"], api_base=lc["api_base"], model=lc["model"]) if bm else None
 
     mc = cfg.get("mumu_manager", {})
-    touch = MuMuManagerTouch(exe_path=mc.get("exe_path", r"D:\MuMuPlayer\nx_main\MuMuManager.exe"), verbosity=mc.get("verbosity", 0), timeout=mc.get("timeout", 5.0))
+    touch = None
+    if _mumu_available:
+        try:
+            touch = MuMuManagerTouch(exe_path=mc.get("exe_path", r"D:\MuMuPlayer\nx_main\MuMuManager.exe"), verbosity=mc.get("verbosity", 0), timeout=mc.get("timeout", 5.0))
+        except Exception as e:
+            logger.warning(f"MuMu触控初始化失败: {e}，使用ADB触控替代")
     px = int(lpc["pause_button_x"] * ss[0])
     py = int(lpc["pause_button_y"] * ss[1])
-    executor = CommandExecutor(adb=adb, screen_size=ss, touch=touch if touch.is_connected else None, pause_button=(px, py))
+    executor = CommandExecutor(adb=adb, screen_size=ss, touch=touch if (touch and touch.is_connected) else None, pause_button=(px, py))
 
     capture.start()
 
@@ -3176,14 +3189,14 @@ function initChart(){
 function startAI(){
   document.getElementById('status-badge').textContent='连接中...';
   document.getElementById('status-badge').style.color='#ff9800';
-  document.getElementById('ai-thinking').innerHTML='<span class="spinner"></span> 正在启动AI智能体...';
+  document.getElementById('thinking-box').innerHTML='<span class="spinner"></span> 正在启动AI智能体...';
   socket.emit('start');
 }
 function stopAI(){
   socket.emit('stop');
   document.getElementById('status-badge').textContent='已停止';
   document.getElementById('status-badge').style.color='#888';
-  document.getElementById('ai-thinking').textContent='AI已离线';
+  document.getElementById('thinking-box').textContent='AI已离线';
 }
 function escapeHtml(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function sendCommand(){var inp=document.getElementById('cmd-input');var cmd=inp.value.trim();if(!cmd)return;socket.emit('send_command',{command:cmd});inp.value='';inp.placeholder='指令已发送...';setTimeout(function(){inp.placeholder='战术指令/配置命令(apikey/adb/repo/server)...'},2500)}
@@ -3685,17 +3698,17 @@ socket.on('started',function(d){
   var label=mode==='smart'?'AI在线(智能模式)':'战斗中...';
   document.getElementById('status-badge').textContent=label;
   document.getElementById('status-badge').style.color='#4caf50';
-  document.getElementById('ai-thinking').textContent='DeepSeek智能体已就绪';
+  document.getElementById('thinking-box').textContent='DeepSeek智能体已就绪';
 });
 socket.on('smart_mode_status',function(d){
   document.getElementById('status-badge').textContent='AI在线(智能模式)';
   document.getElementById('status-badge').style.color='#4caf50';
-  document.getElementById('ai-thinking').textContent=d.message||'DeepSeek智能体已就绪';
+  document.getElementById('thinking-box').textContent=d.message||'DeepSeek智能体已就绪';
 });
 socket.on('stopped',function(d){
   document.getElementById('status-badge').textContent='已停止';
   document.getElementById('status-badge').style.color='#888';
-  document.getElementById('ai-thinking').textContent='AI已离线';
+  document.getElementById('thinking-box').textContent='AI已离线';
 });
 
 // ── 版本/设置 ──
