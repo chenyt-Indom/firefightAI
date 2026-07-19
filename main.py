@@ -12,7 +12,6 @@ from loguru import logger
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.execution.adb_utils import ADBUtils
-from src.execution.mumu_manager import MuMuManagerTouch
 from src.screen.capture import ScreenCapture
 from src.vision.detector import UnitDetector
 from src.vision.ocr_reader import UIReader
@@ -56,11 +55,11 @@ def build_components(cfg: dict) -> dict:
     screen_size = (game_cfg["screen_width"], game_cfg["screen_height"])
 
     # 1. ADB - 根据active字段选择设备
-    active_device = device_cfg.get("active", "mumu")
+    active_device = device_cfg.get("active", "generic")
     device_info = device_cfg.get(active_device, {})
     adb = ADBUtils(
         host=device_info.get("adb_host", "127.0.0.1"),
-        port=device_info.get("adb_port", 7555),
+        port=device_info.get("adb_port", 5555),
         connect_timeout=device_cfg["adb_connect_timeout"],
         command_timeout=device_cfg["adb_command_timeout"],
         retry_count=device_cfg["adb_retry_count"],
@@ -158,16 +157,8 @@ def build_components(cfg: dict) -> dict:
     else:
         logger.info("学习系统已禁用 (learning.enabled=false)")
 
-    # 8. MuMuManager 触控控制器 (优先于 ADB)
-    mumu_cfg = cfg.get("mumu_manager", {})
-    touch = MuMuManagerTouch(
-        exe_path=mumu_cfg.get("exe_path", r"D:\MuMuPlayer\nx_main\MuMuManager.exe"),
-        verbosity=mumu_cfg.get("verbosity", 0),
-        timeout=mumu_cfg.get("timeout", 5.0),
-    )
-    if not touch.is_connected:
-        logger.warning("MuMuManager.exe 不存在, 将使用 ADB input 回退方案")
-        touch = None
+    # 8. 触控：使用 ADB input（通用方案，不依赖任何模拟器）
+    touch = None
 
     # 9. 指令执行器
     pause_x = int(loop_cfg["pause_button_x"] * screen_size[0])
@@ -291,11 +282,11 @@ def cmd_test(args) -> None:
     setup_logger(session_dir=log_cfg["session_dir"], level="DEBUG")
 
     if args.component == "adb":
-        active_device = cfg["device"].get("active", "mumu")
+        active_device = cfg["device"].get("active", "generic")
         device_info = cfg["device"].get(active_device, {})
         adb = ADBUtils(
             host=device_info.get("adb_host", "127.0.0.1"),
-            port=device_info.get("adb_port", 7555),
+            port=device_info.get("adb_port", 5555),
         )
         if adb.connect():
             print("ADB连接成功!")

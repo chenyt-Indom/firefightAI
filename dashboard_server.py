@@ -15,7 +15,7 @@ from flask import Flask, render_template_string, request, send_from_directory, j
 from flask_socketio import SocketIO, emit
 from loguru import logger
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.config["SECRET_KEY"] = "firefight_dashboard_v5"
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading", max_http_buffer_size=100*1024*1024)
@@ -74,18 +74,74 @@ AVD_CONFIG = {
     "device": "pixel_6",
     "api_level": 33,
     "arch": "x86_64",
-    "ram": 4096,          # MUMU同级4GB
+    "ram": 4096,          # 4GB
     "cores": 4,
-    "resolution": "1920x1080",  # MUMU同级1080P
+    "resolution": "1920x1080",  # 1080P
     "density": 320,
     "fullscreen": True,   # 全屏支持
-    "touch_screen": True,  # MUMU同级触控
-    "keyboard": True,     # MUMU同级键盘输入
+    "touch_screen": True,  # 触控
+    "keyboard": True,     # 键盘输入
 }
 _emulator_process = None
-_emulator_adb_port = 5556  # Different from MuMu's 7555
+_emulator_adb_port = 5556  # 内置模拟器ADB端口
 _scrcpy_process = None
 _scrcpy_enabled = False
+_adb_monitor_running = False
+_adb_last_connected = False
+
+
+def _adb_keepalive_worker():
+    """ADB 保活后台线程：每10秒检查一次连接，断开时自动重连"""
+    global _adb_monitor_running, _adb_last_connected
+    _adb_monitor_running = True
+    logger.info("ADB保活监控已启动")
+    add_learning_log("connection", "ADB保活监控已启动", "每10秒检查一次连接状态")
+    while _adb_monitor_running:
+        try:
+            cfg = load_config()
+            dc = cfg["device"]
+            ad = dc.get("active", "generic")
+            di = dc.get(ad, {})
+            host = di.get("adb_host", "127.0.0.1")
+            port = di.get("adb_port", 5555)
+            adb_exe = "adb"
+            # 尝试找到adb
+            for p in [r"d:\firefight\adb\adb.exe", "adb"]:
+                if p == "adb" or Path(p).exists():
+                    adb_exe = p
+                    break
+            subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
+            r = subprocess.run([adb_exe, "devices"], capture_output=True, text=True, timeout=5)
+            connected = f"{host}:{port}" in r.stdout
+            if connected != _adb_last_connected:
+                if connected:
+                    update_state(adb_status="connected")
+                    add_learning_log("connection", "ADB已连接", f"{host}:{port}")
+                    logger.info(f"ADB保活: 已连接 {host}:{port}")
+                else:
+                    update_state(adb_status="disconnected")
+                    # 尝试重连
+                    subprocess.run([adb_exe, "connect", f"{host}:{port}"], capture_output=True, text=True, timeout=5)
+                    r2 = subprocess.run([adb_exe, "devices"], capture_output=True, text=True, timeout=5)
+                    reconnected = f"{host}:{port}" in r2.stdout
+                    if reconnected:
+                        update_state(adb_status="connected")
+                        add_learning_log("connection", "ADB自动重连成功", f"{host}:{port}")
+                    else:
+                        add_learning_log("connection", "ADB断开，等待设备", f"{host}:{port}")
+                _adb_last_connected = connected
+        except Exception as e:
+            pass
+        time.sleep(10)
+
+
+def start_adb_monitor():
+    """启动ADB保活监控"""
+    global _adb_monitor_running
+    if _adb_monitor_running:
+        return
+    threading.Thread(target=_adb_keepalive_worker, daemon=True).start()
+    logger.info("ADB保活监控线程已启动")
 
 
 def update_state(**kw):
@@ -208,14 +264,13 @@ def api_version_reload():
 def api_adb_status():
     cfg = load_config()
     dc = cfg["device"]
-    ad = dc.get("active", "mumu")
+    ad = dc.get("active", "generic")
     di = dc.get(ad, {})
     host = di.get("adb_host", "127.0.0.1")
-    port = di.get("adb_port", 7555)
+    port = di.get("adb_port", 5555)
 
-    # 尝试检测ADB - 优先使用MuMu自带的ADB
+    # 尝试检测ADB - 使用系统ADB
     adb_paths = [
-        r"d:\MuMuPlayer\nx_device\12.0\shell\adb.exe",
         r"d:\firefight\adb\adb.exe",
         r"C:\adb\platform-tools\platform-tools\adb.exe",
         "adb",
@@ -261,12 +316,12 @@ def api_adb_reconnect():
     if not host or not port:
         cfg = load_config()
         dc = cfg["device"]
-        ad = dc.get("active", "mumu")
+        ad = dc.get("active", "generic")
         di = dc.get(ad, {})
         host = host or di.get("adb_host", "127.0.0.1")
-        port = port or di.get("adb_port", 7555)
+        port = port or di.get("adb_port", 5555)
 
-    adb_paths = [r"d:\MuMuPlayer\nx_device\12.0\shell\adb.exe", r"d:\firefight\adb\adb.exe", r"C:\adb\platform-tools\platform-tools\adb.exe", "adb"]
+    adb_paths = [r"d:\firefight\adb\adb.exe", r"C:\adb\platform-tools\platform-tools\adb.exe", "adb"]
     adb_exe = "adb"
     for p in adb_paths:
         if p == "adb" or Path(p).exists():
@@ -297,7 +352,7 @@ def api_adb_config():
     port = data.get("port", 0)
     if host and port:
         cfg = load_config()
-        ad = cfg["device"].get("active", "mumu")
+        ad = cfg["device"].get("active", "generic")
         cfg["device"][ad]["adb_host"] = host
         cfg["device"][ad]["adb_port"] = int(port)
         with open(PROJECT_ROOT / "config" / "settings.yaml", "w", encoding="utf-8") as f:
@@ -369,6 +424,11 @@ def api_github_status():
     if not has_remote:
         result["message"] = "GitHub未配置 - 请使用 /api/github/setup 配置仓库地址，或在指令框输入 'repo 仓库地址'"
         result["suggestion"] = "在指令框输入: repo https://github.com/用户名/仓库名.git"
+    else:
+        # 如果已配置远程仓库，即使GitHub API不通也标记为已配置
+        result["api_status"] = "configured"
+        result["repo_url"] = remote_url
+        result["message"] = f"仓库已配置: {remote_url}"
     
     return jsonify(result)
 
@@ -883,9 +943,11 @@ def api_server_deploy():
                     "-r", str(PROJECT_ROOT / "src"), f"{SERVER_USER}@{SERVER_HOST}:{SERVER_DEPLOY_PATH}/"
                 ], capture_output=True, timeout=60)
 
-                # 6. 安装依赖并重启
+                # 6. 安装依赖并重启服务到5001端口
                 socketio.emit("server_deploy_progress", {"step": "安装依赖", "progress": 90})
                 _ssh_exec(f"cd {SERVER_DEPLOY_PATH} && pip3 install -r requirements.txt -q 2>&1", timeout=120)
+                # 杀掉旧进程并重启到5001端口
+                _ssh_exec(f"pkill -f 'dashboard_server.py' 2>/dev/null; sleep 2; cd {SERVER_DEPLOY_PATH} && nohup python3 dashboard_server.py --host 0.0.0.0 --port 5001 > /tmp/firefight_5001.log 2>&1 &", timeout=10)
 
             socketio.emit("server_deploy_progress", {"step": "完成", "progress": 100})
             add_learning_log("server", "部署成功", f"服务器: {SERVER_HOST}")
@@ -2361,16 +2423,16 @@ def on_rebuild_chain():
         try:
             cfg = load_config()
             dc = cfg["device"]
-            ad = dc.get("active", "mumu")
+            ad = dc.get("active", "generic")
             di = dc.get(ad, {})
-            adb_paths = [r"d:\MuMuPlayer\nx_device\12.0\shell\adb.exe", r"d:\firefight\adb\adb.exe", "adb"]
+            adb_paths = [r"d:\firefight\adb\adb.exe", "adb"]
             adb_exe = "adb"
             for p in adb_paths:
                 if p == "adb" or Path(p).exists():
                     adb_exe = p
                     break
             subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
-            r = subprocess.run([adb_exe, "connect", f"{di.get('adb_host','127.0.0.1')}:{di.get('adb_port',7555)}"], capture_output=True, text=True, timeout=10)
+            r = subprocess.run([adb_exe, "connect", f"{di.get('adb_host','127.0.0.1')}:{di.get('adb_port',5555)}"], capture_output=True, text=True, timeout=10)
             results["adb"] = "connected" if "connected" in r.stdout.lower() else "failed"
             update_state(adb_status=results["adb"])
         except:
@@ -2417,16 +2479,16 @@ def on_check_all_connections():
     try:
         cfg = load_config()
         dc = cfg["device"]
-        ad = dc.get("active", "mumu")
+        ad = dc.get("active", "generic")
         di = dc.get(ad, {})
         adb_exe = "adb"
-        for p in [r"d:\MuMuPlayer\nx_device\12.0\shell\adb.exe", "adb"]:
+        for p in ["adb"]:
             if p == "adb" or Path(p).exists():
                 adb_exe = p
                 break
         subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
         r = subprocess.run([adb_exe, "devices"], capture_output=True, text=True, timeout=5)
-        results["adb"] = "connected" if f"{di.get('adb_host','127.0.0.1')}:{di.get('adb_port',7555)}" in r.stdout else "disconnected"
+        results["adb"] = "connected" if f"{di.get('adb_host','127.0.0.1')}:{di.get('adb_port',5555)}" in r.stdout else "disconnected"
     except:
         results["adb"] = "error"
 
@@ -2487,11 +2549,11 @@ def _run_ai_loop():
     lnc = cfg.get("learning", {})
     ss = (gc["screen_width"], gc["screen_height"])
 
-    # 先检查ADB连接，避免导入不存在的MuMu模块
+    # 先检查ADB连接
     from src.execution.adb_utils import ADBUtils
-    ad = dc.get("active", "mumu")
+    ad = dc.get("active", "generic")
     di = dc.get(ad, {})
-    adb = ADBUtils(host=di.get("adb_host", "127.0.0.1"), port=di.get("adb_port", 7555), connect_timeout=dc["adb_connect_timeout"], command_timeout=dc["adb_command_timeout"], retry_count=dc["adb_retry_count"])
+    adb = ADBUtils(host=di.get("adb_host", "127.0.0.1"), port=di.get("adb_port", 5555), connect_timeout=dc["adb_connect_timeout"], command_timeout=dc["adb_command_timeout"], retry_count=dc["adb_retry_count"])
 
     if not adb.ensure_connected():
         # ADB不可用，进入智能模式（不需要游戏模拟器，纯DeepSeek直连）
@@ -2506,12 +2568,7 @@ def _run_ai_loop():
     add_learning_log("connection", "ADB连接成功", "")
 
     # ADB已连接，才导入需要模拟器的模块
-    try:
-        from src.execution.mumu_manager import MuMuManagerTouch
-        _mumu_available = True
-    except ImportError:
-        _mumu_available = False
-        logger.warning("MuMuManagerTouch不可用，将使用ADB触控替代")
+    # 触控统一使用 ADB input，不再依赖 MuMuManager
 
     from src.screen.capture import ScreenCapture
     from src.vision.detector import UnitDetector
@@ -2541,16 +2598,11 @@ def _run_ai_loop():
     mr = MemoryRetriever(bm) if bm else None
     scm = StrategyCompressor(battle_memory=bm, api_key=lc["api_key"], api_base=lc["api_base"], model=lc["model"]) if bm else None
 
-    mc = cfg.get("mumu_manager", {})
+    # 触控：使用 ADB input（通用方案，不依赖任何模拟器）
     touch = None
-    if _mumu_available:
-        try:
-            touch = MuMuManagerTouch(exe_path=mc.get("exe_path", r"D:\MuMuPlayer\nx_main\MuMuManager.exe"), verbosity=mc.get("verbosity", 0), timeout=mc.get("timeout", 5.0))
-        except Exception as e:
-            logger.warning(f"MuMu触控初始化失败: {e}，使用ADB触控替代")
     px = int(lpc["pause_button_x"] * ss[0])
     py = int(lpc["pause_button_y"] * ss[1])
-    executor = CommandExecutor(adb=adb, screen_size=ss, touch=touch if (touch and touch.is_connected) else None, pause_button=(px, py))
+    executor = CommandExecutor(adb=adb, screen_size=ss, touch=None, pause_button=(px, py))
 
     # 应用 monkey patch（仅在ADB可用时）
     _apply_patches()
@@ -3159,7 +3211,7 @@ def _handle_config_command(cmd: str) -> bool:
                 try:
                     port = int(port_str)
                     cfg = load_config()
-                    ad = cfg["device"].get("active", "mumu")
+                    ad = cfg["device"].get("active", "generic")
                     cfg["device"][ad]["adb_host"] = host
                     cfg["device"][ad]["adb_port"] = port
                     with open(PROJECT_ROOT / "config" / "settings.yaml", "w", encoding="utf-8") as f:
@@ -3221,8 +3273,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Firefight AI v5.0</title>
-<script src="https://cdn.bootcdn.net/ajax/libs/socket.io/4.7.2/socket.io.min.js" onerror="this.onerror=null;this.src='https://unpkg.com/socket.io-client@4.7.2/dist/socket.io.min.js'"></script>
-<script src="https://cdn.bootcdn.net/ajax/libs/Chart.js/4.4.0/chart.umd.min.js" onerror="this.onerror=null;this.src='https://unpkg.com/chart.js@4.4.0/dist/chart.umd.min.js'"></script>
+<script src="static/js/socket.io.min.js"></script>
+<script src="static/js/chart.umd.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0e14;color:#d0d0d0;min-height:100vh}
@@ -3443,12 +3495,12 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
       </div>
     </div>
     <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
-      <button onclick="startTraining()" style="padding:6px 14px;font-size:11px;background:#4caf50;color:#fff;border-radius:6px;border:none;cursor:pointer">开始训练AI</button>
+      <button onclick="startAITraining()" style="padding:6px 14px;font-size:11px;background:#4caf50;color:#fff;border-radius:6px;border:none;cursor:pointer">开始训练AI</button>
       <button onclick="stopTraining()" style="padding:6px 14px;font-size:11px;background:#e53935;color:#fff;border-radius:6px;border:none;cursor:pointer">停止训练</button>
       <button onclick="pushToGitHub()" style="padding:6px 14px;font-size:11px;background:#ff9800;color:#fff;border-radius:6px;border:none;cursor:pointer">推送到GitHub</button>
       <button onclick="deployToServer()" style="padding:6px 14px;font-size:11px;background:#00bcd4;color:#fff;border-radius:6px;border:none;cursor:pointer">部署到服务器</button>
       <button onclick="updateApp()" style="padding:6px 14px;font-size:11px;background:#7c4dff;color:#fff;border-radius:6px;border:none;cursor:pointer">更新应用</button>
-      <button onclick="createPackage()" style="padding:6px 14px;font-size:11px;background:#607d8b;color:#fff;border-radius:6px;border:none;cursor:pointer">创建安装包</button>
+      <button onclick="createInstallPackage()" style="padding:6px 14px;font-size:11px;background:#607d8b;color:#fff;border-radius:6px;border:none;cursor:pointer">创建安装包</button>
     </div>
     <div id="game-control-result" style="margin-top:8px;font-size:11px;color:#888"></div>
   </div>
@@ -3523,7 +3575,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
     </div>
     <!-- ADB -->
     <div class="conn-card">
-      <div class="conn-name">ADB 连接 (MuMu)</div>
+      <div class="conn-name">ADB 连接</div>
       <div class="conn-status unknown" id="conn-adb-status">未检查</div>
       <div id="conn-adb-detail" style="font-size:10px;color:#888"></div>
       <div class="conn-actions">
@@ -3592,7 +3644,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
 <!-- ═══ 模拟器 ═══ -->
 <div class="tab-content" id="tab-emulator">
   <div class="panel" style="margin-bottom:12px">
-    <h3>Android 模拟器管理 (MUMU规格)</h3>
+    <h3>Android 模拟器管理 (标准规格)</h3>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
       <button class="btn-start" onclick="checkEmulatorStatus()">检查状态</button>
       <button class="btn-deploy" onclick="installEmulator()">安装模拟器</button>
@@ -3612,7 +3664,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
 
   <!-- scrcpy 投屏控制 -->
   <div class="panel" style="margin-bottom:12px">
-    <h3>scrcpy 投屏 <span style="font-size:10px;color:#888;font-weight:normal">(MUMU级全屏触控)</span></h3>
+    <h3>scrcpy 投屏 <span style="font-size:10px;color:#888;font-weight:normal">(全屏触控)</span></h3>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
       <button class="btn-deploy" onclick="installScrcpy()">安装scrcpy</button>
       <button class="btn-start" onclick="startScrcpy()">启动投屏</button>
@@ -3711,7 +3763,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
       </div>
       <div class="diagnostic-panel" id="diagnostic-panel">
         <div class="diag-item"><span class="diag-name">DeepSeek API</span><span class="diag-status unknown">等待诊断</span></div>
-        <div class="diag-item"><span class="diag-name">ADB (MuMu)</span><span class="diag-status unknown">等待诊断</span></div>
+        <div class="diag-item"><span class="diag-name">ADB</span><span class="diag-status unknown">等待诊断</span></div>
         <div class="diag-item"><span class="diag-name">GitHub</span><span class="diag-status unknown">等待诊断</span></div>
         <div class="diag-item"><span class="diag-name">腾讯云服务器</span><span class="diag-status unknown">等待诊断</span></div>
         <div class="diag-item"><span class="diag-name">PyTorch</span><span class="diag-status unknown">等待诊断</span></div>
@@ -3911,10 +3963,15 @@ let lastSearchResults = null;
 let _emuRefreshTimer = null;
 let _emuScreenConnected = false;
 
-// ── Socket.IO 安全初始化 (必须在所有 socket.on 之前) ──
+// Socket事件注册安全包装器 (必须在Socket初始化之前定义)
+function _on(evt, handler) {
+  if (socket) { socket.on(evt, handler); }
+}
+
+// ── Socket.IO 安全初始化 ──
 (function initSocket(){
   if(typeof io === 'undefined'){
-    console.warn('[FirefightAI] socket.io CDN未加载，使用轮询回退模式');
+    console.warn('[FirefightAI] socket.io 未加载，使用轮询回退模式');
     setInterval(function(){
       fetch('/api/stats').then(function(r){return r.json()}).then(function(d){
         if(d.status) document.getElementById('status-badge').textContent = d.status;
@@ -3941,11 +3998,6 @@ let _emuScreenConnected = false;
     console.error('[FirefightAI] Socket.IO 初始化失败:', e.message);
   }
 })();
-
-// Socket事件注册安全包装器
-function _on(evt, handler) {
-  if (socket) { socket.on(evt, handler); }
-}
 
 // ── 标签页 ──
 function switchTab(tab) {
@@ -4028,7 +4080,7 @@ function setMode(m){
   document.getElementById('game-control-result').innerHTML = '<span style="color:#4caf50">模式已设置为: '+m+'</span>';
   if(socket&&socket.connected)socket.emit('send_command',{command:'模式 '+m});
 }
-function startTraining(){
+function startAITraining(){
   document.getElementById('game-control-result').innerHTML = '<span class="spinner"></span> 开始训练AI...';
   if(socket&&socket.connected)socket.emit('send_command',{command:'训练 开始'});
 }
@@ -4040,7 +4092,7 @@ function updateApp(){
     document.getElementById('game-control-result').innerHTML = '<span style="color:#e53935">更新失败: '+e+'</span>';
   });
 }
-function createPackage(){
+function createInstallPackage(){
   document.getElementById('game-control-result').innerHTML = '<span class="spinner"></span> 正在创建安装包...';
   fetch('/api/package/create',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(function(r){return r.json()}).then(function(d){
     if(d.status==='ok'){
@@ -4161,7 +4213,7 @@ function updateConnCards(d){
 function setConnCard(statusId,detailId,val,name){
   var el=document.getElementById(statusId);var dl=document.getElementById(detailId);
   if(!el)return;
-  var ok=val==='online'||val==='connected';
+  var ok=val==='online'||val==='connected'||val==='configured';
   el.textContent=ok?'在线':(val==='offline'||val==='disconnected'?'离线':val||'未知');
   el.className='conn-status '+(ok?'online':(val==='offline'||val==='disconnected'?'offline':'unknown'));
 }
@@ -4176,15 +4228,24 @@ function reconnectADB(){fetch('/api/adb/reconnect',{method:'POST',headers:{'Cont
   document.getElementById('conn-adb-detail').textContent=d.output||'';
 })}
 function checkGitHub(){fetch('/api/github/status').then(r=>r.json()).then(d=>{
+  var el=document.getElementById('conn-github-status');
+  var dl=document.getElementById('conn-github-detail');
   if(!d.has_remote){
-    document.getElementById('conn-github-status').textContent='未配置仓库';
-    document.getElementById('conn-github-status').className='conn-status offline';
-    document.getElementById('conn-github-detail').textContent=(d.message||'GitHub未配置')+' | '+(d.suggestion||'');
+    el.textContent='未配置';
+    el.className='conn-status offline';
+    dl.textContent=(d.message||'请在指令框输入: repo 仓库地址');
   }else{
-    document.getElementById('conn-github-status').textContent=d.api_status==='online'?'在线':'离线';
-    document.getElementById('conn-github-status').className='conn-status '+(d.api_status==='online'?'online':'offline');
-    document.getElementById('conn-github-detail').textContent=(d.repo_url||'')+' | '+d.branch;
+    var statusText = d.api_status==='configured'?'已配置':(d.api_status==='online'?'在线':'离线');
+    var isOk = d.api_status==='configured'||d.api_status==='online';
+    el.textContent=statusText;
+    el.className='conn-status '+(isOk?'online':'offline');
+    dl.textContent=(d.repo_url||'')+' | '+d.branch;
+    if(d.has_changes) dl.textContent+=' | 有未提交变更';
   }
+}).catch(function(e){
+  document.getElementById('conn-github-status').textContent='错误';
+  document.getElementById('conn-github-status').className='conn-status offline';
+  document.getElementById('conn-github-detail').textContent='网络错误: '+e;
 })}
 function setupGitHub(){
   var url=prompt('请输入GitHub仓库地址:\n例如: https://github.com/username/repo.git');
@@ -4200,9 +4261,38 @@ function setupGitHub(){
     }
   })
 }
-function pushToGitHub(){fetch('/api/github/push',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:'手动推送 '+new Date().toLocaleString()})}).then(r=>r.json()).then(d=>{
-  document.getElementById('settings-github-result').innerHTML='<div class="alert '+(d.status==='pushed'||d.status==='no_changes'?'success':'error')+'">'+d.status+'</div>';
-})}
+function pushToGitHub(){
+  var btn=document.getElementById('conn-github-status');
+  btn.textContent='推送中...';
+  btn.className='conn-status unknown';
+  var dl=document.getElementById('conn-github-detail');
+  dl.textContent='正在推送到GitHub...';
+  fetch('/api/github/push',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:'手动推送 '+new Date().toLocaleString()})}).then(r=>r.json()).then(d=>{
+    var resultEl=document.getElementById('settings-github-result');
+    if(d.status==='pushed'){
+      btn.textContent='已推送';
+      btn.className='conn-status online';
+      dl.textContent='推送成功: '+d.message;
+      if(resultEl) resultEl.innerHTML='<div class="alert success">推送成功: '+d.message+'</div>';
+    }else if(d.status==='no_changes'){
+      btn.textContent='无变更';
+      btn.className='conn-status online';
+      dl.textContent='无新变更需要推送';
+      if(resultEl) resultEl.innerHTML='<div class="alert success">无变更</div>';
+    }else{
+      btn.textContent='失败';
+      btn.className='conn-status offline';
+      dl.textContent='推送失败: '+(d.error||'')+' | '+(d.suggestion||'');
+      if(resultEl) resultEl.innerHTML='<div class="alert error">'+d.status+'</div>';
+      alert('推送失败: '+(d.error||'')+'\n'+(d.suggestion||''));
+    }
+  }).catch(function(e){
+    btn.textContent='错误';
+    btn.className='conn-status offline';
+    dl.textContent='网络错误: '+e;
+    alert('推送请求失败: '+e);
+  });
+}
 function pullFromGitHub(){fetch('/api/github/pull',{method:'POST'}).then(r=>r.json()).then(d=>{
   document.getElementById('settings-github-result').innerHTML='<div class="alert '+(d.status==='pulled'?'success':'error')+'">'+d.status+'</div>';
 })}
@@ -4400,7 +4490,7 @@ function runDiagnostics(){
     updateDiagItem(1,d.status==='connected'?'ok':'fail',d.status+' | '+d.adb_exe);
   }).catch(function(){updateDiagItem(1,'fail','检查失败')});
   fetch('/api/github/status').then(r=>r.json()).then(d=>{
-    var ok=d.api_status==='online';
+    var ok=d.api_status==='online'||d.api_status==='configured';
     var txt=(d.has_remote?d.repo_url:'未配置仓库')+' | API: '+d.api_status;
     updateDiagItem(2,ok&&d.has_remote?'ok':'fail',txt);
   }).catch(function(){updateDiagItem(2,'fail','无法连接')});
@@ -4994,10 +5084,6 @@ _on('chain_verify_complete',function(d){
   }
 });
 
-</textarea>
-</div>
-</div>
-
 // ── DeepSeek 余额查询 ──
 function checkBalance(){
   fetch('/api/deepseek/balance').then(r=>r.json()).then(d=>{
@@ -5139,162 +5225,437 @@ ANNOTATE_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Firefight AI - 标注工具</title>
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0e14;color:#d0d0d0;padding:12px}
-h3{font-size:13px;color:#58a5f3;margin-bottom:10px}
-.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:center}
-.toolbar button{padding:6px 14px;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;background:#1a1f2b;color:#d0d0d0;border:1px solid #252a33}
-.toolbar button:hover{background:#252a33;border-color:#58a5f3}
-.toolbar button.active{background:#58a5f3;color:#000;border-color:#58a5f3}
-.toolbar select{padding:6px 10px;border:1px solid #252a33;border-radius:6px;background:#1a1f2b;color:#d0d0d0;font-size:12px}
-.toolbar .shortcut{font-size:10px;color:#888}
-.workspace{display:flex;gap:10px;height:calc(100vh - 140px)}
-.image-list{width:180px;overflow-y:auto;border:1px solid #252a33;border-radius:8px;padding:8px;background:#11151c;flex-shrink:0}
-.image-list .thumb{padding:6px 8px;font-size:11px;border-bottom:1px solid #1a1f2b;cursor:pointer;border-radius:4px;display:flex;align-items:center;gap:6px}
-.image-list .thumb:hover{background:#1a1f2b}
-.image-list .thumb.active{background:#1a2530;color:#58a5f3}
-.image-list .thumb .badge{font-size:9px;padding:1px 5px;border-radius:8px;background:#4caf50;color:#000}
-.image-list .thumb .badge.unlabeled{background:#e53935;color:#fff}
-.annotation-area{flex:1;position:relative;border:1px solid #252a33;border-radius:8px;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center}
-.annotation-area canvas{max-width:100%;max-height:100%;object-fit:contain}
-.annotation-area .info-overlay{position:absolute;top:8px;left:8px;background:rgba(0,0,0,0.7);padding:4px 8px;border-radius:4px;font-size:10px;color:#aaa}
-.class-selector{display:flex;gap:8px;margin-bottom:8px}
-.class-btn{padding:5px 14px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border:1px solid #252a33;background:#1a1f2b;color:#888}
-.class-btn.active-tank{background:#1a2530;color:#58a5f3;border-color:#58a5f3}
-.class-btn.active-infantry{background:#1a3020;color:#4caf50;border-color:#4caf50}
-.class-btn:hover{border-color:#58a5f3}
-.stats{font-size:10px;color:#888;margin-top:6px}
+*{margin:0;box-sizing:border-box}
+body{background:#1a1a2e;color:#fff;font-family:'Microsoft YaHei',Arial;height:100vh;display:flex;flex-direction:column}
+#toolbar{background:#16213e;padding:8px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;min-height:45px;flex-shrink:0}
+#toolbar h3{margin:0;color:#00bfff;font-size:15px;white-space:nowrap}
+select{padding:5px;background:#333;color:#fff;border:none;border-radius:4px;font-size:12px}
+.btn{padding:6px 12px;border:none;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap}
+.btn-save{background:#00cc66;color:#000}
+.btn-del{background:#cc3333;color:#fff}
+.btn-clear{background:#ff6600;color:#fff}
+.btn-export{background:#0066ff;color:#fff}
+.btn-import{background:#8e44ad;color:#fff}
+#main-area{flex:1;overflow:auto;position:relative;display:flex;flex-direction:column;min-height:0}
+#image-panel{display:flex;flex:1;overflow:hidden;min-height:0}
+#sidebar{width:240px;background:#0d1117;overflow-y:auto;border-right:1px solid #333;padding:0;flex-shrink:0}
+#sidebar h4{padding:10px;margin:0;color:#888;font-size:13px;border-bottom:1px solid #222}
+#thumb-list{display:flex;flex-direction:column}
+.thumb-item{padding:8px 10px;border-bottom:1px solid #1a1f2b;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:8px}
+.thumb-item:hover{background:#1a1f2b}
+.thumb-item.active{background:#1a3a5c;border-left:3px solid #00bfff}
+.thumb-item .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ccc}
+.thumb-item .count{color:#888;font-size:11px}
+.thumb-item .del{color:#cc3333;cursor:pointer;font-size:14px;opacity:0.5}
+.thumb-item .del:hover{opacity:1}
+#viewer{flex:1;overflow:auto;position:relative;display:flex;justify-content:center;align-items:flex-start;background:#111;min-height:0}
+#image-container{position:relative;display:inline-block;margin:5px}
+canvas{position:absolute;top:0;left:0}
+img{display:block;max-width:100vw;max-height:70vh}
+#meta-bar{background:#16213e;padding:6px 12px;display:flex;gap:10px;align-items:center;font-size:12px;border-top:1px solid #222;flex-wrap:wrap;flex-shrink:0;min-height:36px}
+#meta-bar input{background:#1a1f2b;border:1px solid #333;color:#fff;padding:4px 8px;border-radius:3px;font-size:12px}
+#descInput{flex:1;min-width:200px}
+#status{position:fixed;bottom:8px;left:10px;background:rgba(22,33,62,0.95);padding:6px 14px;border-radius:5px;font-size:13px;z-index:99}
+.drop-hint{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#555;font-size:18px;pointer-events:none}
 </style>
 </head>
 <body>
-<div class="toolbar">
-  <h3 style="margin:0;margin-right:12px">标注工具</h3>
-  <select id="dataset-select" onchange="loadImages()">
-    <option value="faction_yolo">faction_yolo</option>
+<div id="toolbar">
+  <h3>&#x1F525; Firefight UI 标注</h3>
+  <label class="btn btn-import" style="cursor:pointer;display:inline-block">
+    &#x1F4C1; 导入截图
+    <input type="file" id="fileInput" accept="image/*" multiple style="display:none" onchange="importFiles(this.files)">
+  </label>
+  <select id="classSelect">
+    <option value="0">0-You阵营国旗</option>
+    <option value="1">1-Enemy阵营国旗</option>
+    <option value="2">2-阵营下拉列表区</option>
+    <option value="3">3-OK/确认按钮</option>
+    <option value="4">4-单位选择区</option>
+    <option value="5">5-开始战斗按钮</option>
+    <option value="6">6-旗点</option>
+    <option value="7">7-其他按钮</option>
+    <option value="8">8-敌方阵营选择区</option>
   </select>
-  <button onclick="loadImages()">刷新</button>
-  <span style="color:#888">|</span>
-  <span class="shortcut">N=下一张 P=上一张 S=保存 Del=删除标注</span>
+  <button class="btn btn-save" onclick="saveLabels()">&#x1F4BE; 保存</button>
+  <button class="btn btn-del" onclick="delLast()">&#x2715; 删最后</button>
+  <button class="btn btn-clear" onclick="clearAll()">清空</button>
+  <button class="btn btn-export" onclick="exportYOLO()">&#x1F4E6; 导出YOLO</button>
+  <button class="btn btn-export" style="background:#00b894" onclick="exportAllData()">&#x1F4BF; 全量导出</button>
+  <span style="color:#888;font-size:11px">Ctrl+S保存 | Ctrl+Z删除 | 0-8切换类别 | 拖拽框选 | 支持拖放导入</span>
 </div>
-<div class="class-selector">
-  <button class="class-btn active-tank" id="class-btn-tank" onclick="setClass(0)">Tank (0)</button>
-  <button class="class-btn" id="class-btn-infantry" onclick="setClass(1)">Infantry (1)</button>
-  <span class="stats" id="annot-stats"></span>
+
+<div style="background:#332200;border-bottom:3px solid #ffaa00;padding:8px 12px;display:flex;gap:10px;align-items:center;flex-shrink:0">
+  <span style="font-size:15px">&#x1F3F7;</span>
+  <span style="color:#ffaa00;font-weight:bold;font-size:14px;white-space:nowrap">框名称:</span>
+  <input type="text" id="boxLabelInput" placeholder="先点击框，再输入名称..." style="flex:1;background:#1a1a2e;border:2px solid #ffaa00;color:#ffaa00;padding:8px 12px;border-radius:4px;font-size:14px;outline:none;font-weight:bold" onchange="updateBoxLabel()" onkeydown="if(event.key==='Enter')updateBoxLabel()">
+  <span id="boxLabelHint" style="color:#cc8800;font-size:12px">未选中框</span>
 </div>
-<div class="workspace">
-  <div class="image-list" id="image-list">加载中...</div>
-  <div class="annotation-area" id="annotation-area">
-    <canvas id="annot-canvas"></canvas>
-    <div class="info-overlay" id="info-overlay">选择图片开始标注</div>
+
+<div id="main-area">
+  <div id="image-panel">
+    <div id="sidebar">
+      <h4>&#x1F4F8; 截图列表 (<span id="imgCount">0</span>)</h4>
+      <div id="thumb-list"></div>
+    </div>
+    <div id="viewer">
+      <div id="image-container">
+        <div class="drop-hint" id="dropHint">&#x1F4C1; 拖放截图到此处<br><small>或点击上方「导入截图」</small></div>
+        <img id="mainImage" style="display:none">
+        <canvas id="canvas" style="display:none"></canvas>
+      </div>
+    </div>
+  </div>
+  <div id="meta-bar">
+    <span>&#x1F4DD; 截图说明:</span>
+    <input type="text" id="descInput" placeholder="描述这张截图是什么界面/状态..." onchange="updateDesc()">
+    <span style="color:#888;font-size:11px">例如: "阵营选择-美国vs中国" / "选兵界面" / "部署阶段"</span>
   </div>
 </div>
-<script>
-var currentClass=0;
-var currentImage='';
-var currentDataset='faction_yolo';
-var images=[];
-var labels=[];
-var drawing=false;
-var startX=0,startY=0;
-var imgNaturalW=0,imgNaturalH=0;
-var canvasW=0,canvasH=0;
-var imgObj=null;
+<div id="status">就绪 - 导入截图开始标注</div>
 
-function setClass(c){
-  currentClass=c;
-  document.getElementById('class-btn-tank').className='class-btn'+(c===0?' active-tank':'');
-  document.getElementById('class-btn-infantry').className='class-btn'+(c===1?' active-infantry':'');
+<script>
+var CLASS_NAMES = ['You国旗','Enemy国旗','下拉列表','OK按钮','单位区','开始按钮','旗点','其他','敌阵营区'];
+var COLORS = ['#ff6b6b','#4ecdc4','#ffe66d','#a29bfe','#fd79a8','#00b894','#e17055','#6c5ce7','#636e72'];
+
+var project = { images: {}, order: [], activeId: null };
+var boxes = [];
+var drawing = null;
+var selectedBox = -1;
+var imgEl = document.getElementById('mainImage');
+var canvas = document.getElementById('canvas');
+var ctx = canvas.getContext('2d');
+var dropHint = document.getElementById('dropHint');
+
+// ── 导入 ──
+document.getElementById('fileInput').addEventListener('change', function() {
+  importFiles(this.files);
+  this.value = '';
+});
+
+var viewer = document.getElementById('viewer');
+viewer.addEventListener('dragover', function(e) { e.preventDefault(); e.stopPropagation(); });
+viewer.addEventListener('drop', function(e) {
+  e.preventDefault(); e.stopPropagation();
+  if (e.dataTransfer.files.length) importFiles(e.dataTransfer.files);
+});
+
+function importFiles(fileList) {
+  var count = 0;
+  for (var i = 0; i < fileList.length; i++) {
+    var f = fileList[i];
+    if (!f.type.startsWith('image/')) continue;
+    var reader = new FileReader();
+    reader.onload = (function(file) {
+      return function(e) {
+        var id = 'img_' + Date.now() + '_' + Math.random().toString(36).slice(2,6);
+        project.images[id] = { name: file.name, desc: '', dataUrl: e.target.result, boxes: [] };
+        project.order.push(id);
+        count++;
+        if (count === 1 || project.order.length === 1) switchTo(id);
+        renderSidebar();
+      };
+    })(f);
+    reader.readAsDataURL(f);
+  }
+  document.getElementById('status').textContent = '导入中...';
 }
-function loadImages(){
-  var ds=document.getElementById('dataset-select').value;currentDataset=ds;
-  fetch('/api/annotate/images?dataset='+ds).then(r=>r.json()).then(data=>{
-    images=data;renderImageList();
-    if(images.length>0&&!currentImage){selectImage(images[0].name)}
-  })
+
+// ── 侧边栏 ──
+function renderSidebar() {
+  var list = document.getElementById('thumb-list');
+  list.innerHTML = '';
+  document.getElementById('imgCount').textContent = project.order.length;
+  for (var i = 0; i < project.order.length; i++) {
+    var id = project.order[i];
+    var img = project.images[id];
+    var div = document.createElement('div');
+    div.className = 'thumb-item' + (id === project.activeId ? ' active' : '');
+    div.innerHTML = '<span class="name" title="' + (img.desc || img.name) + '">&#x1F4F8; ' + img.name + '</span><span class="count">' + img.boxes.length + '框</span><span class="del" onclick="event.stopPropagation();deleteImg(\'' + id + '\')">&#x2715;</span>';
+    div.onclick = (function(imgId) { return function() { switchTo(imgId); }; })(id);
+    list.appendChild(div);
+  }
+  if (!project.order.length) { dropHint.style.display = ''; }
 }
-function renderImageList(){
-  var list=document.getElementById('image-list');
-  if(!images.length){list.innerHTML='<div style="color:#888;padding:10px;font-size:11px">暂无图片</div>';return}
-  var html='';images.forEach(function(img){
-    html+='<div class="thumb'+(img.name===currentImage?' active':'')+'" onclick="selectImage(\''+img.name+'\')"><span class="badge '+(img.labeled?'':'unlabeled')+'">'+(img.labeled?img.label_count:'未')+'</span>'+img.name+'</div>'
+
+function switchTo(id) {
+  project.activeId = id;
+  var img = project.images[id];
+  boxes = img.boxes;
+  selectedBox = -1;
+  document.getElementById('boxLabelInput').value = '';
+  document.getElementById('boxLabelInput').placeholder = '先点框，再输入名称...';
+  imgEl.src = img.dataUrl;
+  document.getElementById('descInput').value = img.desc || '';
+  document.getElementById('status').textContent = '切换到: ' + img.name;
+  renderSidebar();
+}
+
+function deleteImg(id) {
+  if (!confirm('删除 ' + project.images[id].name + ' 及其所有标注？')) return;
+  delete project.images[id];
+  project.order = project.order.filter(function(x) { return x !== id; });
+  if (project.activeId === id) {
+    project.activeId = project.order[0] || null;
+    if (project.activeId) { switchTo(project.activeId); }
+    else { imgEl.style.display = 'none'; canvas.style.display = 'none'; dropHint.style.display = ''; boxes = []; }
+  }
+  renderSidebar();
+}
+
+function updateDesc() {
+  if (!project.activeId) return;
+  project.images[project.activeId].desc = document.getElementById('descInput').value;
+  renderSidebar();
+}
+
+// ── 图片加载 ──
+imgEl.onload = function() {
+  dropHint.style.display = 'none';
+  imgEl.style.display = '';
+  canvas.style.display = '';
+  canvas.width = imgEl.naturalWidth;
+  canvas.height = imgEl.naturalHeight;
+  canvas.style.width = imgEl.clientWidth + 'px';
+  canvas.style.height = imgEl.clientHeight + 'px';
+  drawAll();
+};
+
+// ── 绘制 ──
+function drawAll() {
+  if (!imgEl.naturalWidth) return;
+  var W = imgEl.naturalWidth, H = imgEl.naturalHeight;
+  ctx.clearRect(0, 0, W, H);
+  for (var i = 0; i < boxes.length; i++) {
+    var b = boxes[i];
+    var isSelected = (i === selectedBox);
+    var color = COLORS[b.cls];
+    ctx.strokeStyle = isSelected ? '#ffffff' : color;
+    ctx.lineWidth = isSelected ? 3.5 : 2.5;
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    var displayLabel = b.label || CLASS_NAMES[b.cls];
+    var prefix = isSelected ? '★ ' : '';
+    var label = '[' + (i+1) + '] ' + prefix + displayLabel;
+    ctx.font = isSelected ? 'bold 13px Microsoft YaHei' : '12px Microsoft YaHei';
+    var tw = ctx.measureText(label).width + 8;
+    var th = isSelected ? 20 : 16;
+    ctx.fillStyle = isSelected ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.75)';
+    ctx.fillRect(b.x, b.y - th, tw, th);
+    ctx.fillStyle = isSelected ? '#ffffff' : color;
+    ctx.fillText(label, b.x + 3, b.y - 4);
+  }
+}
+
+// ── 坐标转换 ──
+function toImgCoords(clientX, clientY) {
+  var rect = imgEl.getBoundingClientRect();
+  return { x: (clientX - rect.left) * (imgEl.naturalWidth / imgEl.clientWidth), y: (clientY - rect.top) * (imgEl.naturalHeight / imgEl.clientHeight) };
+}
+
+// ── 鼠标事件 ──
+canvas.addEventListener('mousedown', function(e) {
+  if (!project.activeId) return;
+  var p = toImgCoords(e.clientX, e.clientY);
+  var hit = -1;
+  for (var i = boxes.length - 1; i >= 0; i--) {
+    var b = boxes[i];
+    if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) { hit = i; break; }
+  }
+  if (hit >= 0) { selectBox(hit); return; }
+  selectBox(-1);
+  var cls = parseInt(document.getElementById('classSelect').value);
+  boxes.push({cls: cls, x: p.x, y: p.y, w: 0, h: 0, label: ''});
+  drawing = {startX: p.x, startY: p.y, idx: boxes.length - 1};
+});
+
+canvas.addEventListener('mousemove', function(e) {
+  if (!drawing) return;
+  var p = toImgCoords(e.clientX, e.clientY);
+  var b = boxes[drawing.idx];
+  b.x = Math.min(drawing.startX, p.x);
+  b.y = Math.min(drawing.startY, p.y);
+  b.w = Math.abs(p.x - drawing.startX);
+  b.h = Math.abs(p.y - drawing.startY);
+  drawAll();
+});
+
+canvas.addEventListener('mouseup', function(e) {
+  if (!drawing) return;
+  var b = boxes[drawing.idx];
+  if (b.w < 5 || b.h < 5) { boxes.pop(); selectBox(-1); }
+  drawing = null;
+  drawAll();
+  updateStatus();
+  renderSidebar();
+});
+
+function updateStatus() {
+  var img = project.activeId ? project.images[project.activeId] : null;
+  var name = img ? img.name : '无图';
+  document.getElementById('status').textContent = boxes.length + '个标注 | ' + CLASS_NAMES[parseInt(document.getElementById('classSelect').value)] + ' | ' + name;
+}
+
+// ── 框选中 + 命名 ──
+function selectBox(idx) {
+  selectedBox = idx;
+  var input = document.getElementById('boxLabelInput');
+  var hint = document.getElementById('boxLabelHint');
+  if (idx >= 0 && idx < boxes.length) {
+    input.value = boxes[idx].label || '';
+    input.placeholder = '框#' + (idx+1) + ': ' + CLASS_NAMES[boxes[idx].cls] + ' — 输入名称';
+    hint.textContent = '已选中 框#' + (idx+1);
+    hint.style.color = '#00ff88';
+    input.focus();
+  } else {
+    input.value = '';
+    input.placeholder = '先点击框，再输入名称...';
+    hint.textContent = '未选中框';
+    hint.style.color = '#cc8800';
+  }
+  drawAll();
+}
+
+function updateBoxLabel() {
+  if (selectedBox < 0 || selectedBox >= boxes.length) return;
+  var val = document.getElementById('boxLabelInput').value.trim();
+  boxes[selectedBox].label = val;
+  drawAll();
+  document.getElementById('status').textContent = '框#' + (selectedBox+1) + ' 已命名: ' + (val || CLASS_NAMES[boxes[selectedBox].cls]);
+  renderSidebar();
+}
+
+// ── 操作按钮 ──
+function saveLabels() {
+  if (!project.activeId) return;
+  // 保存到服务器
+  var img = project.images[project.activeId];
+  var W = imgEl.naturalWidth, H = imgEl.naturalHeight;
+  var lines = [];
+  for (var i = 0; i < boxes.length; i++) {
+    var b = boxes[i];
+    if (b.w < 3 || b.h < 3) continue;
+    var cx = ((b.x + b.w / 2) / W).toFixed(6);
+    var cy = ((b.y + b.h / 2) / H).toFixed(6);
+    var nw = (b.w / W).toFixed(6);
+    var nh = (b.h / H).toFixed(6);
+    lines.push(b.cls + ' ' + cx + ' ' + cy + ' ' + nw + ' ' + nh);
+  }
+  fetch('/api/annotate/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({dataset:'faction_yolo', image:img.name, labels:boxes.map(function(b){return {class:b.cls, x:(b.x+b.w/2)/W, y:(b.y+b.h/2)/H, w:b.w/W, h:b.h/H}})})}).then(function(r){return r.json()}).then(function(d){
+    renderSidebar();
+    document.getElementById('status').textContent = '已保存 ' + boxes.length + '个标注到服务器';
+  }).catch(function(e){
+    document.getElementById('status').textContent = '保存失败: ' + e;
   });
-  list.innerHTML=html
 }
-function selectImage(name){
-  currentImage=name;labels=[];renderImageList();
-  var img=images.find(function(i){return i.name===name});
-  if(img&&img.labels)labels=img.labels.slice();
-  var canvas=document.getElementById('annot-canvas');
-  var ctx=canvas.getContext('2d');
-  imgObj=new Image();
-  imgObj.onload=function(){
-    imgNaturalW=imgObj.naturalWidth;imgNaturalH=imgObj.naturalHeight;
-    var area=document.getElementById('annotation-area');
-    var maxW=area.clientWidth-20;var maxH=area.clientHeight-20;
-    var scale=Math.min(maxW/imgNaturalW,maxH/imgNaturalH);
-    canvasW=imgNaturalW*scale;canvasH=imgNaturalH*scale;
-    canvas.width=canvasW;canvas.height=canvasH;
-    canvas.style.width=canvasW+'px';canvas.style.height=canvasH+'px';
-    ctx.drawImage(imgObj,0,0,canvasW,canvasH);
-    drawLabels();
-    document.getElementById('info-overlay').textContent=name+' | '+imgNaturalW+'x'+imgNaturalH+' | 标注: '+labels.length+'个 | 当前类别: '+(currentClass===0?'Tank':'Infantry');
-  };
-  imgObj.src=img.url;
-  document.getElementById('annot-stats').textContent='已标注: '+images.filter(function(i){return i.labeled}).length+'/'+images.length
+
+function delLast() {
+  if (selectedBox >= 0 && selectedBox < boxes.length) {
+    boxes.splice(selectedBox, 1);
+    selectBox(-1);
+  } else { boxes.pop(); }
+  drawAll();
+  updateStatus();
+  renderSidebar();
 }
-function drawLabels(){
-  var canvas=document.getElementById('annot-canvas');var ctx=canvas.getContext('2d');
-  ctx.drawImage(imgObj,0,0,canvasW,canvasH);
-  labels.forEach(function(l){
-    var x=l.x*canvasW,y=l.y*canvasH,w=l.w*canvasW,h=l.h*canvasH;
-    var color=l['class']===0?'#58a5f3':'#4caf50';
-    ctx.strokeStyle=color;ctx.lineWidth=2;ctx.strokeRect(x-w/2,y-h/2,w,h);
-    ctx.fillStyle=color;ctx.font='10px sans-serif';ctx.fillText(l['class']===0?'Tank':'Inf',x-w/2,y-h/2-4)
-  })
+
+function clearAll() {
+  if (!boxes.length) return;
+  if (!confirm('确定清空当前图所有 ' + boxes.length + ' 个标注？')) return;
+  boxes.length = 0;
+  drawAll();
+  updateStatus();
+  renderSidebar();
 }
-document.getElementById('annot-canvas').addEventListener('mousedown',function(e){
-  if(!imgObj)return;var rect=e.target.getBoundingClientRect();
-  startX=(e.clientX-rect.left)/canvasW;startY=(e.clientY-rect.top)/canvasH;
-  drawing=true
+
+function exportYOLO() {
+  if (!project.activeId || !boxes.length) { alert('当前无标注'); return; }
+  var img = project.images[project.activeId];
+  var W = imgEl.naturalWidth, H = imgEl.naturalHeight;
+  var lines = [];
+  var summary = '=== ' + img.name + ' (' + (img.desc || '无说明') + ') ===\n';
+  for (var i = 0; i < boxes.length; i++) {
+    var b = boxes[i];
+    if (b.w < 3 || b.h < 3) continue;
+    var cx = ((b.x + b.w / 2) / W).toFixed(6);
+    var cy = ((b.y + b.h / 2) / H).toFixed(6);
+    var nw = (b.w / W).toFixed(6);
+    var nh = (b.h / H).toFixed(6);
+    lines.push(b.cls + ' ' + cx + ' ' + cy + ' ' + nw + ' ' + nh);
+    var name = b.label || CLASS_NAMES[b.cls];
+    summary += '  #' + (i+1) + ' [' + name + '] (' + Math.round(b.x+b.w/2) + ',' + Math.round(b.y+b.h/2) + ') ' + Math.round(b.w) + 'x' + Math.round(b.h) + '\n';
+  }
+  var blob = new Blob([lines.join('\n')], {type:'text/plain'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = img.name.replace(/\.\w+$/,'') + '_yolo.txt';
+  a.click();
+  alert(summary);
+  document.getElementById('status').textContent = '已导出YOLO格式';
+}
+
+function exportAllData() {
+  if (!project.order.length) { alert('无数据可导出'); return; }
+  var data = {exportTime: new Date().toISOString(), images: {}};
+  for (var i = 0; i < project.order.length; i++) {
+    var id = project.order[i];
+    var img = project.images[id];
+    data.images[id] = { name: img.name, desc: img.desc, boxes: img.boxes };
+  }
+  var blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'firefight_labels_' + new Date().toISOString().slice(0,10) + '.json';
+  a.click();
+  var totalBoxes = 0;
+  for (var k in data.images) { totalBoxes += data.images[k].boxes.length; }
+  document.getElementById('status').textContent = '全量导出: ' + project.order.length + '张图, ' + totalBoxes + '个标注';
+}
+
+// ── 键盘快捷键 ──
+document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 's' && e.ctrlKey) { e.preventDefault(); saveLabels(); }
+  if (e.key === 'z' && e.ctrlKey) { e.preventDefault(); delLast(); }
+  if (e.key === 'e' && e.ctrlKey) { e.preventDefault(); exportYOLO(); }
+  if (e.key >= '0' && e.key <= '8' && !e.ctrlKey) {
+    document.getElementById('classSelect').value = e.key;
+    updateStatus();
+  }
 });
-document.getElementById('annot-canvas').addEventListener('mousemove',function(e){
-  if(!drawing||!imgObj)return;var rect=e.target.getBoundingClientRect();
-  var cx=(e.clientX-rect.left)/canvasW,cy=(e.clientY-rect.top)/canvasH;
-  var w=cx-startX,h=cy-startY;if(Math.abs(w)<0.005||Math.abs(h)<0.005)return;
-  var canvas=document.getElementById('annot-canvas'),ctx=canvas.getContext('2d');
-  ctx.drawImage(imgObj,0,0,canvasW,canvasH);drawLabels();
-  ctx.strokeStyle='#ff9800';ctx.lineWidth=2;ctx.setLineDash([4,2]);
-  ctx.strokeRect(Math.min(startX,cx)*canvasW,Math.min(startY,cy)*canvasH,Math.abs(w)*canvasW,Math.abs(h)*canvasH);
-  ctx.setLineDash([])
-});
-document.getElementById('annot-canvas').addEventListener('mouseup',function(e){
-  if(!drawing||!imgObj)return;drawing=false;
-  var rect=e.target.getBoundingClientRect();
-  var ex=(e.clientX-rect.left)/canvasW,ey=(e.clientY-rect.top)/canvasH;
-  var w=Math.abs(ex-startX),h=Math.abs(ey-startY);
-  if(w<0.01||h<0.01)return;
-  labels.push({class:currentClass,x:(Math.min(startX,ex)+Math.max(startX,ex))/2,y:(Math.min(startY,ey)+Math.max(startY,ey))/2,w:w,h:h});
-  drawLabels()
-});
-document.addEventListener('keydown',function(e){
-  if(e.key==='s'||e.key==='S'){e.preventDefault();saveLabels()}
-  if(e.key==='n'||e.key==='N'){e.preventDefault();navigateImage(1)}
-  if(e.key==='p'||e.key==='P'){e.preventDefault();navigateImage(-1)}
-  if(e.key==='Delete'){e.preventDefault();labels.pop();drawLabels()}
-});
-function navigateImage(dir){
-  var idx=images.findIndex(function(i){return i.name===currentImage});
-  if(idx<0)return;idx+=dir;if(idx<0)idx=images.length-1;if(idx>=images.length)idx=0;
-  selectImage(images[idx].name)
+
+// ── 从服务器加载已有数据集 ──
+function loadServerImages() {
+  fetch('/api/annotate/images?dataset=faction_yolo').then(function(r){return r.json()}).then(function(data){
+    for (var i = 0; i < data.length; i++) {
+      var img = data[i];
+      var id = 'srv_' + img.name;
+      project.images[id] = { name: img.name, desc: '', dataUrl: img.url, boxes: [] };
+      if (img.labels && img.labels.length) {
+        var img2 = new Image();
+        img2.onload = function(w,h,lbls,projId) {
+          return function() {
+            for (var j = 0; j < lbls.length; j++) {
+              var l = lbls[j];
+              project.images[projId].boxes.push({cls: l.class, x: (l.x - l.w/2) * w, y: (l.y - l.h/2) * h, w: l.w * w, h: l.h * h, label: ''});
+            }
+          };
+        }(img2.naturalWidth, img2.naturalHeight, img.labels, id);
+        img2.src = img.url;
+      }
+      project.order.push(id);
+    }
+    renderSidebar();
+    if (project.order.length > 0 && !project.activeId) switchTo(project.order[0]);
+    document.getElementById('status').textContent = '从服务器加载了 ' + data.length + ' 张图片';
+  }).catch(function(e){
+    document.getElementById('status').textContent = '服务器加载失败: ' + e;
+  });
 }
-function saveLabels(){
-  if(!currentImage)return;
-  fetch('/api/annotate/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dataset:currentDataset,image:currentImage,labels:labels})}).then(r=>r.json()).then(d=>{
-    document.getElementById('info-overlay').textContent='已保存 '+d.count+' 个标注';
-    var img=images.find(function(i){return i.name===currentImage});if(img){img.labeled=d.count>0;img.label_count=d.count;img.labels=labels}renderImageList()
-  })
-}
-loadImages();
+
+renderSidebar();
+loadServerImages();
 </script>
 </body>
 </html>"""
@@ -5491,7 +5852,6 @@ def _get_adb_for_emulator():
     """获取适合模拟器使用的ADB"""
     adb_candidates = [
         str(ANDROID_SDK_ROOT / "platform-tools" / "adb.exe"),
-        r"d:\MuMuPlayer\nx_device\12.0\shell\adb.exe",
         r"d:\firefight\adb\adb.exe",
         "adb",
     ]
@@ -5651,7 +6011,7 @@ def api_emulator_install():
                 ini_path.write_text(f"avd.ini.encoding=UTF-8\npath={avd_dir}\npath.rel=avd\\{AVD_NAME}.avd\ntarget=android-{AVD_CONFIG['api_level']}\n")
 
             # 配置AVD（确保config.ini存在）
-            socketio.emit("emu_install_progress", {"step": "配置AVD (MUMU规格)", "progress": 92})
+            socketio.emit("emu_install_progress", {"step": "配置AVD (标准规格)", "progress": 92})
             config_ini = avd_dir / "config.ini"
             if not config_ini.exists():
                 # 手动创建config.ini
@@ -5705,7 +6065,7 @@ vm.heapSize=256
                 config_ini.write_text(default_config)
                 logger.info("手动创建AVD config.ini成功")
             else:
-                # 更新已有配置为MUMU规格
+                # 更新已有配置为标准规格
                 config_lines = config_ini.read_text(errors="replace").split("\n")
                 custom_config = {
                     "hw.ramSize": str(AVD_CONFIG["ram"]),
@@ -5737,15 +6097,15 @@ vm.heapSize=256
                     if k not in existing_keys:
                         new_lines.append(f"{k}={v}")
                 config_ini.write_text("\n".join(new_lines))
-                logger.info("AVD配置更新为MUMU规格")
+                logger.info("AVD配置更新为标准规格")
 
             # 安装scrcpy
             socketio.emit("emu_install_progress", {"step": "安装scrcpy...", "progress": 96})
             _install_scrcpy_internal()
 
             socketio.emit("emu_install_progress", {"step": "完成!", "progress": 100})
-            socketio.emit("emu_install_complete", {"success": True, "message": "Android模拟器安装完成！(MUMU规格)", "avd_name": AVD_NAME})
-            add_learning_log("emulator", "Android模拟器安装完成 (MUMU规格)", f"AVD: {AVD_NAME}, 分辨率: {AVD_CONFIG['resolution']}")
+            socketio.emit("emu_install_complete", {"success": True, "message": "Android模拟器安装完成！(标准规格)", "avd_name": AVD_NAME})
+            add_learning_log("emulator", "Android模拟器安装完成 (标准规格)", f"AVD: {AVD_NAME}, 分辨率: {AVD_CONFIG['resolution']}")
 
         except Exception as e:
             error_msg = str(e)[:300]
@@ -6001,7 +6361,7 @@ def api_emulator_touch():
 
 
 # ═══════════════════════════════════════════════════════════════
-# scrcpy 投屏控制 (MUMU级别触控)
+# scrcpy 投屏控制 (ADB触控)
 # ═══════════════════════════════════════════════════════════════
 
 @app.route("/api/scrcpy/status")
@@ -6364,11 +6724,11 @@ def api_chain_verify():
     try:
         cfg = load_config()
         dc = cfg["device"]
-        ad = dc.get("active", "mumu")
+        ad = dc.get("active", "generic")
         di = dc.get(ad, {})
         adb_exe = _get_adb_for_emulator()
         subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
-        r = subprocess.run([adb_exe, "connect", f"{di.get('adb_host','127.0.0.1')}:{di.get('adb_port',7555)}"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run([adb_exe, "connect", f"{di.get('adb_host','127.0.0.1')}:{di.get('adb_port',5555)}"], capture_output=True, text=True, timeout=10)
         adb_ok = "connected" in r.stdout.lower() or "already connected" in r.stdout.lower()
         results["steps"]["adb"] = {"status": "ok" if adb_ok else "failed", "detail": r.stdout.strip()[:200]}
     except Exception as e:
@@ -6604,6 +6964,334 @@ def api_auto_cleanup_toggle():
     return jsonify({"running": _auto_cleanup_running})
 
 
+# ═══════════════════════════════════════════════════════════════
+# 云端数据库 API (v5.2)
+# ═══════════════════════════════════════════════════════════════
+
+# 云端数据库实例 (SQLite, 存储在服务器端)
+import sqlite3 as _sqlite3
+import hashlib as _hashlib
+from pathlib import Path as _Path
+
+_CLOUD_DB_PATH = _Path("/home/ubuntu/firefightAI/data/firefight_ai_cloud.db")
+_CLOUD_DB_LOCK = threading.Lock()
+
+
+def _get_cloud_conn():
+    """获取云端数据库连接"""
+    _CLOUD_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = _sqlite3.connect(str(_CLOUD_DB_PATH))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
+def _init_cloud_db():
+    """初始化云端数据库表结构"""
+    with _CLOUD_DB_LOCK:
+        conn = _get_cloud_conn()
+        try:
+            # 学习日志
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS learning_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    log_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT DEFAULT '',
+                    source TEXT DEFAULT '',
+                    session_id TEXT DEFAULT '',
+                    created_at REAL NOT NULL,
+                    record_hash TEXT UNIQUE
+                )
+            """)
+            # 知识库
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS knowledge_base (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    category TEXT DEFAULT 'general',
+                    source_url TEXT DEFAULT '',
+                    tags TEXT DEFAULT '',
+                    is_verified INTEGER DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    record_hash TEXT UNIQUE
+                )
+            """)
+            # 参数历史
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS parameter_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    param_name TEXT NOT NULL,
+                    param_value TEXT NOT NULL,
+                    param_type TEXT DEFAULT 'string',
+                    description TEXT DEFAULT '',
+                    source TEXT DEFAULT 'cloud',
+                    created_at REAL NOT NULL,
+                    record_hash TEXT UNIQUE
+                )
+            """)
+            # 训练会话
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS training_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT UNIQUE NOT NULL,
+                    faction TEXT DEFAULT '',
+                    difficulty TEXT DEFAULT '',
+                    mode TEXT DEFAULT '',
+                    start_time REAL NOT NULL,
+                    end_time REAL,
+                    total_cycles INTEGER DEFAULT 0,
+                    total_score INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'running',
+                    record_hash TEXT UNIQUE
+                )
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _make_record_hash(record: dict) -> str:
+    """生成记录哈希"""
+    raw = json.dumps(record, sort_keys=True, ensure_ascii=False)
+    return _hashlib.md5(raw.encode()).hexdigest()
+
+
+@app.route("/api/db/status")
+def api_db_status():
+    """云端数据库状态"""
+    try:
+        conn = _get_cloud_conn()
+        tables = {}
+        for t in ["learning_logs", "knowledge_base", "parameter_history", "training_sessions"]:
+            cnt = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            tables[t] = cnt
+        db_size = _CLOUD_DB_PATH.stat().st_size if _CLOUD_DB_PATH.exists() else 0
+        conn.close()
+        return jsonify({
+            "status": "ok", "version": APP_VERSION,
+            "db_size": round(db_size / (1024 * 1024), 2),
+            "tables": tables,
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route("/api/db/upload", methods=["POST"])
+def api_db_upload():
+    """上传数据到云端数据库"""
+    try:
+        data = request.get_json() or {}
+        table_name = data.get("table_name", "")
+        records = data.get("records", [])
+
+        if not table_name or not records:
+            return jsonify({"status": "error", "message": "缺少参数"})
+
+        valid_tables = ["learning_logs", "knowledge_base", "parameter_history", "training_sessions"]
+        if table_name not in valid_tables:
+            return jsonify({"status": "error", "message": f"无效表名: {table_name}"})
+
+        with _CLOUD_DB_LOCK:
+            conn = _get_cloud_conn()
+            inserted = 0
+            try:
+                for record in records:
+                    record_hash = _make_record_hash(record)
+                    try:
+                        if table_name == "learning_logs":
+                            conn.execute(
+                                """INSERT OR IGNORE INTO learning_logs
+                                   (log_type, title, content, source, session_id, created_at, record_hash)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                (record.get("log_type", ""), record.get("title", ""),
+                                 record.get("content", ""), record.get("source", ""),
+                                 record.get("session_id", ""), record.get("created_at", time.time()),
+                                 record_hash),
+                            )
+                        elif table_name == "knowledge_base":
+                            conn.execute(
+                                """INSERT OR IGNORE INTO knowledge_base
+                                   (title, content, category, source_url, tags, created_at, record_hash)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                (record.get("title", ""), record.get("content", ""),
+                                 record.get("category", "general"), record.get("source_url", ""),
+                                 record.get("tags", ""), record.get("created_at", time.time()),
+                                 record_hash),
+                            )
+                        elif table_name == "parameter_history":
+                            conn.execute(
+                                """INSERT OR IGNORE INTO parameter_history
+                                   (param_name, param_value, param_type, description, source, created_at, record_hash)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                (record.get("param_name", ""), str(record.get("param_value", "")),
+                                 record.get("param_type", "string"), record.get("description", ""),
+                                 record.get("source", "cloud"), record.get("created_at", time.time()),
+                                 record_hash),
+                            )
+                        elif table_name == "training_sessions":
+                            conn.execute(
+                                """INSERT OR IGNORE INTO training_sessions
+                                   (session_id, faction, difficulty, mode, start_time, total_cycles, total_score, status, record_hash)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                (record.get("session_id", ""), record.get("faction", ""),
+                                 record.get("difficulty", ""), record.get("mode", ""),
+                                 record.get("start_time", time.time()), record.get("total_cycles", 0),
+                                 record.get("total_score", 0), record.get("status", "running"),
+                                 record_hash),
+                            )
+                        if conn.total_changes > 0:
+                            inserted += 1
+                    except Exception:
+                        pass
+                conn.commit()
+            finally:
+                conn.close()
+
+        add_learning_log("sync", f"云端上传 {table_name}", f"接收 {len(records)} 条, 新增 {inserted} 条")
+        return jsonify({"status": "ok", "message": f"上传成功", "count": inserted})
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route("/api/db/download", methods=["POST"])
+def api_db_download():
+    """从云端下载数据"""
+    try:
+        data = request.get_json() or {}
+        table_name = data.get("table_name", "")
+        limit = data.get("limit", 1000)
+
+        valid_tables = ["learning_logs", "knowledge_base", "parameter_history", "training_sessions"]
+        if table_name not in valid_tables:
+            return jsonify({"status": "error", "message": f"无效表名: {table_name}"})
+
+        conn = _get_cloud_conn()
+        records = []
+        try:
+            if table_name == "learning_logs":
+                rows = conn.execute(
+                    "SELECT log_type, title, content, source, session_id, created_at FROM learning_logs ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                records = [
+                    {"log_type": r[0], "title": r[1], "content": r[2],
+                     "source": r[3], "session_id": r[4], "created_at": r[5]}
+                    for r in rows
+                ]
+            elif table_name == "knowledge_base":
+                rows = conn.execute(
+                    "SELECT title, content, category, source_url, tags, is_verified, created_at FROM knowledge_base ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                records = [
+                    {"title": r[0], "content": r[1], "category": r[2],
+                     "source_url": r[3], "tags": r[4], "is_verified": r[5], "created_at": r[6]}
+                    for r in rows
+                ]
+            elif table_name == "parameter_history":
+                rows = conn.execute(
+                    "SELECT param_name, param_value, param_type, description, source, created_at FROM parameter_history ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                records = [
+                    {"param_name": r[0], "param_value": r[1], "param_type": r[2],
+                     "description": r[3], "source": r[4], "created_at": r[5]}
+                    for r in rows
+                ]
+            elif table_name == "training_sessions":
+                rows = conn.execute(
+                    "SELECT session_id, faction, difficulty, mode, start_time, end_time, total_cycles, total_score, status FROM training_sessions ORDER BY start_time DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                records = [
+                    {"session_id": r[0], "faction": r[1], "difficulty": r[2],
+                     "mode": r[3], "start_time": r[4], "end_time": r[5],
+                     "total_cycles": r[6], "total_score": r[7], "status": r[8]}
+                    for r in rows
+                ]
+        finally:
+            conn.close()
+
+        return jsonify({"status": "ok", "records": records, "count": len(records)})
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route("/api/db/sync", methods=["POST"])
+def api_db_sync():
+    """双向同步"""
+    data = request.get_json() or {}
+    direction = data.get("direction", "both")
+
+    result = {"status": "ok", "direction": direction, "results": {}}
+
+    if direction in ("upload", "both"):
+        for table in ["learning_logs", "knowledge_base", "parameter_history"]:
+            # 这里简化处理，实际应有增量同步逻辑
+            pass
+
+    add_learning_log("sync", "云端同步触发", f"方向: {direction}")
+    return jsonify(result)
+
+
+@app.route("/api/db/backup", methods=["POST"])
+def api_db_backup():
+    """云端数据库备份"""
+    try:
+        backup_dir = _CLOUD_DB_PATH.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = backup_dir / f"cloud_db_backup_{timestamp}.db"
+
+        import shutil as _shutil
+        if _CLOUD_DB_PATH.exists():
+            _shutil.copy2(str(_CLOUD_DB_PATH), str(backup_path))
+            add_learning_log("system", "云端数据库备份", f"备份至 {backup_path.name}")
+            return jsonify({"status": "ok", "backup_path": str(backup_path)})
+        return jsonify({"status": "error", "message": "数据库文件不存在"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route("/api/db/stats")
+def api_db_full_stats():
+    """获取数据库完整统计"""
+    try:
+        local_stats = {}
+        try:
+            from src.learning.local_database import get_local_db
+            local_db = get_local_db()
+            local_stats = local_db.get_db_stats()
+        except Exception:
+            local_stats = {"status": "unavailable"}
+
+        cloud_stats = {"status": "ok"}
+        try:
+            conn = _get_cloud_conn()
+            tables = {}
+            for t in ["learning_logs", "knowledge_base", "parameter_history", "training_sessions"]:
+                cnt = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                tables[t] = cnt
+            conn.close()
+            cloud_stats["tables"] = tables
+            if _CLOUD_DB_PATH.exists():
+                cloud_stats["db_size_mb"] = round(_CLOUD_DB_PATH.stat().st_size / (1024 * 1024), 2)
+        except Exception as e:
+            cloud_stats = {"status": "error", "message": str(e)}
+
+        return jsonify({
+            "local": local_stats,
+            "cloud": cloud_stats,
+            "version": APP_VERSION,
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Firefight AI Dashboard Server v5.1")
@@ -6618,8 +7306,18 @@ if __name__ == "__main__":
 
     add_learning_log("system", f"服务器启动 v{APP_VERSION}", f"host={args.host}:{args.port}")
 
+    # 初始化云端数据库
+    try:
+        _init_cloud_db()
+        add_learning_log("system", "云端数据库已初始化", f"路径: {_CLOUD_DB_PATH}")
+    except Exception as e:
+        logger.warning(f"云端数据库初始化失败: {e}")
+
     # 启动后台自动清理
     start_auto_cleanup()
+
+    # ── 启动ADB保活监控 ──
+    start_adb_monitor()
 
     # ── v5.1 启动自动参数保存调度器 ──
     try:

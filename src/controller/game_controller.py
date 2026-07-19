@@ -233,8 +233,7 @@ class GameController:
 
         try:
             result = subprocess.run(
-                [r"D:\MuMuPlayer\nx_device\12.0\shell\adb.exe",
-                 "-s", "127.0.0.1:7555",
+                [self.adb.adb_path, "-s", self.adb.device_addr,
                  "exec-out", "screencap", "-p"],
                 capture_output=True,
                 timeout=8,
@@ -614,22 +613,22 @@ class GameController:
             ux, uy = unit.x, unit.y
             tx, ty = cmd.target_pixel
 
-            # ── 已验证的拖拽流程: 双击中圈 + MuMuManager swipe ──
+            # ── 已验证的拖拽流程: 双击中圈 + ADB swipe ──
             # 中圈约在单位中心附近 (YOLO实测: bar_y ≈ unit_y)
             cx, cy = ux, uy  # 中圈在单位中心附近即可
             try:
                 # 1. tap 选中单位
-                self._mumu_cmd(f"input tap {ux} {uy}")
+                self.adb.tap(ux, uy)
                 time.sleep(0.6)
 
                 # 2. 双击中圈 (抓取蓝条)
-                self._mumu_cmd(f"input tap {cx} {cy}")
+                self.adb.tap(cx, cy)
                 time.sleep(0.05)
-                self._mumu_cmd(f"input tap {cx} {cy}")
+                self.adb.tap(cx, cy)
                 time.sleep(0.1)
 
                 # 3. swipe 拖拽蓝条到目标
-                self._mumu_cmd(f"input swipe {cx} {cy} {tx} {ty} 2000")
+                self.adb.swipe(cx, cy, tx, ty, 2000)
                 time.sleep(2.3)
 
                 logger.debug(f"move unit({ux},{uy})→({tx},{ty})")
@@ -657,8 +656,7 @@ class GameController:
         import subprocess
         try:
             r = subprocess.run(
-                [r"D:\MuMuPlayer\nx_device\12.0\shell\adb.exe",
-                 "-s", "127.0.0.1:7555",
+                [self.adb.adb_path, "-s", self.adb.device_addr,
                  "exec-out", "screencap", "-p"],
                 capture_output=True, timeout=8,
             )
