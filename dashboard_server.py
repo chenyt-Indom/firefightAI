@@ -5361,10 +5361,17 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
       <span style="font-size:11px;color:#888">选择类型:</span>
       <select id="emu-type-select-tab" onchange="switchEmuType(this.value)" style="background:#1a1f2b;color:#58a5f3;border:1px solid #252a33;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer">
-        <option value="generic">本地模拟器 (Android SDK, 端口5556)</option>
-        <option value="mumu">MUMU模拟器 (端口7555)</option>
-        <option value="other">其他模拟器 (自定义, 端口5555)</option>
+        <option value="generic">本地模拟器 (Android SDK, 5556)</option>
+        <option value="mumu">MUMU模拟器 (7555)</option>
+        <option value="bluestacks">蓝叠模拟器 (5555)</option>
+        <option value="ldplayer">雷电模拟器 (5555)</option>
+        <option value="xiaoyao">逍遥模拟器 (21503)</option>
+        <option value="nox">Nox模拟器 (62001)</option>
+        <option value="memu">Memu模拟器 (21503)</option>
+        <option value="other">其他模拟器 (5555)</option>
       </select>
+      <button class="btn-verify" onclick="detectEmulators()" style="font-size:10px;padding:4px 8px">自动检测</button>
+      <span id="emu-detect-result" style="font-size:10px;color:#888"></span>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
       <button class="btn-start" onclick="checkEmulatorStatus()">检查状态</button>
@@ -5383,6 +5390,26 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
       <div class="diag-item"><span class="diag-name">ADB连接</span><span class="diag-status unknown" id="emu-adb">未知</span></div>
     </div>
     <div id="emu-progress" style="font-size:11px;margin-top:6px"></div>
+  </div>
+
+  <!-- 🔥 分辨率配置 -->
+  <div class="panel" style="margin-bottom:12px">
+    <h3>屏幕分辨率 <span style="font-size:10px;color:#ff9800;font-weight:normal">(修复游戏界面显示不全)</span></h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
+      <span style="font-size:11px;color:#aaa">预设:</span>
+      <button class="btn-verify" onclick="setEmuResolution(1920,1080,420)" style="font-size:10px;padding:4px 8px">1080p</button>
+      <button class="btn-verify" onclick="setEmuResolution(1280,720,320)" style="font-size:10px;padding:4px 8px">720p</button>
+      <button class="btn-verify" onclick="setEmuResolution(2560,1440,560)" style="font-size:10px;padding:4px 8px">1440p</button>
+      <button class="btn-verify" onclick="setEmuResolution(1920,1200,320)" style="font-size:10px;padding:4px 8px">平板</button>
+      <button class="btn-verify" onclick="setEmuResolution(1080,1920,480)" style="font-size:10px;padding:4px 8px">竖屏</button>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;font-size:11px;color:#aaa">
+      <span>宽:</span><input type="number" id="emu-res-w" value="1920" style="width:70px;background:#1a1f2b;color:#d0d0d0;border:1px solid #252a33;padding:2px 6px;border-radius:4px">
+      <span>高:</span><input type="number" id="emu-res-h" value="1080" style="width:70px;background:#1a1f2b;color:#d0d0d0;border:1px solid #252a33;padding:2px 6px;border-radius:4px">
+      <span>DPI:</span><input type="number" id="emu-res-dpi" value="420" style="width:60px;background:#1a1f2b;color:#d0d0d0;border:1px solid #252a33;padding:2px 6px;border-radius:4px">
+      <button class="btn-start" onclick="applyEmuResolution()" style="font-size:10px;padding:4px 8px">应用</button>
+      <span id="emu-res-status" style="font-size:10px;color:#888"></span>
+    </div>
   </div>
 
   <!-- scrcpy 投屏控制 (鼠标/键盘直接操控) -->
@@ -7398,8 +7425,8 @@ function switchEmuType(type){
       // 更新所有下拉框
       document.querySelectorAll('#emu-type-select, #emu-type-select-tab').forEach(function(el){el.value=type});
       var label=document.getElementById('emu-type-label');
-      var names={generic:'本地模拟器',mumu:'MUMU模拟器',other:'其他模拟器'};
-      if(label) label.textContent='['+names[type]+']';
+      var names={generic:'本地模拟器',mumu:'MUMU模拟器',bluestacks:'蓝叠模拟器',ldplayer:'雷电模拟器',xiaoyao:'逍遥模拟器',nox:'Nox模拟器',memu:'Memu模拟器',other:'其他模拟器'};
+      if(label) label.textContent='['+(d.name||names[type])+']';
       // 刷新状态
       checkADB();
       checkEmulatorStatus();
@@ -7410,7 +7437,7 @@ function switchEmuType(type){
       }
       // 通知
       var r=document.getElementById('emu-touch-result');
-      if(r){r.textContent='已切换至: '+names[type]+' (端口:'+d.port+')';r.style.color='#4caf50';}
+      if(r){r.textContent='已切换至: '+(d.name||names[type])+' (端口:'+d.port+')';r.style.color='#4caf50';}
     }
   }).catch(function(e){alert('切换失败: '+e)});
 }
@@ -7418,13 +7445,80 @@ function loadEmuType(){
   fetch('/api/emulator/type').then(r=>r.json()).then(d=>{
     document.querySelectorAll('#emu-type-select, #emu-type-select-tab').forEach(function(el){el.value=d.type});
     var label=document.getElementById('emu-type-label');
-    var names={generic:'本地模拟器',mumu:'MUMU模拟器',other:'其他模拟器'};
-    if(label) label.textContent='['+names[d.type]+']';
+    var names={generic:'本地模拟器',mumu:'MUMU模拟器',bluestacks:'蓝叠模拟器',ldplayer:'雷电模拟器',xiaoyao:'逍遥模拟器',nox:'Nox模拟器',memu:'Memu模拟器',other:'其他模拟器'};
+    if(label) label.textContent='['+(d.name||names[d.type])+']';
+  });
+}
+function detectEmulators(){
+  var el = document.getElementById('emu-detect-result');
+  el.textContent = '检测中...';
+  el.style.color = '#ff9800';
+  fetch('/api/emulator/detect').then(r=>r.json()).then(d=>{
+    if(d.status==='ok'){
+      if(d.detected.length===0){
+        el.textContent = '未检测到模拟器';
+        el.style.color = '#e53935';
+      }else{
+        var names = [];
+        d.detected.forEach(function(dev){
+          names.push(dev.name + (dev.current?' [当前]':''));
+        });
+        el.textContent = '检测到: '+names.join(', ');
+        el.style.color = '#4caf50';
+        if(d.detected.length>0 && !d.detected[0].current){
+          var first = d.detected[0];
+          if(first.type && first.type !== 'unknown' && first.type !== 'discovered'){
+            switchEmuType(first.type);
+          }
+        }
+      }
+    }else{
+      el.textContent = '检测失败';
+      el.style.color = '#e53935';
+    }
+  }).catch(function(e){
+    el.textContent = '检测失败';
+    el.style.color = '#e53935';
   });
 }
 // 页面加载时初始化
 setTimeout(loadEmuType,500);
 setTimeout(loadEmuScreenState,600);
+setTimeout(loadEmuResolution,700);
+
+// ── 分辨率配置 ──
+function setEmuResolution(w,h,dpi){
+  document.getElementById('emu-res-w').value = w;
+  document.getElementById('emu-res-h').value = h;
+  document.getElementById('emu-res-dpi').value = dpi;
+  applyEmuResolution();
+}
+function applyEmuResolution(){
+  var w = document.getElementById('emu-res-w').value;
+  var h = document.getElementById('emu-res-h').value;
+  var dpi = document.getElementById('emu-res-dpi').value;
+  var status = document.getElementById('emu-res-status');
+  status.textContent = '设置中...';
+  status.style.color = '#ff9800';
+  fetch('/api/emulator/resolution',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({width:parseInt(w),height:parseInt(h),dpi:parseInt(dpi)})}).then(r=>r.json()).then(d=>{
+    if(d.status==='ok'){
+      status.textContent = '已设置: '+d.resolution.width+'x'+d.resolution.height+' DPI:'+d.resolution.dpi;
+      status.style.color = '#4caf50';
+    }
+  }).catch(function(e){
+    status.textContent = '设置失败';
+    status.style.color = '#e53935';
+  });
+}
+function loadEmuResolution(){
+  fetch('/api/emulator/resolution').then(r=>r.json()).then(d=>{
+    if(d.resolution){
+      document.getElementById('emu-res-w').value = d.resolution.width;
+      document.getElementById('emu-res-h').value = d.resolution.height;
+      document.getElementById('emu-res-dpi').value = d.resolution.dpi;
+    }
+  });
+}
 function checkEmulatorStatus(){
   fetch('/api/emulator/status').then(r=>r.json()).then(d=>{
     setDiagStatus('emu-installed',d.installed?'SDK已安装':'SDK未安装',d.installed);
@@ -9131,7 +9225,19 @@ def _set_java_env():
 
 
 # ── 模拟器类型切换 ──
-_emulator_type = "generic"  # generic | mumu | other
+_emulator_type = "generic"  # generic | mumu | bluestacks | ldplayer | xiaoyao | nox | other
+
+# 🔥 模拟器类型与端口映射
+EMULATOR_TYPE_MAP = {
+    "generic":     {"port": 5556, "name": "本地模拟器",          "adb_format": "emulator"},
+    "mumu":        {"port": 7555, "name": "MUMU模拟器",          "adb_format": "tcp"},
+    "bluestacks":  {"port": 5555, "name": "蓝叠模拟器",          "adb_format": "tcp"},
+    "ldplayer":    {"port": 5555, "name": "雷电模拟器",          "adb_format": "tcp"},
+    "xiaoyao":     {"port": 21503, "name": "逍遥模拟器",         "adb_format": "tcp"},
+    "nox":         {"port": 62001, "name": "Nox模拟器",          "adb_format": "tcp"},
+    "memu":        {"port": 21503, "name": "Memu模拟器",         "adb_format": "tcp"},
+    "other":       {"port": 5555, "name": "其他模拟器(自定义)",  "adb_format": "tcp"},
+}
 
 @app.route("/api/emulator/type", methods=["GET", "POST"])
 def api_emulator_type():
@@ -9140,13 +9246,14 @@ def api_emulator_type():
     if request.method == "POST":
         data = request.get_json() or {}
         new_type = data.get("type", "generic").strip()
-        if new_type not in ("generic", "mumu", "other"):
-            return jsonify({"error": "无效的模拟器类型，可选: generic, mumu, other"}), 400
+        
+        valid_types = list(EMULATOR_TYPE_MAP.keys())
+        if new_type not in valid_types:
+            return jsonify({"error": f"无效的模拟器类型，可选: {valid_types}"}), 400
         
         _emulator_type = new_type
-        # 更新端口
-        port_map = {"generic": 5556, "mumu": 7555, "other": 5555}
-        _emulator_adb_port = port_map.get(new_type, 5556)
+        emu_info = EMULATOR_TYPE_MAP.get(new_type, EMULATOR_TYPE_MAP["other"])
+        _emulator_adb_port = emu_info["port"]
         
         # 更新配置文件
         try:
@@ -9165,10 +9272,110 @@ def api_emulator_type():
         except:
             pass
         
-        add_system_log("emulator", f"切换模拟器类型: {new_type}", f"端口: {_emulator_adb_port}")
-        return jsonify({"status": "ok", "type": new_type, "port": _emulator_adb_port})
+        add_system_log("emulator", f"切换模拟器类型: {emu_info['name']}", f"端口: {_emulator_adb_port}")
+        return jsonify({"status": "ok", "type": new_type, "name": emu_info["name"], "port": _emulator_adb_port})
     
-    return jsonify({"type": _emulator_type, "port": _emulator_adb_port, "available": ["generic", "mumu", "other"]})
+    return jsonify({
+        "type": _emulator_type, 
+        "name": EMULATOR_TYPE_MAP.get(_emulator_type, {})["name"],
+        "port": _emulator_adb_port, 
+        "available": list(EMULATOR_TYPE_MAP.keys()),
+        "types": EMULATOR_TYPE_MAP
+    })
+
+
+@app.route("/api/emulator/detect", methods=["GET"])
+def api_emulator_detect():
+    """自动检测当前运行中的模拟器"""
+    adb_exe = _find_adb_exe()
+    detected = []
+    
+    try:
+        subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
+        r = subprocess.run([adb_exe, "devices", "-l"], capture_output=True, text=True, timeout=5)
+        lines = r.stdout.strip().split("\n")[1:]  # 跳过 "List of devices attached"
+        
+        for line in lines:
+            if "\tdevice" not in line and "device" not in line:
+                continue
+            line = line.strip()
+            
+            # 提取设备ID和产品信息
+            parts = line.split()
+            dev_id = parts[0] if parts else ""
+            
+            # 判断模拟器类型
+            emu_type = "unknown"
+            emu_name = "未知设备"
+            
+            # 从设备ID和产品信息判断
+            if "emulator-" in dev_id:
+                emu_type = "generic"
+                emu_name = "本地模拟器"
+            elif "7555" in dev_id:
+                emu_type = "mumu"
+                emu_name = "MUMU模拟器"
+            elif "5555" in dev_id:
+                emu_type = "bluestacks"
+                emu_name = "蓝叠模拟器(可能)"
+            elif "21503" in dev_id:
+                emu_type = "xiaoyao"
+                emu_name = "逍遥/Memu模拟器"
+            elif "62001" in dev_id:
+                emu_type = "nox"
+                emu_name = "Nox模拟器"
+            
+            # 从产品信息进一步判断
+            line_lower = line.lower()
+            if "mumu" in line_lower:
+                emu_type = "mumu"
+                emu_name = "MUMU模拟器"
+            elif "bluestacks" in line_lower:
+                emu_type = "bluestacks"
+                emu_name = "蓝叠模拟器"
+            elif "ldplayer" in line_lower:
+                emu_type = "ldplayer"
+                emu_name = "雷电模拟器"
+            elif "nox" in line_lower:
+                emu_type = "nox"
+                emu_name = "Nox模拟器"
+            elif "memu" in line_lower:
+                emu_type = "memu"
+                emu_name = "Memu模拟器"
+            
+            detected.append({
+                "device_id": dev_id,
+                "type": emu_type,
+                "name": emu_name,
+                "raw": line,
+                "current": emu_type == _emulator_type,
+            })
+        
+        if not detected:
+            # 尝试扫描常见端口
+            common_ports = [5555, 5556, 7555, 21503, 62001, 62025]
+            for port in common_ports:
+                r2 = subprocess.run([adb_exe, "connect", f"127.0.0.1:{port}"], 
+                                   capture_output=True, text=True, timeout=3)
+                if "connected" in (r2.stdout + r2.stderr).lower():
+                    detected.append({
+                        "device_id": f"127.0.0.1:{port}",
+                        "type": "discovered",
+                        "name": f"发现设备(端口{port})",
+                        "raw": r2.stdout.strip(),
+                        "current": False,
+                    })
+        
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)[:200], "detected": []}), 500
+    
+    return jsonify({
+        "status": "ok",
+        "detected": detected,
+        "count": len(detected),
+        "current_type": _emulator_type,
+        "current_port": _emulator_adb_port,
+    })
 
 
 @app.route("/api/emulator/status")
@@ -9621,9 +9828,10 @@ def api_emulator_start():
     data = request.get_json() or {}
     emu_type = data.get("type", _emulator_type)
 
-    # 🔥 MUMU / 其他模拟器：只需连接ADB，不需要启动模拟器进程
-    if emu_type in ("mumu", "other"):
+    # 🔥 非generic模拟器：只需连接ADB，不需要启动模拟器进程
+    if emu_type != "generic":
         adb_exe = _get_adb_for_emulator()
+        emu_name = EMULATOR_TYPE_MAP.get(emu_type, {}).get("name", emu_type)
         try:
             subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
             # 先断开旧连接
@@ -9633,10 +9841,20 @@ def api_emulator_start():
             conn_output = r.stdout.strip() + r.stderr.strip()
             if "connected" in conn_output.lower() or "already" in conn_output.lower():
                 _sync_adb_to_emulator_port()
-                add_system_log("emulator", f"{emu_type}模拟器已连接", f"端口: {_emulator_adb_port}")
-                return jsonify({"status": "connected", "port": _emulator_adb_port, "message": f"{emu_type}模拟器已连接"})
+                add_system_log("emulator", f"{emu_name}已连接", f"端口: {_emulator_adb_port}")
+                return jsonify({"status": "connected", "port": _emulator_adb_port, "message": f"{emu_name}已连接", "type": emu_type})
             else:
-                return jsonify({"status": "error", "error": f"无法连接到{emu_type}模拟器 (端口{_emulator_adb_port}): {conn_output[:200]}"})
+                # 尝试扫描其他端口
+                for port in [5555, 7555, 21503, 62001, 62025]:
+                    if port == _emulator_adb_port:
+                        continue
+                    r2 = subprocess.run([adb_exe, "connect", f"127.0.0.1:{port}"], capture_output=True, text=True, timeout=3)
+                    if "connected" in (r2.stdout + r2.stderr).lower():
+                        _emulator_adb_port = port
+                        _sync_adb_to_emulator_port()
+                        add_system_log("emulator", f"{emu_name}已连接(备用端口)", f"端口: {port}")
+                        return jsonify({"status": "connected", "port": port, "message": f"{emu_name}已连接(端口{port})", "type": emu_type})
+                return jsonify({"status": "error", "error": f"无法连接到{emu_name} (端口{_emulator_adb_port}): {conn_output[:200]}"})
         except Exception as e:
             return jsonify({"status": "error", "error": str(e)[:200]})
 
@@ -9873,8 +10091,44 @@ def api_emulator_screenshot():
         return jsonify({"error": str(e)[:200]}), 500
 
 
-# ── 模拟器屏幕开关状态 ──
-_emulator_screen_on = True  # True=屏幕开启, False=屏幕关闭
+# ── 模拟器分辨率配置（修复游戏显示不全问题） ──
+_emulator_resolution = {"width": 1920, "height": 1080, "dpi": 420}
+
+@app.route("/api/emulator/resolution", methods=["GET", "POST"])
+def api_emulator_resolution():
+    """获取或设置模拟器分辨率（修复游戏界面显示不全）"""
+    global _emulator_resolution
+    if request.method == "POST":
+        data = request.get_json() or {}
+        width = data.get("width", _emulator_resolution["width"])
+        height = data.get("height", _emulator_resolution["height"])
+        dpi = data.get("dpi", _emulator_resolution["dpi"])
+        
+        _emulator_resolution = {"width": int(width), "height": int(height), "dpi": int(dpi)}
+        
+        # 尝试通过ADB设置分辨率
+        try:
+            adb_exe = _get_adb_for_emulator()
+            dev_id = f"emulator-{_emulator_adb_port}" if _emulator_type == "generic" else f"127.0.0.1:{_emulator_adb_port}"
+            # 设置物理分辨率
+            subprocess.run([adb_exe, "-s", dev_id, "shell", "wm", "size", f"{width}x{height}"],
+                         capture_output=True, text=True, timeout=5)
+            # 设置DPI
+            subprocess.run([adb_exe, "-s", dev_id, "shell", "wm", "density", str(dpi)],
+                         capture_output=True, text=True, timeout=5)
+            add_system_log("emulator", f"分辨率已设置", f"{width}x{height}, DPI:{dpi}")
+        except Exception as e:
+            logger.warning(f"ADB设置分辨率失败: {e}")
+        
+        return jsonify({"status": "ok", "resolution": _emulator_resolution})
+    
+    return jsonify({"resolution": _emulator_resolution, "presets": [
+        {"name": "1080p (推荐)", "width": 1920, "height": 1080, "dpi": 420},
+        {"name": "720p", "width": 1280, "height": 720, "dpi": 320},
+        {"name": "1440p", "width": 2560, "height": 1440, "dpi": 560},
+        {"name": "平板模式", "width": 1920, "height": 1200, "dpi": 320},
+        {"name": "手机模式", "width": 1080, "height": 1920, "dpi": 480},
+    ]})
 
 @app.route("/api/emulator/screen", methods=["GET", "POST"])
 def api_emulator_screen():
@@ -9937,80 +10191,173 @@ def api_emulator_screen():
 
 @app.route("/api/emulator/stream")
 def api_emulator_stream():
-    """MJPEG流式推送模拟器画面 - 目标60fps"""
-    import struct, io
-    adb_exe = _get_adb_for_emulator()
-    dev_id = f"emulator-{_emulator_adb_port}"
+    """MJPEG流式推送模拟器画面 - 目标60fps，多模拟器支持"""
+    import struct, io, threading as _thr, queue as _queue, base64 as _b64
+    from collections import deque
     
-    def generate_frames():
-        frame_interval = 1.0 / 60.0  # 目标60fps
-        last_frame_time = 0
-        while True:
+    adb_exe = _get_adb_for_emulator()
+    port = _emulator_adb_port
+    
+    # 🔥 多模拟器设备ID格式兼容
+    dev_ids = []
+    if _emulator_type == "generic":
+        dev_ids = [f"emulator-{port}"]
+    else:
+        dev_ids = [f"127.0.0.1:{port}", f"localhost:{port}"]
+    
+    # 🔥 流式参数
+    STREAM_WIDTH = 960   # 流式传输分辨率（降低以提升帧率）
+    STREAM_QUALITY = 55  # JPEG质量（降低以提升帧率）
+    TARGET_FPS = 60
+    FRAME_BUDGET = 1.0 / TARGET_FPS
+    
+    # 🔥 帧缓冲（非阻塞，跳过旧帧）
+    frame_buffer = _queue.Queue(maxsize=2)  # 只保留最新2帧
+    capture_running = [True]
+    stats = {"frames_captured": 0, "frames_sent": 0, "capture_ms": 0, "convert_ms": 0}
+    
+    def _get_dev_id():
+        """获取可用的设备ID"""
+        for did in dev_ids:
+            r = subprocess.run([adb_exe, "-s", did, "shell", "echo", "ok"],
+                             capture_output=True, text=True, timeout=2)
+            if r.returncode == 0 and "ok" in r.stdout:
+                return did
+        return dev_ids[0]
+    
+    def capture_thread():
+        """独立捕获线程，不阻塞主循环"""
+        import base64 as _b64
+        dev_id = _get_dev_id()
+        last_dev_check = 0
+        
+        while capture_running[0]:
             try:
-                # 控制帧率
+                # 每30秒重新检测设备ID
                 now = time.perf_counter()
-                elapsed = now - last_frame_time
-                if elapsed < frame_interval:
-                    time.sleep(frame_interval - elapsed)
+                if now - last_dev_check > 30:
+                    dev_id = _get_dev_id()
+                    last_dev_check = now
                 
                 t0 = time.perf_counter()
-                if not _emulator_screen_on:
-                    # 屏幕关闭时发送黑屏提示帧
-                    from PIL import Image, ImageDraw, ImageFont
-                    img = Image.new("RGB", (1920, 1080), (0, 0, 0))
-                    draw = ImageDraw.Draw(img)
-                    try:
-                        font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 48)
-                    except:
-                        font = ImageFont.load_default()
-                    text = "请打开模拟器屏幕"
-                    bbox = draw.textbbox((0, 0), text, font=font)
-                    text_w = bbox[2] - bbox[0]
-                    text_h = bbox[3] - bbox[1]
-                    draw.text(((1920 - text_w) // 2, (1080 - text_h) // 2), text, fill=(100, 100, 100), font=font)
-                    buf = io.BytesIO()
-                    img.save(buf, format="JPEG", quality=80)
-                    frame_data = buf.getvalue()
-                    last_frame_time = time.perf_counter()
-                    yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(frame_data)).encode() + b"\r\n\r\n" + frame_data + b"\r\n")
-                    time.sleep(0.5)  # 黑屏时降低刷新率
-                    continue
                 
-                # 高速截图
+                # 🔥 使用raw screencap（比PNG快3-5倍）
                 r = subprocess.run(
                     [adb_exe, "-s", dev_id, "exec-out", "screencap"],
                     capture_output=True, timeout=2
                 )
-                if r.returncode != 0 or len(r.stdout) < 20:
-                    dev_id2 = f"localhost:{_emulator_adb_port}"
-                    r = subprocess.run(
-                        [adb_exe, "-s", dev_id2, "exec-out", "screencap"],
-                        capture_output=True, timeout=2
-                    )
-                    if r.returncode != 0 or len(r.stdout) < 20:
-                        time.sleep(0.1)
-                        continue
                 
+                if r.returncode != 0 or len(r.stdout) < 20:
+                    time.sleep(0.05)
+                    continue
+                
+                capture_ms = (time.perf_counter() - t0) * 1000
                 raw_data = r.stdout
                 width = struct.unpack_from("<I", raw_data, 0)[0]
                 height = struct.unpack_from("<I", raw_data, 4)[0]
                 pixels = raw_data[12:]
                 
+                # 🔥 快速转换（使用PIL缩放+JPEG压缩）
+                t1 = time.perf_counter()
                 try:
                     from PIL import Image
                     img = Image.frombytes("RGBA", (width, height), pixels, "raw")
                     img_rgb = img.convert("RGB")
+                    # 缩放降低分辨率
+                    if width > STREAM_WIDTH:
+                        ratio = STREAM_WIDTH / width
+                        new_h = int(height * ratio)
+                        img_rgb = img_rgb.resize((STREAM_WIDTH, new_h), Image.LANCZOS)
                     buf = io.BytesIO()
-                    img_rgb.save(buf, format="JPEG", quality=70, optimize=True)
+                    img_rgb.save(buf, format="JPEG", quality=STREAM_QUALITY, optimize=True)
                     frame_data = buf.getvalue()
                 except ImportError:
+                    # 无PIL时发送原始数据
                     frame_data = pixels
                 
-                last_frame_time = time.perf_counter()
-                yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(frame_data)).encode() + b"\r\n\r\n" + frame_data + b"\r\n")
+                convert_ms = (time.perf_counter() - t1) * 1000
+                
+                # 放入缓冲区（非阻塞：如果缓冲区满了，丢弃旧的）
+                try:
+                    frame_buffer.put_nowait(frame_data)
+                except _queue.Full:
+                    try:
+                        frame_buffer.get_nowait()  # 丢弃最旧的帧
+                        frame_buffer.put_nowait(frame_data)
+                    except:
+                        pass
+                
+                stats["frames_captured"] += 1
+                stats["capture_ms"] = capture_ms
+                stats["convert_ms"] = convert_ms
+                
+                # 控制捕获速率
+                elapsed = time.perf_counter() - t0
+                if elapsed < FRAME_BUDGET * 0.8:
+                    time.sleep(max(0.001, FRAME_BUDGET * 0.8 - elapsed))
+                    
             except Exception as e:
-                time.sleep(0.1)
+                time.sleep(0.05)
                 continue
+    
+    # 启动捕获线程
+    cap_thread = _thr.Thread(target=capture_thread, daemon=True)
+    cap_thread.start()
+    
+    def generate_frames():
+        last_frame_time = time.perf_counter()
+        frame_count = 0
+        
+        while capture_running[0]:
+            try:
+                if not _emulator_screen_on:
+                    # 屏幕关闭时发送黑屏提示帧
+                    time.sleep(0.5)
+                    try:
+                        from PIL import Image, ImageDraw, ImageFont
+                        img = Image.new("RGB", (STREAM_WIDTH, 540), (10, 15, 20))
+                        draw = ImageDraw.Draw(img)
+                        try:
+                            font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 32)
+                        except:
+                            font = ImageFont.load_default()
+                        draw.text((STREAM_WIDTH//2 - 160, 240), "请打开模拟器屏幕", fill=(80, 80, 80), font=font)
+                        buf = io.BytesIO()
+                        img.save(buf, format="JPEG", quality=80)
+                        frame = buf.getvalue()
+                    except:
+                        frame = b""
+                    if frame:
+                        yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
+                    continue
+                
+                # 🔥 非阻塞获取帧
+                try:
+                    frame_data = frame_buffer.get(timeout=0.5)
+                except _queue.Empty:
+                    time.sleep(0.01)
+                    continue
+                
+                # 生成MJPEG帧
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(frame_data)).encode() + b"\r\n\r\n" + frame_data + b"\r\n")
+                
+                frame_count += 1
+                stats["frames_sent"] = frame_count
+                
+                # 帧率控制
+                now = time.perf_counter()
+                elapsed = now - last_frame_time
+                if elapsed < FRAME_BUDGET:
+                    time.sleep(max(0.001, FRAME_BUDGET - elapsed))
+                last_frame_time = time.perf_counter()
+                
+            except Exception as e:
+                time.sleep(0.05)
+                continue
+    
+    # 客户端断开时停止捕获线程
+    def cleanup():
+        capture_running[0] = False
     
     return Response(
         stream_with_context(generate_frames()),
@@ -10021,7 +10368,9 @@ def api_emulator_stream():
             "Expires": "0",
             "Connection": "close",
             "Access-Control-Allow-Origin": "*",
-        }
+            "X-Accel-Buffering": "no",
+        },
+        direct_passthrough=True,
     )
 
 
