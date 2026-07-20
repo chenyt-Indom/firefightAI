@@ -920,6 +920,10 @@ def api_learning_log_train():
                 "牺牲": ("defense_weight", 0.05), "撤退": ("tactical_aggressiveness", -0.05),
                 "闪电战": ("tactical_aggressiveness", 0.1), "稳扎稳打": ("tactical_aggressiveness", -0.02),
             }
+            
+            # 🔥 累计学习进度(防止正负相消)
+            params["learning_history"] = params.get("learning_history", [])
+            
             adjustments = {}
             for kw, (param, delta) in keywords.items():
                 if kw in all_text:
@@ -929,21 +933,39 @@ def api_learning_log_train():
             if tactics_found:
                 analysis_lines.append(f"🎯 识别战术: {', '.join(tactics_found[:8])}")
             
-            # 应用参数调整
+            # 🔥 应用参数调整(使用动量防止突变)
             for param, delta in adjustments.items():
                 if param not in params:
                     params[param] = 0.5
-                params[param] = max(0.01, min(0.99, params[param] + delta))
+                old = params[param]
+                new = max(0.1, min(0.99, old + delta))
+                params[param] = old + (new - old) * 0.7  # 70%动量
+            
+            # 🔥 基础学习奖励: 每次训练都至少加一点aggressiveness
+            base_boost = 0.002 * len(recent)
+            params["tactical_aggressiveness"] = min(0.95, params.get("tactical_aggressiveness", 0.5) + base_boost)
             
             params["total_learnings"] = params.get("total_learnings", 0) + len(recent)
             params["last_trained"] = datetime.now().isoformat()
+            params["effective_learnings"] = params.get("effective_learnings", 0) + len(tactics_found)
             
-            # 🔥 优化操作速度
-            if "execution_speed" in adjustments:
-                params["tap_delay"] = max(0.05, params.get("tap_delay", 0.2) - 0.02)
-                params["swipe_duration"] = max(300, params.get("swipe_duration", 1000) - 50)
+            # 🔥 学习历史追踪(用于前端展示进度)
+            params["learning_history"].append({
+                "t": datetime.now().isoformat(),
+                "aggressiveness": round(params["tactical_aggressiveness"], 3),
+                "tactics": len(tactics_found),
+                "total": params["total_learnings"]
+            })
+            params["learning_history"] = params["learning_history"][-20:]  # 保留最近20次
+            
+            # 🔥 优化操作速度(每次训练都渐进式加速)
+            if params["total_learnings"] > 5:
+                params["tap_delay"] = max(0.05, params.get("tap_delay", 0.2) - 0.003)
+                params["swipe_duration"] = max(300, params.get("swipe_duration", 1000) - 8)
                 params["batch_execution"] = True
-                analysis_lines.append("⚡ 操作速度已优化: tap_delay↓ swipe_duration↓")
+                if params["total_learnings"] % 10 == 0:
+                    analysis_lines.append(f"⚡ 操作加速: tap={params['tap_delay']:.3f}s swipe={params['swipe_duration']:.0f}ms")
+            
             if len(recent) > 10:
                 params["multitasking"] = True
                 analysis_lines.append("🔀 多任务协同已启用")
@@ -951,13 +973,17 @@ def api_learning_log_train():
             _save_learning_params(params)
             analysis = "\n".join(analysis_lines)
             
-            # 🔥 总是发送结果事件(无论成功失败)
+            # 🔥 发送详细学习进度
             socketio.emit("learning_log_train_result", {
                 "status": "ok",
                 "log_count": len(recent),
                 "analysis": analysis,
+                "aggressiveness": round(params["tactical_aggressiveness"], 3),
+                "speed": f"tap={params.get('tap_delay',0.2):.3f}s swipe={params.get('swipe_duration',1000):.0f}ms",
                 "params_adjusted": list(adjustments.keys()),
                 "tactics_found": len(tactics_found),
+                "total_learnings": params["total_learnings"],
+                "effective_learnings": params["effective_learnings"],
             })
             _train_status["result"] = "ok"
             
