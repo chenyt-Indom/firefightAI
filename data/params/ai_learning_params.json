@@ -5,74 +5,9 @@
   "learning_rate": 0.008,
   "tactical_aggressiveness": 0.5,
   "unit_preference": "balanced",
-  "last_learned": "2026-07-21T05:28:46.984227",
-  "total_learnings": 168,
+  "last_learned": "2026-07-21T05:29:59.662546",
+  "total_learnings": 169,
   "insights": [
-    {
-      "type": "tactical_rule",
-      "summary": "当洞察数量低于10条或高于16条时，表明知识提取能力异常，需检查数据源或模型",
-      "detail": "条件: 洞察数量连续2个周期低于10条或高于16条 | 行动: 触发异常检测流程，检查输入数据质量和模型状态"
-    },
-    {
-      "type": "param_adjust",
-      "summary": "调整参数 learning_rate: 0.008 → 0.008",
-      "detail": "原因: 当前置信度已稳定在92%，降低学习率可减少参数震荡，避免过调"
-    },
-    {
-      "type": "param_adjust",
-      "summary": "调整参数 insight_extraction_threshold: 0.75 → 0.55",
-      "detail": "原因: 洞察数量稳定在14-16条，提高阈值可过滤低质量洞察，提升知识纯度"
-    },
-    {
-      "type": "param_adjust",
-      "summary": "调整参数 auto_tuning_interval: 20 → 15",
-      "detail": "原因: 系统已进入稳定期，延长自主调参间隔可减少不必要的计算开销"
-    },
-    {
-      "type": "priority",
-      "summary": "探索在置信度稳定后如何进一步提升洞察质量（如引入语义多样性指标）",
-      "detail": "下一步优先学习方向"
-    },
-    {
-      "type": "priority",
-      "summary": "研究不同数据源对洞察数量波动的影响，优化数据输入策略",
-      "detail": "下一步优先学习方向"
-    },
-    {
-      "type": "priority",
-      "summary": "开发异常检测机制，在洞察数量或置信度偏离稳定范围时自动告警",
-      "detail": "下一步优先学习方向"
-    },
-    {
-      "type": "knowledge",
-      "summary": "系统在连续学习周期中，每个周期稳定学习13-16条新知识，知识提取能力趋于稳定",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "knowledge",
-      "summary": "DeepSeek深度分析置信度从35%逐步提升至92%，分析质量显著改善并趋于稳定",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "knowledge",
-      "summary": "每个学习周期提取的洞察数量从10条逐步增长并稳定在14-16条之间",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "knowledge",
-      "summary": "系统已完成至少一次自主调参并达到参数最优状态，学习参数自动推送到GitHub",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "knowledge",
-      "summary": "学习参数已自动推送到GitHub，表明参数同步机制运行正常",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "tactical_rule",
-      "summary": "当置信度稳定在92%且洞察数量稳定在14-16条时，应维持当前学习节奏，避免过度调参",
-      "detail": "条件: 置信度连续5个周期≥90%且洞察数量在14-16范围内 | 行动: 保持当前学习参数不变，仅监控异常波动"
-    },
     {
       "type": "tactical_rule",
       "summary": "当洞察数量低于13条时，应触发知识源多样性检查，防止知识枯竭",
@@ -257,6 +192,71 @@
       "type": "priority",
       "summary": "开发置信度边际增益分析，当置信度接近100%时自动切换学习策略",
       "detail": "下一步优先学习方向"
+    },
+    {
+      "type": "knowledge",
+      "summary": "系统在连续学习周期中，每个周期稳定学习13-16条新知识，知识提取能力趋于稳定",
+      "detail": "从学习日志中提取的战术知识"
+    },
+    {
+      "type": "knowledge",
+      "summary": "DeepSeek深度分析置信度从35%逐步提升至92%，分析质量显著改善并趋于稳定",
+      "detail": "从学习日志中提取的战术知识"
+    },
+    {
+      "type": "knowledge",
+      "summary": "每个学习周期提取的洞察数量从10条逐步增长并稳定在14-16条之间",
+      "detail": "从学习日志中提取的战术知识"
+    },
+    {
+      "type": "knowledge",
+      "summary": "系统已完成至少一次自主调参并达到参数最优状态，学习参数自动推送到GitHub",
+      "detail": "从学习日志中提取的战术知识"
+    },
+    {
+      "type": "tactical_rule",
+      "summary": "当置信度达到92%且持续稳定时，应减少主动调参频率，转为监控异常波动",
+      "detail": "条件: 置信度连续10个周期维持在92%且洞察数量在14-16之间 | 行动: 将调参策略从主动搜索切换为被动监控，仅当置信度下降超过2%或洞察数量超出范围时触发调参"
+    },
+    {
+      "type": "tactical_rule",
+      "summary": "当洞察数量稳定在14-16条时，应优先优化知识整合而非继续增加提取数量",
+      "detail": "条件: 洞察数量连续5个周期在14-16条范围内 | 行动: 启动知识关联与冗余消除模块，减少重复或低价值知识条目，提升知识密度"
+    },
+    {
+      "type": "tactical_rule",
+      "summary": "当系统完成自主调参并推送参数到GitHub后，应验证参数在下一周期的实际效果",
+      "detail": "条件: 学习参数自动推送到GitHub后的下一个学习周期 | 行动: 对比推送前后两个周期的置信度、洞察数量和学习效率，确认参数优化有效"
+    },
+    {
+      "type": "param_adjust",
+      "summary": "调整参数 learning_rate: 0.008 → 0.008",
+      "detail": "原因: 置信度已稳定在92%，降低学习率可减少参数震荡，避免过度调整导致性能波动"
+    },
+    {
+      "type": "param_adjust",
+      "summary": "调整参数 insight_extraction_threshold: 0.75 → 0.75",
+      "detail": "原因: 洞察数量稳定在14-16条，提高提取阈值可过滤低质量洞察，提升知识精炼度"
+    },
+    {
+      "type": "param_adjust",
+      "summary": "调整参数 auto_tune_interval: 15 → 20",
+      "detail": "原因: 系统已达到最优参数状态，延长自动调参间隔可减少不必要的计算开销，专注于知识整合"
+    },
+    {
+      "type": "priority",
+      "summary": "知识冗余消除与关联整合策略",
+      "detail": "下一步优先学习方向"
+    },
+    {
+      "type": "priority",
+      "summary": "异常波动检测与自适应恢复机制",
+      "detail": "下一步优先学习方向"
+    },
+    {
+      "type": "priority",
+      "summary": "跨周期知识迁移与长期记忆优化",
+      "detail": "下一步优先学习方向"
     }
   ],
   "last_adjustment_reason": "评估通过，无需调整",
@@ -311,7 +311,7 @@
   "自学习引擎启动间隔": "每3个周期启动一次",
   "GitHub推送频率": "每10个周期或每次调参后",
   "insight_extraction_limit": 20,
-  "auto_tune_interval": 15,
+  "auto_tune_interval": 20,
   "学习率": 0.008,
   "知识提取阈值": 0.78,
   "调参频率": 3,
