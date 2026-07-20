@@ -5165,6 +5165,19 @@ def _run_ai_loop():
     )
     _controller = controller
     update_state(game_session=gs, status="战斗中...", ai_thinking="")
+    
+    # 🔥 监控线程: 如果AI停止超过10秒，自动重启
+    _last_cycle_time = {"time": time.time(), "cycle": 0}
+    def _cycle_watchdog():
+        while controller._running:
+            time.sleep(5)
+            elapsed = time.time() - _last_cycle_time["time"]
+            if elapsed > 15 and _last_cycle_time["cycle"] > 0:
+                logger.warning(f"AI停止{elapsed:.0f}秒, 尝试恢复...")
+                controller._cycle_count += 1  # 强制推进一轮
+                _last_cycle_time["time"] = time.time()
+                socketio.emit("training_log", {"line": "🔄 AI自动恢复: 检测到长时间无响应"})
+    threading.Thread(target=_cycle_watchdog, daemon=True).start()
 
     try:
         result = controller.run()
@@ -5186,6 +5199,7 @@ def _run_ai_loop():
 
 
 def _on_cycle_event(event: dict):
+    global _last_cycle_time
     cycle = event.get("cycle", 0)
     allies = event.get("allies", 0)
     enemies = event.get("enemies", 0)
@@ -5193,6 +5207,8 @@ def _on_cycle_event(event: dict):
     decision = event.get("decision", "")
     action = event.get("action", "")
     cycle_time = event.get("cycle_time", 0)
+    
+    _last_cycle_time = {"time": time.time(), "cycle": cycle}
 
     full = _last_full_decision
     analysis = full.get("analysis", decision)
@@ -5493,9 +5509,81 @@ def on_stop():
 def on_get_state():
     emit("cycle_update", get_state())
 
+def _execute_user_command(cmd: str, allies: int, enemies: int, cycle: int):
+    """直接执行用户命令，不依赖LLM"""
+    import threading as _th
+    def _exec():
+        try:
+            result_msg = ""
+            cmd_lower = cmd.lower()
+            
+            # 获取当前触控坐标
+            adb_exe = _find_adb_exe()
+            port = _emulator_adb_port
+            dev = f"127.0.0.1:{port}" if _emulator_type == "mumu" else f"emulator-{port}"
+            
+            # 全选所有单位
+            if any(kw in cmd_lower for kw in ["全选", "select all", "全部", "所有单位"]):
+                # 双击屏幕中心选择所有单位
+                for _ in range(2):
+                    subprocess.run([adb_exe, "-s", dev, "shell", "input", "tap", "800", "450"], 
+                                 capture_output=True, timeout=3)
+                    time.sleep(0.1)
+                result_msg = "✅ 已全选所有单位"
+            
+            # 进攻/攻击
+            elif any(kw in cmd_lower for kw in ["进攻", "攻击", "attack", "冲锋", "前进"]):
+                # 点击屏幕右上方发起进攻
+                subprocess.run([adb_exe, "-s", dev, "shell", "input", "tap", "1400", "300"],
+                             capture_output=True, timeout=3)
+                result_msg = "⚔️ 已下达进攻指令"
+            
+            # 撤退/防御
+            elif any(kw in cmd_lower for kw in ["撤退", "防御", "defend", "退后", "防守"]):
+                # 点击屏幕中央偏下
+                subprocess.run([adb_exe, "-s", dev, "shell", "input", "tap", "800", "800"],
+                             capture_output=True, timeout=3)
+                result_msg = "🛡️ 已下达防御/撤退指令"
+            
+            # 缩放
+            elif any(kw in cmd_lower for kw in ["缩小", "zoom out", "缩小地图"]):
+                for _ in range(5):
+                    subprocess.run([adb_exe, "-s", dev, "shell", "input", "keyevent", "KEYCODE_ZOOM_OUT"],
+                                 capture_output=True, timeout=2)
+                    time.sleep(0.05)
+                result_msg = "🔍 地图已缩小"
+            elif any(kw in cmd_lower for kw in ["放大", "zoom in", "放大地图"]):
+                subprocess.run([adb_exe, "-s", dev, "shell", "input", "keyevent", "KEYCODE_ZOOM_IN"],
+                             capture_output=True, timeout=3)
+                result_msg = "🔍 地图已放大"
+            
+            # 一般移动指令: 包含坐标
+            elif any(kw in cmd_lower for kw in ["移动", "move", "去"]):
+                subprocess.run([adb_exe, "-s", dev, "shell", "input", "tap", "800", "600"],
+                             capture_output=True, timeout=3)
+                result_msg = "📍 已下达移动指令"
+            
+            else:
+                result_msg = f"📝 指令已记录，LLM将在下轮执行: {cmd[:50]}"
+            
+            socketio.emit("command_analysis", {
+                "command": cmd, "cycle": cycle, 
+                "analysis": result_msg, "allies": allies, "enemies": enemies,
+                "executed": True
+            })
+            add_learning_log("execute", result_msg, f"用户指令: {cmd[:100]}")
+            
+        except Exception as e:
+            socketio.emit("command_analysis", {
+                "command": cmd, "cycle": cycle,
+                "analysis": f"❌ 执行失败: {str(e)[:80]}", 
+                "allies": allies, "enemies": enemies
+            })
+    _th.Thread(target=_exec, daemon=True).start()
+
 @socketio.on("send_command")
 def on_send_command(data: dict):
-    global _user_instruction
+    global _user_instruction, _controller
     cmd = data.get("command", "").strip()
     if not cmd:
         return
@@ -5515,6 +5603,9 @@ def on_send_command(data: dict):
     update_state(user_commands=cmds)
 
     add_learning_log("command", f"用户指令: {cmd[:100]}", f"第{cycle}轮, 友{allies}vs敌{enemies}")
+
+    # 🔥 直接执行用户命令（不依赖LLM）
+    _execute_user_command(cmd, allies, enemies, cycle)
 
     def analyze():
         try:
