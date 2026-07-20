@@ -477,6 +477,75 @@ def api_knowledge_select():
     _save_knowledge_base()
     return jsonify({"status": "ok"})
 
+@app.route("/api/config/save", methods=["POST"])
+def api_config_save():
+    """保存前端输入的配置到服务器"""
+    try:
+        data = request.get_json(force=True) or {}
+        
+        # 写入DeepSeek API Key到环境
+        if data.get("apikey"):
+            os.environ["DEEPSEEK_API_KEY"] = data["apikey"]
+            # 也写入 /etc/environment 持久化
+            try:
+                with open("/etc/environment", "r") as f:
+                    lines = f.readlines()
+                new_lines = [l for l in lines if "DEEPSEEK_API_KEY" not in l]
+                new_lines.append(f'DEEPSEEK_API_KEY={data["apikey"]}\n')
+                with open("/etc/environment", "w") as f:
+                    f.writelines(new_lines)
+            except:
+                pass
+        
+        # 写入配置到 settings.yaml
+        cfg = {
+            "deepseek": {"api_key": data.get("apikey", ""), "model": "deepseek-chat", "temperature": 0.7},
+            "llm": {"api_key": data.get("apikey", ""), "provider": "deepseek", "model": "deepseek-chat", "api_base": "https://api.deepseek.com/v1", "temperature": 0.7, "max_tokens": 4096, "timeout": 30, "retry_count": 3},
+            "server": {"host": "0.0.0.0", "port": 5000, "cors_origins": ["*"]},
+            "github": {"repo": "chenyt-Indom/firefightAI", "token": data.get("github_token", ""), "branch": "master"},
+        }
+        
+        config_path = PROJECT_ROOT / "config" / "settings.yaml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+        
+        socketio.emit("training_log", {"line": "🔐 配置已更新: API Key + GitHub Token"})
+        logger.info("配置已从Web前端保存")
+        
+        return jsonify({"status": "ok", "message": "配置已保存"})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+@app.route("/api/deploy", methods=["POST"])
+def api_deploy():
+    """一键部署: SCP上传+SSH重启"""
+    try:
+        data = request.get_json(force=True) or {}
+        server_url = data.get("server", "139.199.69.88")
+        ssh_user = data.get("ssh_user", "root")
+        ssh_key = data.get("ssh_key", "")
+        
+        # 如果有SSH key，尝试部署
+        if ssh_key and os.path.exists(ssh_key):
+            import subprocess
+            local_file = str(PROJECT_ROOT / "dashboard_server.py")
+            remote = f"{ssh_user}@{server_url}:/home/ubuntu/firefightAI/dashboard_server.py"
+            
+            r = subprocess.run(["scp", "-o", "StrictHostKeyChecking=no", "-i", ssh_key,
+                              local_file, remote], capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                r2 = subprocess.run(["ssh", "-o", "StrictHostKeyChecking=no", "-i", ssh_key,
+                                    f"{ssh_user}@{server_url}",
+                                    "systemctl restart firefightai"], capture_output=True, text=True, timeout=20)
+                return jsonify({"status": "ok", "message": f"已部署到 {server_url}"})
+            else:
+                return jsonify({"status": "error", "error": r.stderr[:200]})
+        
+        return jsonify({"status": "ok", "message": "配置已保存（无SSH密钥，跳过远程部署）"})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
 
 @app.route("/api/knowledge/train", methods=["POST"])
 def api_knowledge_train():
@@ -596,8 +665,39 @@ def _save_learning_params(params):
 
 
 def load_config() -> dict:
-    with open(PROJECT_ROOT / "config" / "settings.yaml", "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    """加载配置，自动用环境变量覆盖敏感字段"""
+    config_path = PROJECT_ROOT / "config" / "settings.yaml"
+    if not config_path.exists():
+        # 生成默认配置
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg = {
+            "deepseek": {"api_key": os.getenv("DEEPSEEK_API_KEY", ""), "model": "deepseek-chat", "temperature": 0.7},
+            "llm": {"api_key": os.getenv("DEEPSEEK_API_KEY", ""), "model": "deepseek-chat", "provider": "deepseek", "api_base": "https://api.deepseek.com/v1", "temperature": 0.7, "max_tokens": 4096, "timeout": 30, "retry_count": 3},
+            "server": {"host": "0.0.0.0", "port": 5000},
+            "github": {"repo": "chenyt-Indom/firefightAI", "branch": "master", "token": os.getenv("GITHUB_TOKEN", "")},
+        }
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+        return cfg
+    
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    
+    # 🔥 自动用环境变量覆盖(环境变量优先于yaml占位符)
+    api_key = os.getenv("DEEPSEEK_API_KEY", "")
+    if api_key:
+        # 覆盖deepseek段
+        if "deepseek" not in cfg:
+            cfg["deepseek"] = {}
+        if not cfg["deepseek"].get("api_key") or cfg["deepseek"]["api_key"] == "YOUR_DEEPSEEK_API_KEY":
+            cfg["deepseek"]["api_key"] = api_key
+        # 覆盖llm段
+        if "llm" not in cfg:
+            cfg["llm"] = {}
+        if not cfg["llm"].get("api_key") or cfg["llm"]["api_key"] == "YOUR_DEEPSEEK_API_KEY":
+            cfg["llm"]["api_key"] = api_key
+    
+    return cfg
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -6234,6 +6334,24 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
         <button class="btn-deploy" onclick="uploadParamsToServer()">上传到服务器</button>
       </div>
     </div>
+    <!-- 🔐 独立运维配置 -->
+    <div class="conn-card" style="border-left:3px solid #ff9800">
+      <div class="conn-name">🔐 独立运维配置</div>
+      <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
+        <input type="password" id="cfg-apikey" placeholder="DeepSeek API Key (sk-...)" style="background:#1a1f2b;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;font-size:12px" onchange="onCfgChange()">
+        <input type="text" id="cfg-server" placeholder="服务器地址 (https://firefightai.top)" value="https://firefightai.top" style="background:#1a1f2b;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;font-size:12px" onchange="onCfgChange()">
+        <input type="password" id="cfg-github-token" placeholder="GitHub Token (ghp_...)" style="background:#1a1f2b;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;font-size:12px" onchange="onCfgChange()">
+        <input type="text" id="cfg-ssh-key" placeholder="SSH密钥路径 (D:\\firefightAI.pem)" style="background:#1a1f2b;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;font-size:12px" onchange="onCfgChange()">
+        <input type="text" id="cfg-ssh-user" placeholder="SSH用户名 (root)" value="root" style="background:#1a1f2b;border:1px solid #30363d;color:#e6edf3;padding:6px 10px;border-radius:4px;font-size:12px" onchange="onCfgChange()">
+      </div>
+      <div class="conn-actions" style="margin-top:8px;flex-wrap:wrap;gap:4px">
+        <button class="btn-start" onclick="saveConfig()" style="background:#238636">💾 保存配置</button>
+        <button class="btn-deploy" onclick="deployToServer()" style="background:#ff6600">🚀 一键部署</button>
+        <button class="btn-verify" onclick="testConnection()">🔗 测试连接</button>
+        <button class="btn-push" onclick="syncGlobal()" style="background:#4caf50">🌐 全域同步</button>
+      </div>
+      <div id="cfg-result" style="font-size:10px;margin-top:6px;max-height:150px;overflow-y:auto"></div>
+    </div>
   </div>
 </div>
 
@@ -7714,6 +7832,33 @@ function createPackageThenDownload(){
       window.open('/api/package/download','_blank');
     }
   }).catch(function(e){if(r)r.innerHTML='<div class="alert error">创建失败: '+e+'</div>'})
+}
+// ── 🔐 独立运维配置 ──
+var _cfg={};
+function onCfgChange(){_cfg.dirty=true}
+function saveConfig(){
+  _cfg={apikey:document.getElementById('cfg-apikey').value,server:document.getElementById('cfg-server').value,github_token:document.getElementById('cfg-github-token').value,ssh_key:document.getElementById('cfg-ssh-key').value,ssh_user:document.getElementById('cfg-ssh-user').value};
+  var r=document.getElementById('cfg-result');
+  r.innerHTML='<span style="color:#58a5f3">💾 正在保存...</span>';
+  fetch('/api/config/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(_cfg)}).then(res=>res.json()).then(d=>{
+    r.innerHTML=d.status==='ok'?'<span style="color:#4caf50">✅ 配置已保存并生效</span>':'<span style="color:#f44336">❌ '+d.error+'</span>';
+  }).catch(function(e){r.innerHTML='<span style="color:#f44336">失败: '+e+'</span>'})
+}
+function deployToServer(){
+  var r=document.getElementById('cfg-result');
+  var cfg={apikey:document.getElementById('cfg-apikey').value,server:document.getElementById('cfg-server').value,github_token:document.getElementById('cfg-github-token').value,ssh_key:document.getElementById('cfg-ssh-key').value,ssh_user:document.getElementById('cfg-ssh-user').value};
+  r.innerHTML='<span style="color:#ff9800">🚀 部署中...</span>';
+  fetch('/api/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(res=>res.json()).then(d=>{
+    r.innerHTML=d.status==='ok'?'<span style="color:#4caf50">✅ 部署成功! '+d.message+'</span>':'<span style="color:#f44336">❌ '+d.error+'</span>';
+  }).catch(function(e){r.innerHTML='<span style="color:#f44336">失败: '+e+'</span>'})
+}
+function testConnection(){
+  var r=document.getElementById('cfg-result');
+  r.innerHTML='<span style="color:#58a5f3">🔗 测试中...</span>';
+  var s=document.getElementById('cfg-server').value||'https://firefightai.top';
+  fetch(s+'/api/version').then(res=>res.json()).then(d=>{
+    r.innerHTML='<span style="color:#4caf50">✅ 服务器在线 v'+d.version+'</span>';
+  }).catch(function(e){r.innerHTML='<span style="color:#f44336">❌ 无法连接: '+e+'</span>'})
 }
 // ── ☁️ 全域同步 ──
 function syncGlobal(){
