@@ -5455,6 +5455,49 @@ def _apply_patches():
         return _orig_fast_decide(self, state)
     gc_mod.GameController._fast_decide = _patched_fast_decide
     
+    # 🔥 CRITICAL: patch commander._call_llm to use requests (bypass Windows DLL block)
+    _orig_call_llm = cmd_mod.TacticalCommander._call_llm
+    def _patched_call_llm(self, game_state, use_fallback=False):
+        import requests as req_lib
+        cfg = load_config()
+        llm_cfg = cfg.get("llm", {})
+        api_key = self.fallback_api_key if use_fallback else self.api_key
+        api_base = self.fallback_api_base if use_fallback else self.api_base
+        model = self.fallback_model if use_fallback else self.model
+        
+        if not api_key or api_key == "YOUR_DEEPSEEK_API_KEY" or api_key == "YOUR_GLM_API_KEY":
+            return None
+        
+        state_text = game_state.to_llm_text()
+        user_message = self._build_user_message(state_text)
+        system_content = self._system_prompt
+        if self._tactics_rules:
+            system_content += self._tactics_rules
+        
+        for attempt in range(1, self.retry_count + 2):
+            try:
+                resp = req_lib.post(
+                    f"{api_base}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={"model": model, "messages": [{"role": "system", "content": system_content[:4000]}, {"role": "user", "content": user_message[:6000]}], "max_tokens": self.max_tokens, "temperature": self.temperature},
+                    timeout=(5, self.timeout + 10)
+                )
+                if resp.status_code != 200:
+                    if attempt < self.retry_count + 1:
+                        continue
+                    return None
+                raw_text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                if not raw_text:
+                    continue
+                llm_response = self._parse_response(raw_text)
+                if llm_response:
+                    return llm_response
+            except Exception:
+                if attempt < self.retry_count + 1:
+                    continue
+        return None
+    cmd_mod.TacticalCommander._call_llm = _patched_call_llm
+    
     _orig_fe = gc_mod.GameController._fast_execute
     def _patched_fe(self, commands, state):
         self._cycle_start = time.time()
