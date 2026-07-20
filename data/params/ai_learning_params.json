@@ -5,14 +5,9 @@
   "learning_rate": 0.01,
   "tactical_aggressiveness": 0.5,
   "unit_preference": "balanced",
-  "last_learned": "2026-07-20T22:42:28.147738",
-  "total_learnings": 6,
+  "last_learned": "2026-07-20T22:44:04.751556",
+  "total_learnings": 7,
   "insights": [
-    {
-      "type": "param_adjust",
-      "summary": "调整参数 初始战斗难度: 0 → 简单",
-      "detail": "原因: 零经验AI无法应对困难难度，需要从简单场景开始积累基础经验"
-    },
     {
       "type": "param_adjust",
       "summary": "调整参数 战场预测器经验值: 0 → 10",
@@ -257,6 +252,12 @@
       "type": "priority",
       "summary": "优化战场预测器的初始化方式，使用预训练数据集或模拟器生成初始经验",
       "detail": "下一步优先学习方向"
+    },
+    {
+      "type": "success_pattern",
+      "summary": "最近 6 次成功操作",
+      "detail": "成功操作分布: {'combat': 9, 'predictor': 3, 'command': 2, 'self_learn': 19}",
+      "suggestion": "保持当前良好状态"
     }
   ],
   "初始探索率": 0.8,
