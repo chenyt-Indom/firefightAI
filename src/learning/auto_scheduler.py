@@ -319,6 +319,13 @@ class AutoScheduler:
         """通过 git 命令提交并推送 data/ 目录下的参数文件"""
         result: dict = {"success": False, "message": ""}
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        import os as _os
+        git_env = _os.environ.copy()
+        git_env["GIT_TERMINAL_PROMPT"] = "0"
+        # 不设置 GIT_ASKPASS，让 credential.helper 正常工作
+
+        def _git(cmd, timeout=30):
+            return subprocess.run(cmd, cwd=str(git_dir), capture_output=True, text=True, env=git_env, timeout=timeout)
 
         try:
             git_dir = self.project_root
@@ -327,14 +334,27 @@ class AutoScheduler:
                 logger.warning(result["message"])
                 return result
 
+            # 确保GitHub远程URL包含token认证
+            try:
+                import yaml
+                settings_path = git_dir / "config" / "settings.yaml"
+                if settings_path.exists():
+                    with open(settings_path, "r", encoding="utf-8") as f:
+                        cfg = yaml.safe_load(f)
+                    gh = cfg.get("github", {})
+                    token = gh.get("token", "").strip()
+                    repo = gh.get("repo", "").strip()
+                    if token and repo:
+                        token_url = f"https://x-access-token:{token}@github.com/{repo}.git"
+                        r = _git(["git", "remote", "get-url", "origin"], timeout=5)
+                        if token not in (r.stdout.strip() if r.returncode == 0 else ""):
+                            _git(["git", "remote", "set-url", "origin", token_url], timeout=5)
+                            logger.info("GitHub远程URL已配置token认证")
+            except Exception as e:
+                logger.warning(f"配置GitHub token失败: {e}")
+
             # 检查 data/ 目录是否有变更
-            status = subprocess.run(
-                ["git", "status", "--porcelain", "--", "data/"],
-                cwd=str(git_dir),
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            status = _git(["git", "status", "--porcelain", "--", "data/"])
             if not status.stdout.strip():
                 result["success"] = True
                 result["message"] = "没有变更需要提交"
@@ -342,20 +362,14 @@ class AutoScheduler:
                 return result
 
             # git add
-            add_result = subprocess.run(
-                [
-                    "git", "add",
-                    "data/tactics_rules.yaml",
-                    "data/battle_memory.db",
-                    "data/battle_predictions.json",
-                    "data/params/",
-                    "data/learning_log.json",
-                ],
-                cwd=str(git_dir),
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            add_result = _git([
+                "git", "add",
+                "data/tactics_rules.yaml",
+                "data/battle_memory.db",
+                "data/battle_predictions.json",
+                "data/params/",
+                "data/learning_log.json",
+            ])
             if add_result.returncode != 0:
                 result["message"] = f"git add 失败: {add_result.stderr.strip()}"
                 logger.error(result["message"])
@@ -363,13 +377,7 @@ class AutoScheduler:
 
             # git commit
             commit_msg = f"Auto-save: params update {ts}"
-            commit_result = subprocess.run(
-                ["git", "commit", "-m", commit_msg],
-                cwd=str(git_dir),
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            commit_result = _git(["git", "commit", "-m", commit_msg])
             if commit_result.returncode != 0:
                 stderr = commit_result.stderr.strip()
                 if "nothing to commit" in commit_result.stdout + stderr:
@@ -383,15 +391,9 @@ class AutoScheduler:
             logger.info(f"GitHub: 已提交 — {commit_msg}")
 
             # git push
-            push_result = subprocess.run(
-                ["git", "push"],
-                cwd=str(git_dir),
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
+            push_result = _git(["git", "push", "origin", "master"], timeout=60)
             if push_result.returncode != 0:
-                result["message"] = f"git push 失败: {push_result.stderr.strip()}"
+                result["message"] = f"git push 失败: {push_result.stderr.strip()[:200]}"
                 logger.error(result["message"])
                 return result
 
