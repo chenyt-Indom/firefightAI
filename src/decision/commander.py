@@ -127,75 +127,72 @@ class TacticalCommander:
         return result
 
     def _call_llm(self, game_state: GameState, use_fallback: bool = False) -> Optional[LLMResponse]:
-        """调用LLM API"""
-        client = self._get_client(use_fallback)
+        """调用LLM API - 使用requests直连(绕过openai库DLL问题)"""
+        import requests as _req
+        
+        api_key = self.fallback_api_key if use_fallback else self.api_key
+        api_base = self.fallback_api_base if use_fallback else self.api_base
         model = self.fallback_model if use_fallback else self.model
         provider_name = self.fallback_provider if use_fallback else self.provider
-
-        if client is None:
-            logger.error(f"LLM客户端未初始化 ({provider_name})")
+        
+        if not api_key or "YOUR_" in api_key:
+            logger.error(f"API Key未配置 ({provider_name})")
             return None
-
-        # 构建消息
+        
         state_text = game_state.to_llm_text()
         user_message = self._build_user_message(state_text)
-
-        # 拼接 system prompt: 基础 prompt + L2 战术规则
-        system_content = self._system_prompt
+        system_content = (self._system_prompt or "")[:3000]
         if self._tactics_rules:
-            system_content += self._tactics_rules
-
-        messages = [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_message},
-        ]
-
-        for attempt in range(1, self.retry_count + 1):
+            system_content += "\n" + self._tactics_rules[:500]
+        
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_message[:5000]},
+            ],
+            "max_tokens": self.max_tokens or 384,
+            "temperature": self.temperature or 0.3,
+        }
+        
+        for attempt in range(1, self.retry_count + 2):
             try:
                 start_time = time.time()
-                log_decision(
-                    f"[{provider_name}/{model}] 第{attempt}次请求, "
-                    f"友方={game_state.ally_count}, 敌方={game_state.enemy_count}"
+                log_decision(f"[{provider_name}/{model}] 第{attempt}次请求, 友={game_state.ally_count} 敌={game_state.enemy_count}")
+                
+                resp = _req.post(
+                    f"{api_base.rstrip('/')}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=payload, timeout=(8, self.timeout + 10)
                 )
-
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    timeout=self.timeout,
-                    response_format={"type": "json_object"},
-                )
-
+                
+                if resp.status_code != 200:
+                    logger.warning(f"LLM返回{resp.status_code}: {resp.text[:150]}")
+                    continue
+                
                 elapsed = (time.time() - start_time) * 1000
                 self._decision_count += 1
                 self._total_decision_time += elapsed
-
-                raw_text = response.choices[0].message.content
-                if raw_text is None:
+                
+                raw_text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                if not raw_text:
                     logger.warning(f"LLM返回空内容 (第{attempt}次)")
                     continue
-
+                
                 log_decision(f"LLM响应 ({elapsed:.0f}ms): {raw_text[:200]}...")
-
-                # 解析为LLMResponse
                 llm_response = self._parse_response(raw_text)
                 if llm_response is not None:
-                    log_decision(
-                        f"决策完成: {llm_response.analysis[:100]}... "
-                        f"({len(llm_response.commands)}条指令)"
-                    )
+                    log_decision(f"决策完成: {llm_response.analysis[:100]}... ({len(llm_response.commands)}条指令)")
                     return llm_response
-
-                # 解析失败,在下一次重试时反馈错误
-                logger.warning(f"LLM输出格式错误 (第{attempt}次),将重试")
-                messages.append({
-                    "role": "user",
-                    "content": "你的输出格式不符合JSON schema要求。请严格按照指定格式输出JSON,不要包含额外内容。"
-                })
-
+                
+                logger.warning(f"LLM输出格式错误 (第{attempt}次)")
+                messages = payload["messages"]
+                messages.append({"role": "user", "content": "请严格按照JSON schema格式输出"})
             except Exception as e:
-                logger.error(f"LLM API调用失败 (第{attempt}次): {e}")
+                logger.error(f"LLM调用异常 (第{attempt}次): {e}")
+        
+        logger.error(f"LLM重试{self.retry_count}次后仍失败")
+        return None
                 if attempt < self.retry_count:
                     time.sleep(1)
 
