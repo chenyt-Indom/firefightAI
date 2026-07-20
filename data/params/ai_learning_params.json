@@ -1,54 +1,86 @@
 {
-  "temperature": 0.25,
+  "temperature": 0.3,
   "max_tokens": 1024,
   "confidence_threshold": 0.5,
   "learning_rate": 0.01,
   "tactical_aggressiveness": 0.5,
   "unit_preference": "balanced",
-  "last_learned": "2026-07-20T07:30:36.777908",
-  "total_learnings": 4,
+  "last_learned": "2026-07-20T22:34:30.323756",
+  "total_learnings": 1,
   "insights": [
     {
-      "type": "error_pattern",
-      "summary": "发现 3 个错误，最常见: 推送失败",
-      "detail": "Top errors: [('推送失败', 3)]",
-      "suggestion": "建议检查相关模块配置或网络连接"
+      "type": "knowledge",
+      "summary": "AI在零经验状态下直接投入困难难度战斗导致失败，表明需要先进行基础训练积累经验",
+      "detail": "从学习日志中提取的战术知识"
     },
     {
-      "type": "error_pattern",
-      "summary": "发现 3 个错误，最常见: 推送失败",
-      "detail": "Top errors: [('推送失败', 3)]",
-      "suggestion": "建议检查相关模块配置或网络连接"
+      "type": "knowledge",
+      "summary": "用户手动上线AI并激活自学习引擎，但未提供初始训练数据，导致预测器无法发挥作用",
+      "detail": "从学习日志中提取的战术知识"
     },
     {
-      "type": "success_pattern",
-      "summary": "最近 5 次成功操作",
-      "detail": "成功操作分布: {'emulator': 1, 'self_learn': 2, 'combat': 1, 'github': 18}",
-      "suggestion": "保持当前良好状态"
+      "type": "knowledge",
+      "summary": "战斗结束总分0说明AI缺乏有效的战术决策能力，需要从简单场景开始学习",
+      "detail": "从学习日志中提取的战术知识"
     },
     {
-      "type": "error_pattern",
-      "summary": "发现 4 个错误，最常见: 推送失败",
-      "detail": "Top errors: [('推送失败', 4)]",
-      "suggestion": "建议检查相关模块配置或网络连接"
+      "type": "knowledge",
+      "summary": "自学习引擎激活后未收到任何战斗数据，系统处于空转状态",
+      "detail": "从学习日志中提取的战术知识"
     },
     {
-      "type": "success_pattern",
-      "summary": "最近 6 次成功操作",
-      "detail": "成功操作分布: {'emulator': 1, 'self_learn': 3, 'combat': 1, 'github': 20}",
-      "suggestion": "保持当前良好状态"
+      "type": "tactical_rule",
+      "summary": "AI应在低难度或模拟环境中积累初始经验后再挑战高难度",
+      "detail": "条件: 经验数为0且用户选择困难难度时 | 行动: 强制切换到简单模式或自动开启教学模拟，生成初始训练数据"
     },
     {
-      "type": "error_pattern",
-      "summary": "发现 4 个错误，最常见: 推送失败",
-      "detail": "Top errors: [('推送失败', 4)]",
-      "suggestion": "建议检查相关模块配置或网络连接"
+      "type": "tactical_rule",
+      "summary": "若自学习引擎激活但无经验数据，应自动生成虚拟对抗样本进行预训练",
+      "detail": "条件: 自学习引擎启动且经验数为0 | 行动: 调用内置的虚拟战场生成器，创建随机对抗场景填充经验库"
     },
     {
-      "type": "success_pattern",
-      "summary": "最近 7 次成功操作",
-      "detail": "成功操作分布: {'emulator': 1, 'self_learn': 4, 'combat': 1, 'github': 20}",
-      "suggestion": "保持当前良好状态"
+      "type": "tactical_rule",
+      "summary": "战斗结束后应立即分析失败原因并更新预测器参数",
+      "detail": "条件: 战斗结果总分低于阈值（如10）时 | 行动: 触发回溯分析模块，记录关键决策点并调整权重"
+    },
+    {
+      "type": "param_adjust",
+      "summary": "调整参数 初始探索率: 0 → 0.8",
+      "detail": "原因: 经验为0时高探索率可能导致随机行为积累无效经验，适当降低探索率可加速有效策略发现"
+    },
+    {
+      "type": "param_adjust",
+      "summary": "调整参数 学习率: 0 → 0.05",
+      "detail": "原因: 初始阶段数据稀疏，低学习率可避免大梯度更新导致过拟合少数失败案例"
+    },
+    {
+      "type": "param_adjust",
+      "summary": "调整参数 经验回放缓冲区大小: 0 → 500",
+      "detail": "原因: 早期战斗数据量小，缩小缓冲区可提高样本利用效率，待经验数增长后再扩容"
+    },
+    {
+      "type": "param_adjust",
+      "summary": "调整参数 困难难度限制经验阈值: 0 → 100",
+      "detail": "原因: 新增参数：经验数低于100时禁止选择困难难度，防止无效消耗"
+    },
+    {
+      "type": "priority",
+      "summary": "基础移动与目标选择策略（如最短路径优先、敌我距离评估）",
+      "detail": "下一步优先学习方向"
+    },
+    {
+      "type": "priority",
+      "summary": "资源管理与生存优先原则（避免无意义碰撞）",
+      "detail": "下一步优先学习方向"
+    },
+    {
+      "type": "priority",
+      "summary": "预测器对简单线性轨迹的拟合训练",
+      "detail": "下一步优先学习方向"
     }
-  ]
+  ],
+  "初始探索率": 0.8,
+  "学习率": 0.05,
+  "经验回放缓冲区大小": 500,
+  "困难难度限制经验阈值": 100
 }
