@@ -5,84 +5,9 @@
   "learning_rate": 0.008,
   "tactical_aggressiveness": 0.5,
   "unit_preference": "balanced",
-  "last_learned": "2026-07-21T06:10:24.096419",
-  "total_learnings": 202,
+  "last_learned": "2026-07-21T06:11:37.501505",
+  "total_learnings": 203,
   "insights": [
-    {
-      "type": "param_adjust",
-      "summary": "调整参数 knowledge_retention_period: 120 → 180",
-      "detail": "原因: 系统已运行近200周期，缩短保留周期可加速知识迭代，避免旧知识干扰新学习"
-    },
-    {
-      "type": "priority",
-      "summary": "探索高置信度洞察的跨周期关联模式，提升知识泛化能力",
-      "detail": "下一步优先学习方向"
-    },
-    {
-      "type": "priority",
-      "summary": "引入外部领域数据源，打破当前知识提取的饱和状态",
-      "detail": "下一步优先学习方向"
-    },
-    {
-      "type": "priority",
-      "summary": "优化知识压缩算法，减少冗余知识存储并提升检索效率",
-      "detail": "下一步优先学习方向"
-    },
-    {
-      "type": "knowledge",
-      "summary": "系统在连续学习周期中稳定学习13-16条新知识，知识提取能力趋于稳定",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "knowledge",
-      "summary": "DeepSeek深度分析置信度从35%逐步提升至92%，分析质量显著改善并趋于稳定",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "knowledge",
-      "summary": "每个学习周期提取的洞察数量从10条逐步增长并稳定在14-16条之间",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "knowledge",
-      "summary": "学习参数已自动推送到GitHub，持续集成流程正常",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "knowledge",
-      "summary": "系统已运行至第199周期，学习过程持续稳定",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "tactical_rule",
-      "summary": "当学习周期内新知识数量低于13条时，应检查数据源或知识提取模块是否存在瓶颈",
-      "detail": "条件: 新知识数量 < 13 | 行动: 触发数据源质量检查，增加数据多样性或调整知识提取阈值"
-    },
-    {
-      "type": "tactical_rule",
-      "summary": "当DeepSeek分析置信度低于85%时，应暂停自动推送并启动模型校准",
-      "detail": "条件: 置信度 < 85% | 行动: 暂停GitHub推送，执行模型回滚或重新训练，直至置信度恢复"
-    },
-    {
-      "type": "tactical_rule",
-      "summary": "当洞察数量连续3个周期低于14条时，应增加分析深度或扩大搜索范围",
-      "detail": "条件: 洞察数量 < 14 且持续3周期 | 行动: 调整DeepSeek分析参数，如增加迭代次数或放宽相关性阈值"
-    },
-    {
-      "type": "param_adjust",
-      "summary": "调整参数 learning_rate: 0.008 → 0.015",
-      "detail": "原因: 系统已稳定运行近200周期，知识提取和置信度均趋于稳定，适度提高学习速率可加速收敛，但需监控防止震荡"
-    },
-    {
-      "type": "param_adjust",
-      "summary": "调整参数 confidence_threshold: 0.95 → 0.9",
-      "detail": "原因: 当前置信度稳定在92%，提高阈值至0.90可过滤低质量分析结果，进一步提升知识质量"
-    },
-    {
-      "type": "param_adjust",
-      "summary": "调整参数 insight_extraction_min: 0 → 12",
-      "detail": "原因: 洞察数量已稳定在14-16条，提高最小提取数量可避免资源浪费，同时保持输出稳定性"
-    },
     {
       "type": "param_adjust",
       "summary": "调整参数 push_interval_cycles: 0 → 2",
@@ -257,6 +182,81 @@
       "type": "priority",
       "summary": "优化洞察提取的多样性，避免重复或冗余知识",
       "detail": "下一步优先学习方向"
+    },
+    {
+      "type": "knowledge",
+      "summary": "系统在连续学习周期中稳定学习13-16条新知识，知识提取能力趋于稳定",
+      "detail": "从学习日志中提取的战术知识"
+    },
+    {
+      "type": "knowledge",
+      "summary": "DeepSeek深度分析置信度从35%逐步提升至92%并趋于稳定，分析质量显著改善",
+      "detail": "从学习日志中提取的战术知识"
+    },
+    {
+      "type": "knowledge",
+      "summary": "每个学习周期提取的洞察数量从10条逐步增长并稳定在14-16条之间",
+      "detail": "从学习日志中提取的战术知识"
+    },
+    {
+      "type": "knowledge",
+      "summary": "学习参数已自动推送到GitHub，持续集成与版本控制正常",
+      "detail": "从学习日志中提取的战术知识"
+    },
+    {
+      "type": "knowledge",
+      "summary": "系统在200个周期内保持稳定的学习节奏，未出现性能退化或过拟合迹象",
+      "detail": "从学习日志中提取的战术知识"
+    },
+    {
+      "type": "tactical_rule",
+      "summary": "当置信度达到92%且连续多个周期稳定时，可降低分析频率以节省计算资源",
+      "detail": "条件: 置信度稳定在92%以上超过10个周期 | 行动: 将DeepSeek深度分析触发间隔从每周期一次调整为每2-3周期一次，或仅在知识量波动超过阈值时触发"
+    },
+    {
+      "type": "tactical_rule",
+      "summary": "当每个周期学习知识量稳定在13-16条时，应监控知识多样性，避免重复或冗余知识积累",
+      "detail": "条件: 连续5个周期知识量在13-16条范围内且无显著波动 | 行动: 引入知识去重或相似度检测机制，确保新知识具有增量价值"
+    },
+    {
+      "type": "tactical_rule",
+      "summary": "当洞察提取数量稳定在14-16条时，可尝试提升洞察质量而非数量",
+      "detail": "条件: 洞察数量连续10个周期在14-16条之间 | 行动: 调整洞察提取的阈值或增加深度分析层数，优先提取高价值、高关联度的洞察"
+    },
+    {
+      "type": "param_adjust",
+      "summary": "调整参数 DeepSeek深度分析触发频率: 0 → 每2周期一次",
+      "detail": "原因: 置信度已稳定在92%，降低频率可减少计算开销，同时保留足够监控能力"
+    },
+    {
+      "type": "param_adjust",
+      "summary": "调整参数 洞察提取数量上限: 20 → 18条",
+      "detail": "原因: 系统已稳定在14-16条，适当提高上限可探索更多潜在洞察，但需监控是否导致质量下降"
+    },
+    {
+      "type": "param_adjust",
+      "summary": "调整参数 知识去重阈值: 0.85 → 0.85（相似度阈值）",
+      "detail": "原因: 知识量稳定但可能存在冗余，引入去重机制可提升知识库的紧凑性和学习效率"
+    },
+    {
+      "type": "param_adjust",
+      "summary": "调整参数 学习周期知识量下限: 0 → 12条",
+      "detail": "原因: 当前稳定在13-16条，降低下限可允许系统在数据稀疏时仍保持学习，避免强制填充低质量知识"
+    },
+    {
+      "type": "priority",
+      "summary": "知识多样性评估与冗余检测机制",
+      "detail": "下一步优先学习方向"
+    },
+    {
+      "type": "priority",
+      "summary": "洞察质量提升策略（如多维度关联分析）",
+      "detail": "下一步优先学习方向"
+    },
+    {
+      "type": "priority",
+      "summary": "异常知识或低置信度知识的自动过滤与回滚",
+      "detail": "下一步优先学习方向"
     }
   ],
   "last_adjustment_reason": "评估通过，无需调整",
@@ -275,7 +275,7 @@
   "knowledge_extraction_min_variety": 5,
   "学习周期触发间隔": 3,
   "置信度阈值（自动调参触发）": 50,
-  "洞察提取数量上限": 20,
+  "洞察提取数量上限": "18条",
   "日志去重开关": 1,
   "置信度阈值": 0.9,
   "学习周期最大洞察数": 25,
@@ -453,7 +453,7 @@
   "insight_diversity_weight": 0.7,
   "monitor_interval": 5,
   "学习周期长度（周期内学习次数）": 2,
-  "知识去重阈值": 0.85,
+  "知识去重阈值": "0.85（相似度阈值）",
   "deepseek_analysis_interval": 2,
   "new_knowledge_target_range": "15-18",
   "knowledge_retention_window": 120,
@@ -472,5 +472,7 @@
   "push_interval_cycles": 2,
   "insight_generation_batch_size": 14,
   "model_retrain_interval": 100,
-  "github_push_retry_count": 3
+  "github_push_retry_count": 3,
+  "DeepSeek深度分析触发频率": "每2周期一次",
+  "学习周期知识量下限": "12条"
 }
