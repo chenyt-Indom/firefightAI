@@ -9396,11 +9396,26 @@ function recordTouchEvent(action, x, y, endX, endY){
   setTimeout(function(){if(recordingActive)captureRecordingFrame()},100);
 }
 function captureRecordingFrame(){
-  if(!emulatorScreenImage) return;
   var ts=Date.now()-recordingStartTime;
+  // Try emulator screen image first
+  var imgData = emulatorScreenImage;
+  // Fallback: capture from canvas
+  if(!imgData){
+    var canvas = document.getElementById('emu-screen-canvas');
+    if(canvas){
+      try { imgData = canvas.toDataURL('image/jpeg', 0.6); } catch(e){}
+    }
+  }
+  // Fallback: capture from img element
+  if(!imgData){
+    var img = document.querySelector('.emu-screen-container img');
+    if(img && img.src && img.src.startsWith('data:')){
+      imgData = img.src;
+    }
+  }
   recordingScreenshots.push({
     ts:ts,
-    image:emulatorScreenImage,
+    image:imgData || 'no_screen_data',
     timestamp:new Date().toISOString(),
     event_index:recordingEvents.length
   });
@@ -12247,12 +12262,15 @@ def api_emulator_touch():
 def api_recording_learn():
     """接收录制数据并调用DeepSeek进行战术分析学习"""
     data = request.get_json() or {}
-    if not data or "events" not in data or len(data["events"]) == 0:
-        return jsonify({"status": "error", "error": "缺少录制事件数据"}), 400
-
-    events = data["events"]
+    events = data.get("events", [])
+    screenshots = data.get("screenshots", [])
+    
+    # 至少要有事件或截图
+    if not events and not screenshots:
+        return jsonify({"status": "error", "error": "无录入数据: 请先在模拟器屏幕上操作或录制至少一帧"}), 400
+    
     total_events = data.get("total_events", len(events))
-    total_screenshots = data.get("total_screenshots", 0)
+    total_screenshots = data.get("total_screenshots", len(screenshots))
     duration_ms = data.get("duration_ms", 0)
     resolution = data.get("resolution", {})
     session_id = data.get("session_id", "rec_unknown")
