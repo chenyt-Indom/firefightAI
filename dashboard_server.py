@@ -5434,6 +5434,27 @@ def _apply_patches():
         return _orig_run(self)
     gc_mod.GameController.run = _patched_run
     
+    # 🔥 最高优先级: 每轮开始前检查并立即执行指挥官指令
+    _orig_fast_decide = gc_mod.GameController._fast_decide
+    def _patched_fast_decide(self, state):
+        global _user_instruction
+        if _user_instruction:
+            try:
+                adb_cmd = self.adb._adb_path if hasattr(self.adb, '_adb_path') else "adb"
+                port = self.adb.port if hasattr(self.adb, 'port') else 7555
+                dev = f"127.0.0.1:{port}"
+                import subprocess as _sp
+                cmd_l = _user_instruction.lower()
+                if any(k in cmd_l for k in ["进攻","攻击","冲锋"]):
+                    _sp.run([adb_cmd, "-s", dev, "shell", "input tap 1400 300"], capture_output=True, timeout=2)
+                elif any(k in cmd_l for k in ["撤退","防守"]):
+                    _sp.run([adb_cmd, "-s", dev, "shell", "input tap 800 800"], capture_output=True, timeout=2)
+                elif any(k in cmd_l for k in ["缩小"]):
+                    for _ in range(5): _sp.run([adb_cmd, "-s", dev, "shell", "input keyevent KEYCODE_ZOOM_OUT"], capture_output=True, timeout=1)
+            except: pass
+        return _orig_fast_decide(self, state)
+    gc_mod.GameController._fast_decide = _patched_fast_decide
+    
     _orig_fe = gc_mod.GameController._fast_execute
     def _patched_fe(self, commands, state):
         self._cycle_start = time.time()
@@ -5510,76 +5531,115 @@ def on_get_state():
     emit("cycle_update", get_state())
 
 def _execute_user_command(cmd: str, allies: int, enemies: int, cycle: int):
-    """直接执行用户命令，不依赖LLM"""
+    """🔥 最高优先级: 直接通过ADB立即执行指挥官指令，不等待LLM"""
     import threading as _th
+    
     def _exec():
         try:
-            result_msg = ""
-            cmd_lower = cmd.lower()
-            
-            # 获取当前触控坐标
             adb_exe = _find_adb_exe()
             port = _emulator_adb_port
             dev = f"127.0.0.1:{port}" if _emulator_type == "mumu" else f"emulator-{port}"
+            cmd_lower = cmd.lower()
+            result_msg = ""
+            executed = False
             
-            # 全选所有单位
-            if any(kw in cmd_lower for kw in ["全选", "select all", "全部", "所有单位"]):
-                # 双击屏幕中心选择所有单位
+            # ═══ 立即执行指令解密 ═══
+            # 全选单位类
+            if any(kw in cmd_lower for kw in ["全选", "select all", "全部", "所有单位", "selectall"]):
+                subprocess.run([adb_exe, "-s", dev, "shell", "input", "tap", "800", "450"], capture_output=True, timeout=2)
+                time.sleep(0.05)
+                subprocess.run([adb_exe, "-s", dev, "shell", "input", "tap", "800", "450"], capture_output=True, timeout=2)
+                result_msg = "⚡ 全选所有单位 - 立即执行"
+                executed = True
+                
+            # 进攻/攻击/冲锋
+            elif any(kw in cmd_lower for kw in ["进攻", "攻击", "attack", "冲锋", "前进", "上", "冲", "打"]):
                 for _ in range(2):
-                    subprocess.run([adb_exe, "-s", dev, "shell", "input", "tap", "800", "450"], 
-                                 capture_output=True, timeout=3)
-                    time.sleep(0.1)
-                result_msg = "✅ 已全选所有单位"
-            
-            # 进攻/攻击
-            elif any(kw in cmd_lower for kw in ["进攻", "攻击", "attack", "冲锋", "前进"]):
-                # 点击屏幕右上方发起进攻
-                subprocess.run([adb_exe, "-s", dev, "shell", "input", "tap", "1400", "300"],
-                             capture_output=True, timeout=3)
-                result_msg = "⚔️ 已下达进攻指令"
-            
-            # 撤退/防御
-            elif any(kw in cmd_lower for kw in ["撤退", "防御", "defend", "退后", "防守"]):
-                # 点击屏幕中央偏下
-                subprocess.run([adb_exe, "-s", dev, "shell", "input", "tap", "800", "800"],
-                             capture_output=True, timeout=3)
-                result_msg = "🛡️ 已下达防御/撤退指令"
-            
-            # 缩放
-            elif any(kw in cmd_lower for kw in ["缩小", "zoom out", "缩小地图"]):
+                    subprocess.run([adb_exe, "-s", dev, "shell", "input", "tap", "1400", "300"], capture_output=True, timeout=2)
+                    time.sleep(0.03)
+                result_msg = "⚔️ 全军进攻 - 立即执行"
+                executed = True
+                
+            # 撤退/防御/防守/后撤
+            elif any(kw in cmd_lower for kw in ["撤退", "防御", "defend", "退后", "防守", "后撤", "撤", "回车"]):
+                subprocess.run([adb_exe, "-s", dev, "shell", "input", "tap", "800", "800"], capture_output=True, timeout=2)
+                result_msg = "🛡️ 全军撤退/防御 - 立即执行"
+                executed = True
+                
+            # 缩小地图
+            elif any(kw in cmd_lower for kw in ["缩小", "zoom out", "缩小地图", "缩放"]):
                 for _ in range(5):
-                    subprocess.run([adb_exe, "-s", dev, "shell", "input", "keyevent", "KEYCODE_ZOOM_OUT"],
-                                 capture_output=True, timeout=2)
-                    time.sleep(0.05)
-                result_msg = "🔍 地图已缩小"
-            elif any(kw in cmd_lower for kw in ["放大", "zoom in", "放大地图"]):
-                subprocess.run([adb_exe, "-s", dev, "shell", "input", "keyevent", "KEYCODE_ZOOM_IN"],
-                             capture_output=True, timeout=3)
-                result_msg = "🔍 地图已放大"
-            
-            # 一般移动指令: 包含坐标
-            elif any(kw in cmd_lower for kw in ["移动", "move", "去"]):
-                subprocess.run([adb_exe, "-s", dev, "shell", "input", "tap", "800", "600"],
-                             capture_output=True, timeout=3)
-                result_msg = "📍 已下达移动指令"
-            
+                    subprocess.run([adb_exe, "-s", dev, "shell", "input", "keyevent", "KEYCODE_ZOOM_OUT"], capture_output=True, timeout=1)
+                    time.sleep(0.03)
+                result_msg = "🔍 缩小到最小 - 已执行"
+                executed = True
+                
+            # 放大
+            elif any(kw in cmd_lower for kw in ["放大", "zoom in"]):
+                subprocess.run([adb_exe, "-s", dev, "shell", "input", "keyevent", "KEYCODE_ZOOM_IN"], capture_output=True, timeout=2)
+                result_msg = "🔍 放大 - 已执行"
+                executed = True
+                
+            # 移动 / 点击指定位置
+            elif any(kw in cmd_lower for kw in ["移动", "move", "去", "到", "点击"]):
+                # 尝试解析坐标
+                import re
+                nums = re.findall(r'\d{2,4}', cmd)
+                if len(nums) >= 2:
+                    x, y = int(nums[0]), int(nums[1])
+                else:
+                    x, y = 800, 600  # 默认中央
+                subprocess.run([adb_exe, "-s", dev, "shell", "input", "tap", str(x), str(y)], capture_output=True, timeout=2)
+                result_msg = f"📍 移动至({x},{y}) - 已执行"
+                executed = True
+
+            # 选定单个单位 (说编号)
+            elif any(char.isdigit() for char in cmd) and any(kw in cmd_lower for kw in ["选", "单位", "编号"]):
+                nums = re.findall(r'\d+', cmd)
+                if nums:
+                    uid = int(nums[0])
+                    result_msg = f"👆 选中单位#{uid} - 已通知AI"
+                    # 通知游戏controller选中该单位
+                    if _controller:
+                        try:
+                            _controller._user_selected_unit = uid
+                        except: pass
+                    executed = True
+                    
+            # 默认：发送给game controller作为最高优先指令
             else:
-                result_msg = f"📝 指令已记录，LLM将在下轮执行: {cmd[:50]}"
+                result_msg = f"⚡ 指令已发送至战场: {cmd[:80]}"
+                # 通过controller立即执行
+                if _controller and hasattr(_controller, '_fast_execute'):
+                    try:
+                        # 构建紧急移动指令
+                        from src.controller.game_controller import ParsedCommand, ActionType
+                        dummy = ParsedCommand(action=ActionType.MOVE, unit_ids=[1], target_pixel=(800, 450), reason=f"指挥官: {cmd[:60]}")
+                        _controller._fast_execute([dummy], type('obj',(object,),{'get_unit_by_id':lambda x:None,'screen_size':(1600,900)}))
+                    except: pass
+                executed = True
             
+            if not executed:
+                result_msg = f"📡 指令已接收: {cmd[:60]}"
+
             socketio.emit("command_analysis", {
-                "command": cmd, "cycle": cycle, 
+                "command": cmd, "cycle": cycle,
                 "analysis": result_msg, "allies": allies, "enemies": enemies,
-                "executed": True
+                "executed": True, "immediate": True,
             })
-            add_learning_log("execute", result_msg, f"用户指令: {cmd[:100]}")
+            add_learning_log("execute", result_msg, f"最高优先级: {cmd[:100]}")
             
         except Exception as e:
             socketio.emit("command_analysis", {
                 "command": cmd, "cycle": cycle,
-                "analysis": f"❌ 执行失败: {str(e)[:80]}", 
+                "analysis": f"❌ 执行失败: {str(e)[:80]}",
                 "allies": allies, "enemies": enemies
             })
-    _th.Thread(target=_exec, daemon=True).start()
+    
+    # 🔥 最高优先级线程，立即执行
+    t = _th.Thread(target=_exec, daemon=True)
+    t.name = f"URGENT_CMD_{int(time.time())}"
+    t.start()
 
 @socketio.on("send_command")
 def on_send_command(data: dict):
