@@ -97,6 +97,18 @@ def _adb_keepalive_worker():
     _adb_monitor_running = True
     logger.info("ADB保活监控已启动")
     add_system_log("connection", "ADB保活监控已启动", "每10秒检查一次连接状态")
+    consecutive_failures = 0
+    
+    def _check_device(host, port, output):
+        """检测ADB设备列表中是否包含指定设备"""
+        for line in output.strip().split("\n"):
+            if "\tdevice" in line:
+                if f"{host}:{port}" in line or f"emulator-{port}" in line:
+                    return True
+            elif "device" in line and "emulator-" in line:
+                return True
+        return False
+    
     while _adb_monitor_running:
         try:
             cfg = load_config()
@@ -107,45 +119,48 @@ def _adb_keepalive_worker():
             port = di.get("adb_port", 5555)
             adb_exe = _find_adb_exe()
             
+            # 验证ADB可执行文件存在
+            if adb_exe != "adb" and not Path(adb_exe).exists():
+                adb_exe = "adb"
+            
             subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
             r = subprocess.run([adb_exe, "devices"], capture_output=True, text=True, timeout=5)
-            # 支持 tcp:host:port 和 emulator-{port} 两种格式
-            connected = False
-            for line in r.stdout.strip().split("\n"):
-                if "\tdevice" in line:
-                    if f"{host}:{port}" in line or f"emulator-{port}" in line:
-                        connected = True
-                        break
-                elif "device" in line and "emulator-" in line:
-                    connected = True
-                    break
-            if connected != _adb_last_connected:
-                if connected:
+            connected = _check_device(host, port, r.stdout)
+            
+            if connected:
+                consecutive_failures = 0
+                if not _adb_last_connected:
                     update_state(adb_status="connected")
                     add_system_log("connection", "ADB已连接", f"{host}:{port}")
                     logger.info(f"ADB保活: 已连接 {host}:{port}")
+                    _adb_last_connected = True
+            else:
+                consecutive_failures += 1
+                update_state(adb_status="disconnected")
+                
+                if consecutive_failures == 1:
+                    add_system_log("connection", "ADB断开，尝试重连", f"{host}:{port}")
+                
+                # 尝试重连（最多重试3次，避免频繁日志）
+                subprocess.run([adb_exe, "connect", f"{host}:{port}"], capture_output=True, text=True, timeout=5)
+                r2 = subprocess.run([adb_exe, "devices"], capture_output=True, text=True, timeout=5)
+                reconnected = _check_device(host, port, r2.stdout)
+                
+                if reconnected:
+                    consecutive_failures = 0
+                    update_state(adb_status="connected")
+                    add_system_log("connection", "ADB自动重连成功", f"{host}:{port}")
+                    _adb_last_connected = True
                 else:
-                    update_state(adb_status="disconnected")
-                    # 尝试重连
-                    subprocess.run([adb_exe, "connect", f"{host}:{port}"], capture_output=True, text=True, timeout=5)
-                    r2 = subprocess.run([adb_exe, "devices"], capture_output=True, text=True, timeout=5)
-                    reconnected = False
-                    for line in r2.stdout.strip().split("\n"):
-                        if "\tdevice" in line:
-                            if f"{host}:{port}" in line or f"emulator-{port}" in line:
-                                reconnected = True
-                                break
-                        elif "device" in line and "emulator-" in line:
-                            reconnected = True
-                            break
-                    if reconnected:
-                        update_state(adb_status="connected")
-                        add_system_log("connection", "ADB自动重连成功", f"{host}:{port}")
-                    else:
-                        add_system_log("connection", "ADB断开，等待设备", f"{host}:{port}")
-                _adb_last_connected = connected
+                    _adb_last_connected = False
+                    if consecutive_failures <= 1 or consecutive_failures % 6 == 0:
+                        # 只在首次失败和每60秒报告一次，避免刷屏
+                        add_system_log("connection", "ADB断开，等待设备", f"{host}:{port} (连续失败{consecutive_failures}次)")
         except Exception as e:
-            pass
+            consecutive_failures += 1
+            logger.warning(f"ADB保活检查异常: {e}")
+            if consecutive_failures <= 1 or consecutive_failures % 6 == 0:
+                add_system_log("connection", "ADB检查异常", str(e)[:200])
         time.sleep(10)
 
 
@@ -234,7 +249,7 @@ def api_learning_log_export():
 
 @app.route("/api/learning_log/train", methods=["POST"])
 def api_learning_log_train():
-    """将AI学习日志中的知识用于训练和调整AI参数"""
+    """将AI学习日志中的知识用于训练和调整AI参数，并同步到GitHub"""
     if len(_learning_log) < 3:
         return jsonify({"status": "error", "error": "学习日志条目不足（至少需要3条）"}), 400
 
@@ -271,6 +286,59 @@ def api_learning_log_train():
             analysis = r["content"]
             add_learning_log("self_learn", "学习日志训练完成", analysis[:300])
 
+            # 🔥 第二步：提取具体的参数调整值
+            param_prompt = f"""基于以下分析，请输出JSON格式的参数调整方案。只输出JSON，不要其他内容。
+
+分析：
+{analysis[:3000]}
+
+当前参数：
+{json.dumps(_self_learning_params, ensure_ascii=False)}
+
+请输出JSON格式，包含以下字段（只包含需要调整的字段）：
+{{
+    "temperature": 0.0-0.5之间的值,
+    "learning_rate": 0.001-0.1之间的值,
+    "tactical_aggressiveness": 0.0-1.0之间的值,
+    "confidence_threshold": 0.0-1.0之间的值,
+    "adjustment_reason": "调整原因简述"
+}}
+
+只输出JSON:"""
+
+            param_r = _deepseek_chat([{"role": "user", "content": param_prompt}],
+                                     max_tokens=512, temperature=0.1, stream=False, timeout=30)
+            
+            params_adjusted = {}
+            if param_r.get("success"):
+                try:
+                    # 尝试提取JSON
+                    content = param_r["content"].strip()
+                    # 清理可能的markdown标记
+                    if "```json" in content:
+                        content = content.split("```json")[1].split("```")[0].strip()
+                    elif "```" in content:
+                        content = content.split("```")[1].split("```")[0].strip()
+                    
+                    suggested = json.loads(content)
+                    
+                    # 应用参数调整（在合理范围内）
+                    for key in ["temperature", "learning_rate", "tactical_aggressiveness", "confidence_threshold"]:
+                        if key in suggested and isinstance(suggested[key], (int, float)):
+                            _self_learning_params[key] = suggested[key]
+                    
+                    _self_learning_params["total_learnings"] = _self_learning_params.get("total_learnings", 0) + 1
+                    _self_learning_params["last_learned"] = datetime.now().isoformat()
+                    _self_learning_params["last_adjustment_reason"] = suggested.get("adjustment_reason", "基于学习日志训练")
+                    
+                    _save_learning_params()
+                    params_adjusted = {k: _self_learning_params[k] for k in ["temperature", "learning_rate", "tactical_aggressiveness", "confidence_threshold"]}
+                    
+                    add_learning_log("self_learn", "参数已自动调整", f"新参数: {json.dumps(params_adjusted, ensure_ascii=False)}")
+                except (json.JSONDecodeError, KeyError, ValueError) as e:
+                    logger.warning(f"参数解析失败: {e}, 原始内容: {content[:200]}")
+                    add_learning_log("self_learn", "参数解析失败，保留原参数", str(e)[:100])
+
             # 保存训练结果到数据库
             try:
                 db_path = PROJECT_ROOT / "data" / "firefight_ai.db"
@@ -280,22 +348,27 @@ def api_learning_log_train():
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         log_count INTEGER,
                         analysis TEXT,
+                        params_adjusted TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
                 conn.execute(
-                    "INSERT INTO learning_log_train_results (log_count, analysis) VALUES (?,?)",
-                    (len(recent), analysis[:5000])
+                    "INSERT INTO learning_log_train_results (log_count, analysis, params_adjusted) VALUES (?,?,?)",
+                    (len(recent), analysis[:5000], json.dumps(params_adjusted, ensure_ascii=False))
                 )
                 conn.commit()
                 conn.close()
             except Exception:
                 pass
 
+            # 🔥 自动推送参数到GitHub
+            _auto_push_learning_params()
+
             socketio.emit("learning_log_train_result", {
                 "status": "ok",
                 "log_count": len(recent),
                 "analysis": analysis,
+                "params_adjusted": params_adjusted,
                 "time": datetime.now().isoformat(),
             })
         except Exception as e:
@@ -729,12 +802,9 @@ def api_github_setup():
 def api_github_push():
     """推送变更到GitHub"""
     data = request.get_json() or {}
-    # 🔥 手动推送：推送所有变更，不只是数据文件
     commit_msg = data.get("message", f"AI训练更新 {datetime.now().strftime('%Y%m%d-%H%M')}")
     is_auto = data.get("auto", False)
     paths = data.get("paths", ["."] if not is_auto else ["data/params", "data/tactics_rules.yaml", "data/battle_memory.db"])
-
-    add_system_log("github", "开始推送数据到GitHub", f"提交消息: {commit_msg}")
 
     # 先检查是否有remote
     has_remote = False
@@ -752,7 +822,24 @@ def api_github_push():
         # 🔥 确保GitHub远程URL包含token认证
         _ensure_git_remote_with_token()
         
-        # 先添加所有变更
+        # 🔥 先检查是否有实际变更（避免重复推送）
+        rc, stdout, _ = _git_run(["git", "status", "--porcelain"], timeout=10)
+        has_changes = bool(stdout.strip())
+        
+        if not has_changes:
+            # 工作区干净，检查是否有未推送的提交
+            rc2, ahead_out, _ = _git_run(["git", "rev-list", "--count", "origin/master..HEAD"], timeout=10)
+            ahead_count = int(ahead_out.strip()) if ahead_out.strip().isdigit() else 0
+            if ahead_count == 0:
+                add_system_log("github", "⚠ 请勿推送重复内容", "工作区无变更，且无未推送提交")
+                return jsonify({
+                    "status": "duplicate", 
+                    "message": "请勿推送重复内容",
+                    "detail": "当前工作区没有新的变更，所有内容已与远程仓库同步",
+                    "push_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
+        
+        # 添加所有变更
         rc, _, _ = _git_run(["git", "add", "-A"], timeout=10)
         if rc != 0:
             return jsonify({"status": "error", "error": "git add 失败", "suggestion": "请检查本地git仓库状态"}), 500
@@ -762,13 +849,41 @@ def api_github_push():
         has_staged = (rc != 0)
         
         if has_staged:
+            # 🔥 检查是否与上次提交内容相同
+            rc, last_msg, _ = _git_run(["git", "log", "-1", "--format=%s"], timeout=5)
+            last_commit_msg = last_msg.strip()
+            if last_commit_msg == commit_msg:
+                # 消息相同，检查diff是否也相同
+                rc, diff_out, _ = _git_run(["git", "diff", "--cached", "--stat"], timeout=10)
+                rc2, last_diff, _ = _git_run(["git", "diff", "HEAD~1..HEAD", "--stat"], timeout=10)
+                if diff_out.strip() == last_diff.strip():
+                    add_system_log("github", "⚠ 请勿推送重复内容", f"提交消息和变更内容与上次相同")
+                    return jsonify({
+                        "status": "duplicate",
+                        "message": "请勿推送重复内容", 
+                        "detail": f"提交消息'{commit_msg}'和变更内容与上次提交完全相同",
+                        "push_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    })
+            
             rc, _, stderr = _git_run(["git", "commit", "-m", commit_msg], timeout=30)
             if rc != 0:
                 add_system_log("github", "提交失败", stderr[:200])
                 return jsonify({"status": "error", "error": f"git commit 失败: {stderr[:200]}"}), 500
             add_system_log("github", "已提交", commit_msg)
+        else:
+            # 没有staged变更，但可能有未推送的提交
+            rc2, ahead_out, _ = _git_run(["git", "rev-list", "--count", "origin/master..HEAD"], timeout=10)
+            ahead_count = int(ahead_out.strip()) if ahead_out.strip().isdigit() else 0
+            if ahead_count == 0:
+                add_system_log("github", "⚠ 请勿推送重复内容", "无新变更需要推送")
+                return jsonify({
+                    "status": "duplicate",
+                    "message": "请勿推送重复内容",
+                    "detail": "没有新的变更，所有内容已是最新",
+                    "push_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
         
-        # 直接推送（git会自动判断是否有内容需要推送）
+        # 直接推送
         add_system_log("github", "开始推送...", f"commits: {commit_msg}")
         rc, stdout, stderr = _git_run(["git", "push", "origin", "master"], timeout=300)
         if rc == 0:
@@ -780,7 +895,6 @@ def api_github_push():
             return jsonify({"status": "pushed", "message": commit_msg, "push_time": push_time})
         else:
             error_msg = stderr[:300] if stderr else "推送失败"
-            # 解析常见错误
             if "Authentication failed" in error_msg or "could not read" in error_msg:
                 suggestion = "GitHub认证失败，请在系统设置中配置GitHub Token"
             elif "remote rejected" in error_msg:
@@ -1391,6 +1505,38 @@ def on_ai_chat(data: dict):
 
     is_correction = data.get("is_correction", False)
     correction_type = data.get("correction_type", "")
+
+    # 🔥 检测是否为"记录到学习日志"指令
+    log_keywords = ["记录到学习日志", "添加到学习日志", "学习日志记录", "记录这条", "记录到日志", "记住这条", "记下这条"]
+    is_log_request = any(kw in message for kw in log_keywords)
+    
+    if is_log_request:
+        # 提取要记录的内容（去掉关键词本身）
+        log_content = message
+        for kw in log_keywords:
+            log_content = log_content.replace(kw, "").strip()
+        # 如果去掉关键词后还有内容，使用剩余内容；否则使用整条消息
+        if not log_content:
+            log_content = message
+        
+        # 根据内容分类
+        category = "ai_chat"
+        if "战术" in log_content or "策略" in log_content:
+            category = "tactics"
+        elif "bug" in log_content.lower() or "错误" in log_content or "修复" in log_content:
+            category = "bug_fix"
+        elif "经验" in log_content or "教训" in log_content:
+            category = "experience"
+        elif "参数" in log_content or "配置" in log_content:
+            category = "params"
+        elif "纠正" in log_content or "修正" in log_content:
+            category = "correction"
+        
+        add_learning_log(category, f"用户记录: {log_content[:100]}", log_content[:300])
+        _chat_history.append({"role": "assistant", "content": f"已记录到学习日志 [{category}]: {log_content[:100]}", "time": time.time()})
+        socketio.emit("ai_chat_token", {"token": "", "done": True, "full": f"已记录到学习日志 [{category}]: {log_content[:100]}"})
+        socketio.emit("learning_log_update", {"entry": {"time": datetime.now().strftime("%H:%M:%S"), "category": category, "message": f"用户记录: {log_content[:100]}", "detail": log_content[:300]}, "total": len(_learning_log)})
+        return
 
     emit("ai_chat_start", {"message": message})
 
@@ -2175,6 +2321,79 @@ def api_params_upload_server():
             return jsonify({"status": "error", "error": f"上传失败: {err[:200]}"}), 500
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)[:200]}), 500
+
+
+@app.route("/api/params/pull_github", methods=["POST"])
+def api_params_pull_github():
+    """从GitHub拉取最新参数文件并更新本地AI参数"""
+    add_system_log("github", "开始从GitHub拉取参数", "")
+    try:
+        # 先拉取最新代码
+        rc, stdout, stderr = _git_run(["git", "fetch", "origin", "master"], timeout=60)
+        if rc != 0:
+            add_system_log("github", "GitHub拉取失败", stderr[:200] if stderr else "未知错误")
+            return jsonify({"status": "error", "error": f"fetch失败: {stderr[:200]}"}), 500
+
+        # 检出最新的参数文件
+        rc, stdout, stderr = _git_run(["git", "checkout", "origin/master", "--", "data/params/ai_learning_params.json"], timeout=15)
+        
+        params_file = PROJECT_ROOT / "data" / "params" / "ai_learning_params.json"
+        if params_file.exists():
+            try:
+                loaded = json.loads(params_file.read_text(encoding="utf-8"))
+                # 更新内存中的参数
+                for key in ["temperature", "learning_rate", "tactical_aggressiveness", "confidence_threshold"]:
+                    if key in loaded:
+                        _self_learning_params[key] = loaded[key]
+                _self_learning_params["total_learnings"] = loaded.get("total_learnings", _self_learning_params.get("total_learnings", 0))
+                _self_learning_params["last_synced"] = datetime.now().isoformat()
+                
+                add_system_log("github", "参数已从GitHub同步", json.dumps({k: _self_learning_params[k] for k in ["temperature", "learning_rate", "tactical_aggressiveness", "confidence_threshold"]}, ensure_ascii=False))
+                add_learning_log("params", "参数已从GitHub同步", f"新参数: temperature={_self_learning_params['temperature']}, learning_rate={_self_learning_params['learning_rate']}")
+                
+                return jsonify({
+                    "status": "ok",
+                    "message": "参数已从GitHub同步到本地",
+                    "params": {k: _self_learning_params[k] for k in ["temperature", "learning_rate", "tactical_aggressiveness", "confidence_threshold"]},
+                    "total_learnings": _self_learning_params.get("total_learnings", 0),
+                })
+            except (json.JSONDecodeError, IOError) as e:
+                return jsonify({"status": "error", "error": f"参数文件解析失败: {str(e)}"}), 500
+        else:
+            return jsonify({"status": "error", "error": "GitHub上未找到参数文件"}), 404
+            
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)[:200]}), 500
+
+
+@app.route("/api/params/sync", methods=["POST"])
+def api_params_sync():
+    """双向同步参数：先推送到GitHub，再确认服务器状态"""
+    results = {"github": None, "server": None}
+    
+    # 1. 推送到GitHub
+    try:
+        _auto_push_learning_params()
+        results["github"] = "pushed"
+    except Exception as e:
+        results["github"] = f"error: {str(e)[:100]}"
+    
+    # 2. 检查服务器状态
+    try:
+        ok, stdout, _ = _ssh_exec("curl -s http://127.0.0.1:5000/api/learn/params 2>/dev/null", timeout=10)
+        if ok and stdout:
+            try:
+                server_params = json.loads(stdout.strip())
+                results["server"] = {"status": "online", "params": server_params}
+            except:
+                results["server"] = {"status": "online", "raw": stdout[:200]}
+        else:
+            results["server"] = {"status": "offline"}
+    except:
+        results["server"] = {"status": "unreachable"}
+    
+    add_system_log("sync", "参数同步完成", json.dumps(results, ensure_ascii=False))
+    return jsonify({"status": "ok", "results": results, "time": datetime.now().isoformat()})
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -4088,13 +4307,14 @@ def _deploy_to_server_background():
 
 
 def _push_to_github_background():
-    """后台推送到GitHub"""
+    """后台推送到GitHub（含重复检测和参数同步）"""
     try:
         import subprocess
         git_dir = str(PROJECT_ROOT)
         
         # 检查是否有未推送的提交
         has_unpushed = False
+        ahead_count = 0
         try:
             unpushed = subprocess.run(
                 ["git", "log", "origin/master..HEAD", "--oneline"],
@@ -4102,6 +4322,7 @@ def _push_to_github_background():
             )
             if unpushed.returncode == 0 and unpushed.stdout and unpushed.stdout.strip():
                 has_unpushed = True
+                ahead_count = len(unpushed.stdout.strip().split("\n"))
         except:
             pass
         
@@ -4113,19 +4334,61 @@ def _push_to_github_background():
         has_changes = bool(status.stdout.strip())
         
         if not has_changes and not has_unpushed:
-            socketio.emit("command_analysis", {"command": "上传", "cycle": 0, "analysis": "没有变更需要提交和推送。"})
+            socketio.emit("command_analysis", {"command": "上传", "cycle": 0, "analysis": "请勿推送重复内容: 工作区无变更，且无未推送提交"})
+            add_system_log("github", "请勿推送重复内容", "工作区无变更，且无未推送提交")
             return
         
         if has_changes:
-            # git add
-            subprocess.run(["git", "add", "-A"], cwd=git_dir, capture_output=True, timeout=10)
+            # 只添加参数和学习相关文件（避免大文件）
+            subprocess.run(["git", "add", "data/params/", "data/tactics_rules.yaml", "data/ai_learning_params.json", "src/", "dashboard_server.py"], cwd=git_dir, capture_output=True, timeout=10)
             
-            # git commit
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            subprocess.run(
-                ["git", "commit", "-m", f"Auto-update: {ts}"],
-                cwd=git_dir, capture_output=True, text=True, timeout=10
+            # 检查是否有staged变更
+            diff_check = subprocess.run(
+                ["git", "diff", "--cached", "--quiet"],
+                cwd=git_dir, capture_output=True, timeout=10
             )
+            if diff_check.returncode == 0:
+                # 没有staged变更
+                if not has_unpushed:
+                    socketio.emit("command_analysis", {"command": "上传", "cycle": 0, "analysis": "请勿推送重复内容: 没有新变更需要提交"})
+                    add_system_log("github", "请勿推送重复内容", "无新变更需要推送")
+                    return
+            else:
+                # 有staged变更，检查是否与上次提交重复
+                try:
+                    last_msg_result = subprocess.run(
+                        ["git", "log", "-1", "--format=%s"],
+                        cwd=git_dir, capture_output=True, text=True, timeout=5
+                    )
+                    last_msg = last_msg_result.stdout.strip()
+                    
+                    current_diff = subprocess.run(
+                        ["git", "diff", "--cached", "--stat"],
+                        cwd=git_dir, capture_output=True, text=True, timeout=10
+                    )
+                    last_diff = subprocess.run(
+                        ["git", "diff", "HEAD~1..HEAD", "--stat"],
+                        cwd=git_dir, capture_output=True, text=True, timeout=10
+                    )
+                    
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    commit_msg = f"Auto-update: {ts}"
+                    
+                    if current_diff.stdout.strip() == last_diff.stdout.strip():
+                        socketio.emit("command_analysis", {"command": "上传", "cycle": 0, "analysis": "请勿推送重复内容: 变更内容与上次提交完全相同"})
+                        add_system_log("github", "请勿推送重复内容", "变更内容与上次提交相同")
+                        return
+                    
+                    subprocess.run(
+                        ["git", "commit", "-m", commit_msg],
+                        cwd=git_dir, capture_output=True, text=True, timeout=10
+                    )
+                except:
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    subprocess.run(
+                        ["git", "commit", "-m", f"Auto-update: {ts}"],
+                        cwd=git_dir, capture_output=True, text=True, timeout=10
+                    )
         
         # 🔥 确保GitHub远程URL包含token认证
         _ensure_git_remote_with_token()
@@ -4137,11 +4400,24 @@ def _push_to_github_background():
         )
         
         if push_result.returncode == 0:
-            socketio.emit("command_analysis", {"command": "上传", "cycle": 0, "analysis": "推送到GitHub成功! 代码已同步到远程仓库。"})
-            add_system_log("github", "推送到GitHub成功", "")
+            if "Everything up-to-date" in (push_result.stdout + push_result.stderr):
+                socketio.emit("command_analysis", {"command": "上传", "cycle": 0, "analysis": "请勿推送重复内容: 远程仓库已是最新"})
+                add_system_log("github", "请勿推送重复内容", "远程仓库已是最新")
+            else:
+                socketio.emit("command_analysis", {"command": "上传", "cycle": 0, "analysis": "推送到GitHub成功! 代码已同步到远程仓库。"})
+                add_system_log("github", "推送到GitHub成功", f"ahead: {ahead_count}")
         else:
             err_msg = push_result.stderr.strip() or push_result.stdout.strip() or "未知错误"
-            socketio.emit("command_analysis", {"command": "上传", "cycle": 0, "analysis": f"推送失败: {err_msg[:200]}"})
+            if "Authentication failed" in err_msg:
+                sock_msg = "推送失败: GitHub认证失败，请检查Token配置"
+            elif "remote rejected" in err_msg:
+                sock_msg = "推送失败: 远程仓库拒绝，请先拉取最新代码"
+            elif "timed out" in err_msg.lower():
+                sock_msg = "推送失败: 网络超时，请检查网络连接"
+            else:
+                sock_msg = f"推送失败: {err_msg[:200]}"
+            socketio.emit("command_analysis", {"command": "上传", "cycle": 0, "analysis": sock_msg})
+            add_system_log("github", "推送失败", err_msg[:300])
     except Exception as e:
         socketio.emit("command_analysis", {"command": "上传", "cycle": 0, "analysis": f"推送失败: {str(e)[:100]}"})
 
