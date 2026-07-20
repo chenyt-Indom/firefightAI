@@ -5434,6 +5434,28 @@ def _apply_patches():
         return _orig_run(self)
     gc_mod.GameController.run = _patched_run
     
+    # 🔥 修复过早游戏结束: ally_count==0必须连续5轮才判定
+    _orig_check_game_over = gc_mod.GameController._check_game_over
+    _ally_zero_count = {"count": 0}
+    def _patched_check_game_over(self, state):
+        elapsed = time.time() - self._start_time
+        if elapsed > self.game_over_timeout:
+            return True
+        if state.ally_count == 0:
+            _ally_zero_count["count"] += 1
+            if self._cycle_count > 10 and _ally_zero_count["count"] >= 5:
+                logger.info("己方全灭(连续5轮确认)")
+                self._victory = False
+                return True
+        else:
+            _ally_zero_count["count"] = 0
+        if state.enemy_count == 0 and self._cycle_count > 10:
+            logger.info("敌方全灭, 胜利!")
+            self._victory = True
+            return True
+        return False
+    gc_mod.GameController._check_game_over = _patched_check_game_over
+    
     # 🔥 最高优先级: 每轮开始前检查并立即执行指挥官指令
     _orig_fast_decide = gc_mod.GameController._fast_decide
     def _patched_fast_decide(self, state):
