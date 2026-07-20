@@ -20,6 +20,28 @@ app.config["SECRET_KEY"] = "firefight_dashboard_v5"
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading", max_http_buffer_size=100*1024*1024)
 
+# 🔥 全局JSON错误处理器 - 确保所有API错误返回JSON而非HTML
+@app.errorhandler(404)
+def not_found(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"status": "error", "error": "接口不存在", "path": request.path}), 404
+    return "<html><body><h1>404</h1><p>页面不存在，<a href='/'>返回首页</a></p></body></html>", 404
+
+@app.errorhandler(500)
+def server_error(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"status": "error", "error": "服务器内部错误，请查看日志", "detail": str(e)}), 500
+    return "<h1>500 - 服务器错误</h1>", 500
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """全局异常捕获 - 确保所有API返回JSON"""
+    if request.path.startswith("/api/"):
+        logger.error(f"API异常: {request.path} - {e}", exc_info=True)
+        return jsonify({"status": "error", "error": str(e)[:300], "path": request.path}), 500
+    # 非API路径返回HTML
+    return "<h1>500 - 服务器错误</h1><pre>" + str(e)[:500] + "</pre>", 500
+
 PROJECT_ROOT = Path(__file__).parent
 APP_VERSION = "5.1.0"
 APP_BUILD = datetime.now().strftime("%Y%m%d-%H%M")
@@ -475,6 +497,7 @@ def _git_env() -> dict:
 def _ensure_git_remote_with_token() -> bool:
     """确保git远程URL包含GitHub token认证，避免认证失败。
     从 settings.yaml 读取 github.token 和 github.repo 配置。
+    支持两种token格式：username:token 和 x-access-token:token
     返回 True 表示配置成功或已配置。"""
     try:
         cfg = load_config()
@@ -484,7 +507,7 @@ def _ensure_git_remote_with_token() -> bool:
         if not token or not repo:
             return False
         
-        # 构建带token的远程URL: https://x-access-token:TOKEN@github.com/REPO.git
+        # 🔥 统一使用 x-access-token 格式（GitHub官方推荐）
         token_url = f"https://x-access-token:{token}@github.com/{repo}.git"
         
         # 检查当前remote URL是否已包含token
@@ -5412,6 +5435,35 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
     </div>
   </div>
 
+  <!-- 🔥 GPU渲染配置 -->
+  <div class="panel" style="margin-bottom:12px">
+    <h3>GPU渲染配置 <span style="font-size:10px;color:#ff9800;font-weight:normal">(修复APK游戏兼容性)</span></h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:11px;color:#aaa;margin-bottom:6px">
+      <span>GPU:</span>
+      <select id="emu-gpu-mode" onchange="applyGpuConfig()" style="background:#1a1f2b;color:#d0d0d0;border:1px solid #252a33;padding:2px 6px;border-radius:4px">
+        <option value="host">host (推荐)</option>
+        <option value="swiftshader_indirect">swiftshader_indirect</option>
+        <option value="swiftshader">swiftshader</option>
+        <option value="angle_indirect">angle_indirect</option>
+        <option value="guest">guest</option>
+      </select>
+      <span>渲染器:</span>
+      <select id="emu-renderer" onchange="applyGpuConfig()" style="background:#1a1f2b;color:#d0d0d0;border:1px solid #252a33;padding:2px 6px;border-radius:4px">
+        <option value="opengl">OpenGL</option>
+        <option value="skia">Skia</option>
+      </select>
+      <span>GL ES:</span>
+      <select id="emu-gl-version" onchange="applyGpuConfig()" style="background:#1a1f2b;color:#d0d0d0;border:1px solid #252a33;padding:2px 6px;border-radius:4px">
+        <option value="2.0">2.0</option>
+        <option value="3.0">3.0</option>
+        <option value="3.1">3.1</option>
+      </select>
+      <button class="btn-start" onclick="applyGpuConfig()" style="font-size:10px;padding:4px 8px">应用</button>
+      <span id="emu-gpu-status" style="font-size:10px;color:#888"></span>
+    </div>
+    <div style="font-size:10px;color:#666;margin-top:4px">如果游戏内容加载不全，尝试切换到 swiftshader 或 angle_indirect 模式后重启模拟器</div>
+  </div>
+
   <!-- scrcpy 投屏控制 (鼠标/键盘直接操控) -->
   <div class="panel" style="margin-bottom:12px;background:#1a2a1a;border:1px solid #4caf50">
     <h3>scrcpy 投屏 <span style="font-size:10px;color:#4caf50;font-weight:normal">(鼠标/键盘/触控板直接操控)</span></h3>
@@ -7485,6 +7537,32 @@ function detectEmulators(){
 setTimeout(loadEmuType,500);
 setTimeout(loadEmuScreenState,600);
 setTimeout(loadEmuResolution,700);
+setTimeout(loadGpuConfig,750);
+
+// ── GPU配置 ──
+function applyGpuConfig(){
+  var mode = document.getElementById('emu-gpu-mode').value;
+  var renderer = document.getElementById('emu-renderer').value;
+  var gl = document.getElementById('emu-gl-version').value;
+  var status = document.getElementById('emu-gpu-status');
+  status.textContent = '设置中...';
+  status.style.color = '#ff9800';
+  fetch('/api/emulator/gpu',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gpu_mode:mode,renderer:renderer,gl_version:gl})}).then(r=>r.json()).then(d=>{
+    if(d.status==='ok'){
+      status.textContent = '已设置: GPU='+mode+' Renderer='+renderer+' GLES='+gl;
+      status.style.color = '#4caf50';
+    }
+  }).catch(function(e){status.textContent='设置失败';status.style.color='#e53935'});
+}
+function loadGpuConfig(){
+  fetch('/api/emulator/gpu').then(r=>r.json()).then(d=>{
+    if(d.gpu){
+      document.getElementById('emu-gpu-mode').value = d.gpu.gpu_mode||'host';
+      document.getElementById('emu-renderer').value = d.gpu.renderer||'opengl';
+      document.getElementById('emu-gl-version').value = d.gpu.gl_version||'3.0';
+    }
+  });
+}
 
 // ── 分辨率配置 ──
 function setEmuResolution(w,h,dpi){
@@ -9824,154 +9902,154 @@ def api_emulator_install_and_start():
 
 @app.route("/api/emulator/start", methods=["POST"])
 def api_emulator_start():
+    """启动模拟器 - 支持所有类型，全局异常捕获确保返回JSON"""
     global _emulator_process
-    data = request.get_json() or {}
-    emu_type = data.get("type", _emulator_type)
+    try:
+        data = request.get_json() or {}
+        emu_type = data.get("type", _emulator_type)
 
-    # 🔥 非generic模拟器：只需连接ADB，不需要启动模拟器进程
-    if emu_type != "generic":
-        adb_exe = _get_adb_for_emulator()
-        emu_name = EMULATOR_TYPE_MAP.get(emu_type, {}).get("name", emu_type)
-        try:
-            subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
-            # 先断开旧连接
-            subprocess.run([adb_exe, "disconnect", f"127.0.0.1:{_emulator_adb_port}"], capture_output=True, text=True, timeout=5)
-            # 连接
-            r = subprocess.run([adb_exe, "connect", f"127.0.0.1:{_emulator_adb_port}"], capture_output=True, text=True, timeout=10)
-            conn_output = r.stdout.strip() + r.stderr.strip()
-            if "connected" in conn_output.lower() or "already" in conn_output.lower():
-                _sync_adb_to_emulator_port()
-                add_system_log("emulator", f"{emu_name}已连接", f"端口: {_emulator_adb_port}")
-                return jsonify({"status": "connected", "port": _emulator_adb_port, "message": f"{emu_name}已连接", "type": emu_type})
-            else:
-                # 尝试扫描其他端口
-                for port in [5555, 7555, 21503, 62001, 62025]:
-                    if port == _emulator_adb_port:
-                        continue
-                    r2 = subprocess.run([adb_exe, "connect", f"127.0.0.1:{port}"], capture_output=True, text=True, timeout=3)
-                    if "connected" in (r2.stdout + r2.stderr).lower():
-                        _emulator_adb_port = port
-                        _sync_adb_to_emulator_port()
-                        add_system_log("emulator", f"{emu_name}已连接(备用端口)", f"端口: {port}")
-                        return jsonify({"status": "connected", "port": port, "message": f"{emu_name}已连接(端口{port})", "type": emu_type})
-                return jsonify({"status": "error", "error": f"无法连接到{emu_name} (端口{_emulator_adb_port}): {conn_output[:200]}"})
-        except Exception as e:
-            return jsonify({"status": "error", "error": str(e)[:200]})
-
-    # ── 以下是本地模拟器 (generic) 的启动逻辑 ──
-
-    # 🔥 步骤1: 检查是否有残留的模拟器进程（不依赖ADB，直接扫描进程）
-    if _has_emulator_process():
-        # 有残留进程，先尝试通过ADB连接
-        if _is_emulator_running():
-            # ADB可连接，直接复用
-            _reconnect_emulator()
-            socketio.emit("emu_start_complete", {"success": True, "port": _emulator_adb_port, "message": "模拟器已在运行，已重新连接"})
-            return jsonify({"status": "already_running", "message": "模拟器已在运行，已重新连接"})
-        else:
-            # 有进程但ADB未连接（可能正在启动或卡死），先清理再重新启动
-            logger.info("检测到残留模拟器进程但ADB未连接，清理后重新启动")
-            socketio.emit("emu_start_progress", {"step": "检测到残留模拟器进程，正在清理...", "progress": 5})
-            _kill_stale_emulators()
-            time.sleep(2)
-            # 清理ADB残留连接
+        # 🔥 非generic模拟器：只需连接ADB，不需要启动模拟器进程
+        if emu_type != "generic":
             adb_exe = _get_adb_for_emulator()
+            emu_name = EMULATOR_TYPE_MAP.get(emu_type, {}).get("name", emu_type)
             try:
-                subprocess.run([adb_exe, "disconnect", f"localhost:{_emulator_adb_port}"], capture_output=True, text=True, timeout=5)
+                subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
+                # 先断开旧连接
                 subprocess.run([adb_exe, "disconnect", f"127.0.0.1:{_emulator_adb_port}"], capture_output=True, text=True, timeout=5)
-            except:
-                pass
+                # 连接
+                r = subprocess.run([adb_exe, "connect", f"127.0.0.1:{_emulator_adb_port}"], capture_output=True, text=True, timeout=10)
+                conn_output = r.stdout.strip() + r.stderr.strip()
+                if "connected" in conn_output.lower() or "already" in conn_output.lower():
+                    _sync_adb_to_emulator_port()
+                    add_system_log("emulator", f"{emu_name}已连接", f"端口: {_emulator_adb_port}")
+                    return jsonify({"status": "connected", "port": _emulator_adb_port, "message": f"{emu_name}已连接", "type": emu_type})
+                else:
+                    # 尝试扫描其他端口
+                    for port in [5555, 7555, 21503, 62001, 62025]:
+                        if port == _emulator_adb_port:
+                            continue
+                        r2 = subprocess.run([adb_exe, "connect", f"127.0.0.1:{port}"], capture_output=True, text=True, timeout=3)
+                        if "connected" in (r2.stdout + r2.stderr).lower():
+                            _emulator_adb_port = port
+                            _sync_adb_to_emulator_port()
+                            add_system_log("emulator", f"{emu_name}已连接(备用端口)", f"端口: {port}")
+                            return jsonify({"status": "connected", "port": port, "message": f"{emu_name}已连接(端口{port})", "type": emu_type})
+                    return jsonify({"status": "error", "error": f"无法连接到{emu_name} (端口{_emulator_adb_port}): {conn_output[:200]}"})
+            except Exception as e:
+                return jsonify({"status": "error", "error": str(e)[:200]})
 
-    if _emulator_process and _emulator_process.poll() is None:
-        return jsonify({"status": "already_running", "message": "模拟器已在运行"})
+        # ── 以下是本地模拟器 (generic) 的启动逻辑 ──
 
-    def start_worker():
-        global _emulator_process
-        logger.info("模拟器启动工作线程开始运行")
-        try:
-            emu_exe = _get_emulator_exe()
-            logger.info(f"模拟器路径: {emu_exe}")
-            if not Path(emu_exe).exists():
-                socketio.emit("emu_start_error", {"error": "模拟器未安装，请先安装"})
-                logger.error(f"模拟器未安装: {emu_exe}")
-                return
+        # 🔥 步骤1: 检查是否有残留的模拟器进程（不依赖ADB，直接扫描进程）
+        if _has_emulator_process():
+            if _is_emulator_running():
+                _reconnect_emulator()
+                socketio.emit("emu_start_complete", {"success": True, "port": _emulator_adb_port, "message": "模拟器已在运行，已重新连接"})
+                return jsonify({"status": "already_running", "message": "模拟器已在运行，已重新连接"})
+            else:
+                logger.info("检测到残留模拟器进程但ADB未连接，清理后重新启动")
+                socketio.emit("emu_start_progress", {"step": "检测到残留模拟器进程，正在清理...", "progress": 5})
+                _kill_stale_emulators()
+                time.sleep(2)
+                adb_exe = _get_adb_for_emulator()
+                try:
+                    subprocess.run([adb_exe, "disconnect", f"localhost:{_emulator_adb_port}"], capture_output=True, text=True, timeout=5)
+                    subprocess.run([adb_exe, "disconnect", f"127.0.0.1:{_emulator_adb_port}"], capture_output=True, text=True, timeout=5)
+                except:
+                    pass
 
-            # 🔥 设置JAVA_HOME
-            java_home = _set_java_env()
-            if not java_home:
-                socketio.emit("emu_start_progress", {"step": "警告: JAVA_HOME未设置，可能启动失败", "progress": 10})
+        if _emulator_process and _emulator_process.poll() is None:
+            return jsonify({"status": "already_running", "message": "模拟器已在运行"})
 
-            # 🔥 修复AVD配置分辨率
-            _fix_avd_resolution()
+        # 🔥 验证模拟器是否已安装（提前返回明确错误，避免HTML错误页）
+        emu_exe = _get_emulator_exe()
+        if not Path(emu_exe).exists():
+            return jsonify({"status": "error", "error": "模拟器未安装，请先点击'一键安装并启动'", "suggestion": "需要安装Android SDK模拟器"}), 400
 
-            socketio.emit("emu_start_progress", {"step": "启动模拟器...", "progress": 20})
-            # 🔥 优先使用 host GPU 模式，swiftshader_indirect 在某些系统上可能导致模拟器卡死
-            cmd = [
-                emu_exe, "-avd", AVD_NAME,
-                "-no-window", "-no-audio",
-                "-gpu", "host",
-                "-netdelay", "none", "-netspeed", "full",
-                "-port", str(_emulator_adb_port),
-            ]
-            _emulator_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            logger.info(f"模拟器进程已启动: PID={_emulator_process.pid}")
+        def start_worker():
+            global _emulator_process
+            logger.info("模拟器启动工作线程开始运行")
+            try:
+                # 🔥 设置JAVA_HOME
+                java_home = _set_java_env()
+                if not java_home:
+                    socketio.emit("emu_start_progress", {"step": "警告: JAVA_HOME未设置，可能启动失败", "progress": 10})
 
-            socketio.emit("emu_start_progress", {"step": "等待模拟器启动（首次启动约需60-90秒）...", "progress": 40})
-            # 等待启动
-            adb_exe = _get_adb_for_emulator()
-            subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
+                # 🔥 修复AVD配置分辨率
+                _fix_avd_resolution()
 
-            waited = 0
-            max_wait = 180  # 增加到180秒，首次启动可能较慢
-            found = False
-            while waited < max_wait:
-                time.sleep(3)
-                waited += 3
-                # 检查进程是否还活着
-                if _emulator_process and _emulator_process.poll() is not None:
-                    socketio.emit("emu_start_error", {"error": f"模拟器进程异常退出 (exit code: {_emulator_process.returncode})"})
-                    add_system_log("emulator", "模拟器进程异常退出", f"exit code: {_emulator_process.returncode}")
+                socketio.emit("emu_start_progress", {"step": "启动模拟器...", "progress": 20})
+                # 🔥 使用配置的GPU模式
+                gpu_mode = _emulator_gpu_config.get("gpu_mode", "host")
+                gl_ver = _emulator_gpu_config.get("gl_version", "3.0")
+                cmd = [
+                    emu_exe, "-avd", AVD_NAME,
+                    "-no-window", "-no-audio",
+                    "-gpu", gpu_mode,
+                    "-netdelay", "none", "-netspeed", "full",
+                    "-port", str(_emulator_adb_port),
+                ]
+                # 🔥 根据GPU模式添加额外参数
+                if gpu_mode == "host":
+                    cmd.extend(["-feature", "Vulkan"])
+                elif gpu_mode == "swiftshader_indirect":
+                    cmd.extend(["-feature", "GLESDynamicVersion"])
+                _emulator_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                logger.info(f"模拟器进程已启动: PID={_emulator_process.pid}")
+
+                socketio.emit("emu_start_progress", {"step": "等待模拟器启动（首次启动约需60-90秒）...", "progress": 40})
+                adb_exe = _get_adb_for_emulator()
+                subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=5)
+
+                waited = 0
+                max_wait = 180
+                found = False
+                while waited < max_wait:
+                    time.sleep(3)
+                    waited += 3
+                    if _emulator_process and _emulator_process.poll() is not None:
+                        socketio.emit("emu_start_error", {"error": f"模拟器进程异常退出 (exit code: {_emulator_process.returncode})"})
+                        add_system_log("emulator", "模拟器进程异常退出", f"exit code: {_emulator_process.returncode}")
+                        return
+
+                    r = subprocess.run([adb_exe, "devices"], capture_output=True, text=True, timeout=5)
+                    port = str(_emulator_adb_port)
+                    for line in r.stdout.strip().split("\n"):
+                        if "\tdevice" in line and (f"localhost:{port}" in line or f"emulator-{port}" in line):
+                            found = True
+                            break
+                        elif "device" in line and "emulator-" in line:
+                            found = True
+                            break
+                    if found:
+                        break
+                    socketio.emit("emu_start_progress", {"step": f"等待启动... {waited}s / {max_wait}s", "progress": 40 + min(waited, 40)})
+
+                if not found:
+                    socketio.emit("emu_start_error", {"error": f"模拟器启动超时（{max_wait}秒），请检查AVD配置或系统资源"})
+                    add_system_log("emulator", "模拟器启动超时", f"等待 {max_wait} 秒后ADB仍未连接")
                     return
 
-                r = subprocess.run([adb_exe, "devices"], capture_output=True, text=True, timeout=5)
-                port = str(_emulator_adb_port)
-                for line in r.stdout.strip().split("\n"):
-                    if "\tdevice" in line and (f"localhost:{port}" in line or f"emulator-{port}" in line):
-                        found = True
-                        break
-                    elif "device" in line and "emulator-" in line:
-                        found = True
-                        break
-                if found:
-                    break
-                socketio.emit("emu_start_progress", {"step": f"等待启动... {waited}s / {max_wait}s", "progress": 40 + min(waited, 40)})
+                socketio.emit("emu_start_progress", {"step": "连接ADB并配置屏幕", "progress": 85})
+                subprocess.run([adb_exe, "connect", f"localhost:{_emulator_adb_port}"], capture_output=True, text=True, timeout=10)
+                time.sleep(3)
+                subprocess.run([adb_exe, "-s", f"emulator-{_emulator_adb_port}", "shell", "wm", "size", AVD_CONFIG["resolution"]], capture_output=True, text=True, timeout=10)
+                subprocess.run([adb_exe, "-s", f"emulator-{_emulator_adb_port}", "shell", "wm", "density", str(AVD_CONFIG["density"])], capture_output=True, text=True, timeout=10)
 
-            if not found:
-                socketio.emit("emu_start_error", {"error": f"模拟器启动超时（{max_wait}秒），请检查AVD配置或系统资源"})
-                add_system_log("emulator", "模拟器启动超时", f"等待 {max_wait} 秒后ADB仍未连接")
-                return
+                socketio.emit("emu_start_complete", {"success": True, "port": _emulator_adb_port, "message": "模拟器启动完成"})
+                add_system_log("emulator", "模拟器启动完成", f"端口: {_emulator_adb_port}")
+                _sync_adb_to_emulator_port()
 
-            socketio.emit("emu_start_progress", {"step": "连接ADB并配置屏幕", "progress": 85})
-            subprocess.run([adb_exe, "connect", f"localhost:{_emulator_adb_port}"], capture_output=True, text=True, timeout=10)
+            except Exception as e:
+                socketio.emit("emu_start_error", {"error": str(e)[:300]})
+                add_system_log("emulator", "模拟器启动失败", str(e)[:200])
 
-            # 等待设备完全就绪
-            time.sleep(3)
-            # 设置屏幕属性
-            subprocess.run([adb_exe, "-s", f"emulator-{_emulator_adb_port}", "shell", "wm", "size", AVD_CONFIG["resolution"]], capture_output=True, text=True, timeout=10)
-            subprocess.run([adb_exe, "-s", f"emulator-{_emulator_adb_port}", "shell", "wm", "density", str(AVD_CONFIG["density"])], capture_output=True, text=True, timeout=10)
-
-            socketio.emit("emu_start_complete", {"success": True, "port": _emulator_adb_port, "message": "模拟器启动完成"})
-            add_system_log("emulator", "模拟器启动完成", f"端口: {_emulator_adb_port}")
-
-            # 🔥 自动同步ADB配置到模拟器端口
-            _sync_adb_to_emulator_port()
-
-        except Exception as e:
-            socketio.emit("emu_start_error", {"error": str(e)[:300]})
-            add_system_log("emulator", "模拟器启动失败", str(e)[:200])
-
-    threading.Thread(target=start_worker, daemon=True).start()
-    return jsonify({"status": "starting"})
+        threading.Thread(target=start_worker, daemon=True).start()
+        return jsonify({"status": "starting"})
+    
+    except Exception as e:
+        logger.error(f"api_emulator_start 异常: {e}", exc_info=True)
+        return jsonify({"status": "error", "error": f"启动失败: {str(e)[:200]}", "suggestion": "请检查模拟器安装状态"}), 500
 
 
 @app.route("/api/emulator/stop", methods=["POST"])
@@ -10093,6 +10171,56 @@ def api_emulator_screenshot():
 
 # ── 模拟器分辨率配置（修复游戏显示不全问题） ──
 _emulator_resolution = {"width": 1920, "height": 1080, "dpi": 420}
+_emulator_gpu_config = {"gpu_mode": "host", "renderer": "opengl", "gl_version": "3.0"}
+
+@app.route("/api/emulator/gpu", methods=["GET", "POST"])
+def api_emulator_gpu():
+    """GPU渲染配置（修复APK游戏兼容性问题）"""
+    global _emulator_gpu_config
+    if request.method == "POST":
+        data = request.get_json() or {}
+        gpu_mode = data.get("gpu_mode", _emulator_gpu_config["gpu_mode"])
+        renderer = data.get("renderer", _emulator_gpu_config["renderer"])
+        gl_version = data.get("gl_version", _emulator_gpu_config["gl_version"])
+        
+        _emulator_gpu_config = {"gpu_mode": gpu_mode, "renderer": renderer, "gl_version": gl_version}
+        
+        # 尝试通过ADB设置OpenGL渲染器
+        try:
+            adb_exe = _get_adb_for_emulator()
+            dev_id = f"emulator-{_emulator_adb_port}" if _emulator_type == "generic" else f"127.0.0.1:{_emulator_adb_port}"
+            # 设置OpenGL ES版本
+            subprocess.run([adb_exe, "-s", dev_id, "shell", "setprop", "ro.opengles.version", str(int(float(gl_version) * 65536))],
+                         capture_output=True, text=True, timeout=5)
+            # 设置渲染器
+            if renderer == "skia":
+                subprocess.run([adb_exe, "-s", dev_id, "shell", "setprop", "debug.hwui.renderer", "skiagl"],
+                             capture_output=True, text=True, timeout=5)
+            add_system_log("emulator", f"GPU配置已设置", f"gpu={gpu_mode}, renderer={renderer}, GLES={gl_version}")
+        except Exception as e:
+            logger.warning(f"ADB GPU配置失败: {e}")
+        
+        return jsonify({"status": "ok", "gpu": _emulator_gpu_config})
+    
+    return jsonify({
+        "gpu": _emulator_gpu_config,
+        "gpu_modes": [
+            {"name": "host (推荐)", "value": "host", "desc": "使用宿主机GPU，性能最佳，兼容性最好"},
+            {"name": "swiftshader_indirect", "value": "swiftshader_indirect", "desc": "软件渲染间接模式，兼容性较好"},
+            {"name": "swiftshader", "value": "swiftshader", "desc": "纯软件渲染，兼容性最高但性能差"},
+            {"name": "angle_indirect", "value": "angle_indirect", "desc": "ANGLE间接模式（DirectX转OpenGL）"},
+            {"name": "guest", "value": "guest", "desc": "客户机GPU渲染"},
+        ],
+        "renderers": [
+            {"name": "OpenGL (默认)", "value": "opengl", "desc": "标准OpenGL ES渲染"},
+            {"name": "Skia", "value": "skia", "desc": "Skia渲染引擎，部分游戏兼容性更好"},
+        ],
+        "gl_versions": [
+            {"name": "OpenGL ES 2.0", "value": "2.0"},
+            {"name": "OpenGL ES 3.0 (推荐)", "value": "3.0"},
+            {"name": "OpenGL ES 3.1", "value": "3.1"},
+        ],
+    })
 
 @app.route("/api/emulator/resolution", methods=["GET", "POST"])
 def api_emulator_resolution():
