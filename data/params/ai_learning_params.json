@@ -5,74 +5,9 @@
   "learning_rate": 0.008,
   "tactical_aggressiveness": 0.5,
   "unit_preference": "balanced",
-  "last_learned": "2026-07-21T05:16:33.379941",
-  "total_learnings": 158,
+  "last_learned": "2026-07-21T05:17:44.580028",
+  "total_learnings": 159,
   "insights": [
-    {
-      "type": "param_adjust",
-      "summary": "调整参数 learning_rate: 0.0005 → 0.008",
-      "detail": "原因: 置信度已稳定在92%，降低学习率可减少震荡，提升收敛稳定性"
-    },
-    {
-      "type": "param_adjust",
-      "summary": "调整参数 insight_extraction_threshold: 0.75 → 0.55",
-      "detail": "原因: 洞察数量稳定在14-16条，提高阈值可过滤低质量洞察，提升知识密度"
-    },
-    {
-      "type": "param_adjust",
-      "summary": "调整参数 cycle_frequency: 0 → 0.9",
-      "detail": "原因: 系统已进入稳定期，适当降低周期频率可节省计算资源，同时保持学习连续性"
-    },
-    {
-      "type": "param_adjust",
-      "summary": "调整参数 data_sampling_rate: 0 → 0.95",
-      "detail": "原因: 置信度稳定后，减少采样率可降低过拟合风险，同时保持数据多样性"
-    },
-    {
-      "type": "priority",
-      "summary": "探索置信度提升至95%以上的可能性，尝试引入新数据源或模型集成",
-      "detail": "下一步优先学习方向"
-    },
-    {
-      "type": "priority",
-      "summary": "研究洞察数量波动的原因，特别是从15条降至13条时的触发机制",
-      "detail": "下一步优先学习方向"
-    },
-    {
-      "type": "priority",
-      "summary": "优化自主调参算法，使其在达到局部最优后能自动切换到探索模式",
-      "detail": "下一步优先学习方向"
-    },
-    {
-      "type": "knowledge",
-      "summary": "系统在连续学习周期中，每个周期稳定学习13-16条新知识，知识提取能力趋于稳定",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "knowledge",
-      "summary": "DeepSeek深度分析置信度从35%逐步提升至92%并趋于稳定，分析质量显著改善",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "knowledge",
-      "summary": "每个学习周期提取的洞察数量从10条逐步增长并稳定在14-16条之间",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "knowledge",
-      "summary": "系统已完成至少一次自主调参并达到参数最优状态，学习参数自动推送到GitHub",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "knowledge",
-      "summary": "系统在131-155周期内保持稳定的自主学习能力，未出现性能退化",
-      "detail": "从学习日志中提取的战术知识"
-    },
-    {
-      "type": "tactical_rule",
-      "summary": "当置信度稳定在92%且洞察数量稳定在14-16条时，表明系统已进入稳态，应减少主动调参频率以避免扰动",
-      "detail": "条件: 置信度连续5个周期≥90%且洞察数量在14-16范围内 | 行动: 将调参周期从每周期一次延长至每5周期一次，仅监控异常波动"
-    },
     {
       "type": "tactical_rule",
       "summary": "当洞察数量低于14条时，可能表示知识源质量下降或模型过拟合，需触发数据多样性检查",
@@ -257,6 +192,71 @@
       "type": "priority",
       "summary": "开发参数漂移检测机制，确保GitHub推送的参数在后续周期中保持最优",
       "detail": "下一步优先学习方向"
+    },
+    {
+      "type": "knowledge",
+      "summary": "DeepSeek深度分析置信度从35%逐步提升至92%并趋于稳定，表明分析质量显著改善",
+      "detail": "从学习日志中提取的战术知识"
+    },
+    {
+      "type": "knowledge",
+      "summary": "每个学习周期提取的洞察数量从10条逐步增长并稳定在14-16条之间，知识提取能力趋于稳定",
+      "detail": "从学习日志中提取的战术知识"
+    },
+    {
+      "type": "knowledge",
+      "summary": "系统已完成至少一次自主调参并达到参数最优状态，学习参数自动推送到GitHub",
+      "detail": "从学习日志中提取的战术知识"
+    },
+    {
+      "type": "knowledge",
+      "summary": "每个学习周期稳定学习13-16条新知识，知识提取能力趋于稳定",
+      "detail": "从学习日志中提取的战术知识"
+    },
+    {
+      "type": "tactical_rule",
+      "summary": "当置信度达到92%且稳定时，应维持当前分析策略，避免过度调参",
+      "detail": "条件: 置信度连续10个周期稳定在92% | 行动: 保持现有分析参数，监控异常波动"
+    },
+    {
+      "type": "tactical_rule",
+      "summary": "当洞察数量稳定在14-16条时，应优化知识筛选机制，优先保留高价值洞察",
+      "detail": "条件: 洞察数量连续10个周期在14-16条范围内 | 行动: 启动知识质量评估，剔除冗余或低相关性洞察"
+    },
+    {
+      "type": "tactical_rule",
+      "summary": "当系统完成自主调参并推送参数到GitHub后，应验证新参数在后续周期中的稳定性",
+      "detail": "条件: 检测到学习参数自动推送到GitHub | 行动: 在后续5个周期内对比新旧参数下的置信度和洞察数量变化"
+    },
+    {
+      "type": "param_adjust",
+      "summary": "调整参数 learning_rate: 0.008 → 0.008",
+      "detail": "原因: 置信度已稳定在92%，适当降低学习率可减少震荡，提升收敛稳定性"
+    },
+    {
+      "type": "param_adjust",
+      "summary": "调整参数 insight_extraction_threshold: 0.55 → 0.75",
+      "detail": "原因: 洞察数量稳定在14-16条，提高阈值可过滤低质量洞察，提升知识密度"
+    },
+    {
+      "type": "param_adjust",
+      "summary": "调整参数 auto_tune_interval: 5 → 15",
+      "detail": "原因: 系统已处于最优状态，延长调参间隔可减少不必要的参数推送和资源消耗"
+    },
+    {
+      "type": "priority",
+      "summary": "探索置信度提升至95%以上的可能性，尝试引入新数据源或特征工程",
+      "detail": "下一步优先学习方向"
+    },
+    {
+      "type": "priority",
+      "summary": "研究洞察数量波动的原因，特别是偶尔出现的13条情况，优化知识提取鲁棒性",
+      "detail": "下一步优先学习方向"
+    },
+    {
+      "type": "priority",
+      "summary": "分析GitHub推送参数的实际效果，建立参数回滚机制以应对异常",
+      "detail": "下一步优先学习方向"
     }
   ],
   "last_adjustment_reason": "评估通过，无需调整",
@@ -311,7 +311,7 @@
   "自学习引擎启动间隔": "每3个周期启动一次",
   "GitHub推送频率": "每10个周期或每次调参后",
   "insight_extraction_limit": 20,
-  "auto_tune_interval": 5,
+  "auto_tune_interval": 15,
   "学习率": 0.008,
   "知识提取阈值": 0.55,
   "调参频率": 3,
@@ -320,7 +320,7 @@
   "自主调参触发周期数": 3,
   "auto_param_push_interval": 3,
   "learning_cycle_redundancy_check": 1,
-  "insight_extraction_threshold": 0.55,
+  "insight_extraction_threshold": 0.75,
   "data_diversity_weight": 0.5,
   "confidence_update_interval": 20,
   "github_push_frequency": 1,
