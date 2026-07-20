@@ -1,0 +1,149 @@
+bytetrack:
+  frame_rate: 30
+  lost_track_buffer: 30
+  minimum_matching_threshold: 0.8
+  track_activation_threshold: 0.5
+debug:
+  save_intermediate_frames: false
+  show_detection_window: false
+  step_by_step: false
+device:
+  active: mumu
+  adb_command_timeout: 5
+  adb_connect_timeout: 10
+  adb_retry_count: 3
+  mumu:
+    adb_host: 127.0.0.1
+    adb_port: 7555
+  phone:
+    adb_host: 192.168.1.100
+    adb_port: 5555
+  use_wireless: true
+game:
+  activity_name: com.windowsgames.firefight.MyGame
+  modern_mod: true
+  package_name: com.windowsgames.firefightbw
+  # 实际是横屏(landscape) - 1920x1080
+  # ADB screencap 输出方向由游戏内部 SDL2 决定
+  screen_height: 1080
+  screen_width: 1920
+game_loop:
+  cycle_interval: 0.5
+  game_over_timeout: 600
+  max_cycles: 200
+  pause_button_x: 0.95
+  pause_button_y: 0.05
+llm:
+  api_base: https://api.deepseek.com/v1
+  api_key: sk-394781b26d46426598d6974f28ce2e5c
+  fallback_api_base: https://api.deepseek.com/v1
+  fallback_api_key: sk-394781b26d46426598d6974f28ce2e5c
+  fallback_model: deepseek-chat
+  fallback_provider: deepseek
+  max_tokens: 384           # 精简输出(多向指令需更多token)
+  model: deepseek-chat
+  provider: deepseek
+  retry_count: 1            # 减少重试(2→1)
+  temperature: 0.3
+  timeout: 8                # 缩短超时(10→8s)
+
+# ── 实战学习系统 ──
+learning:
+  enabled: true                    # 是否启用边打边学
+  experience_top_k: 3              # 每轮检索几条相似经验
+  min_outcome_score: 5.0           # 最低分数阈值 (低于此分不纳入检索)
+  compress_interval: 15            # 每N轮自动提炼战术规则
+  max_rules: 10                    # 最多保留几条战术规则
+  outcome_delay_seconds: 0         # 效果评估延迟 (0=下一轮截图时评估, ~3s反应时间)
+logging:
+  level: INFO
+  max_session_files: 50
+  save_replay: true
+  save_screenshots: true
+  session_dir: sessions
+ocr:
+  det_db_thresh: 0.3
+  lang: en
+  rec_batch_num: 6
+  ui_regions:
+    minimap:
+    - 0.85
+    - 0.75
+    - 1.0
+    - 1.0
+    resource_bar:
+    - 0.05
+    - 0.02
+    - 0.95
+    - 0.08
+    unit_info:
+    - 0.02
+    - 0.08
+    - 0.3
+    - 0.25
+  use_angle_cls: true
+scrcpy:
+  bitrate: 8000000
+  crop: null
+  max_fps: 15
+  max_height: 720
+  max_width: 1280
+  no_control: true
+  timeout: 5
+team_detection:
+  method: color                        # color | position (颜色检测优先)
+  # 友军蓝色标记 -- 来自 mod.txt <friend>#58A5F3</friend>
+  # OpenCV HSV: #58A5F3 (BGR=243,165,88) -> H≈105, S≈165, V≈243
+  ally_color:
+    hex: "#58A5F3"
+    hsv_low: [95, 100, 100]
+    hsv_high: [115, 255, 255]
+  # 敌军红色标记 -- 来自 mod.txt <enemy>#FD8177</enemy>
+  # OpenCV HSV: #FD8177 (BGR=119,129,253) -> H≈5
+  enemy_color:
+    hex: "#FD8177"
+    hsv_low: [0, 100, 100]            # H:0-10° (红色低区)
+    hsv_high: [10, 255, 255]
+  enemy_color2:                        # 红色在HSV中跨越0°/180°边界
+    hsv_low: [170, 100, 100]
+    hsv_high: [180, 255, 255]
+  color_roi_ratio: 0.3                # 检测框上部30%区域用于颜色采样
+  color_match_threshold: 0.15         # 颜色匹配的最低像素比例
+  # 位置启发式 (method=position 时的回退方案)
+  ally_region:
+  - 0.0
+  - 0.55
+  - 1.0
+  - 1.0
+  enemy_region:
+  - 0.0
+  - 0.0
+  - 1.0
+  - 0.45
+mumu_manager:
+  exe_path: "D:\\MuMuPlayer\\nx_main\\MuMuManager.exe"
+  verbosity: 0
+  timeout: 5.0
+
+# 触控校准 (实测: 圆圈在单位中心右下方 dx=30, dy=61)
+touch_calibration:
+  circle_offset_x: 30      # 圆圈X偏移 (单位中心→右)
+  circle_offset_y: 61      # 圆圈Y偏移 (单位中心→下)
+  cluster_eps: 50          # 距离聚类阈值(同班组士兵间距)
+  select_delay: 0.5        # 点击选中后等待注册时间(秒)
+  max_commands_per_cycle: 8  # 每轮最多指令数
+mumu_ipc:
+  dll_path: "D:\\MuMuPlayer\\nx_device\\12.0\\shell\\sdk\\external_renderer_ipc.dll"
+  install_path: "D:\\MuMuPlayer"
+  instance_index: 0
+  app_index: 0
+yolo:
+  classes:
+    0: tank
+    1: infantry
+  confidence_threshold: 0.25
+  device: cpu
+  fallback_model_path: models/best.pt
+  image_size: 640
+  iou_threshold: 0.45
+  model_path: models/best.pt
