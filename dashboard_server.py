@@ -5137,42 +5137,7 @@ def _run_ai_loop():
     from src.state.manager import StateManager
     from src.decision.commander import TacticalCommander
     from src.decision.parser import CommandParser
-    
-    # 🔥 立即patch commander (实例创建之前!)
-    _orig_call_llm = TacticalCommander._call_llm
-    def _patched_call_llm(self, game_state, use_fallback=False):
-        try:
-            import requests as _req
-            api_key = self.fallback_api_key if use_fallback else self.api_key
-            api_base = self.fallback_api_base if use_fallback else self.api_base
-            model = self.fallback_model if use_fallback else self.model
-            if not api_key or "YOUR_" in api_key:
-                return _orig_call_llm(self, game_state, use_fallback)
-            
-            payload = {
-                "model": model, "messages": [
-                    {"role": "system", "content": (self._system_prompt or "")[:3000]},
-                    {"role": "user", "content": self._build_user_message(game_state.to_llm_text())[:5000]}
-                ], "max_tokens": self.max_tokens or 384, "temperature": self.temperature or 0.3}
-            
-            resp = _req.post(f"{api_base.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload, timeout=(8, self.timeout + 15))
-            if resp.status_code == 200:
-                raw = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-                if raw: return self._parse_response(raw)
-            resp2 = _req.post(f"{api_base.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload, timeout=(5, self.timeout + 10))
-            if resp2.status_code == 200:
-                raw = resp2.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-                if raw: return self._parse_response(raw)
-        except Exception as e:
-            logger.warning(f"LLM直连失败: {e}, 回退原始方法")
-            return _orig_call_llm(self, game_state, use_fallback)
-        return _orig_call_llm(self, game_state, use_fallback)
-    TacticalCommander._call_llm = _patched_call_llm
-    logger.info("🔥 Commander._call_llm 已patch为requests直连")
+    # commander.py已直接修复(requests直连), 不再需要patch
     from src.execution.executor import CommandExecutor
     from src.learning.battle_memory import BattleMemory
     from src.learning.outcome_eval import OutcomeEvaluator
