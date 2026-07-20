@@ -5,14 +5,9 @@
   "learning_rate": 0.01,
   "tactical_aggressiveness": 0.5,
   "unit_preference": "balanced",
-  "last_learned": "2026-07-20T22:45:42.336891",
-  "total_learnings": 8,
+  "last_learned": "2026-07-20T22:47:18.238173",
+  "total_learnings": 9,
   "insights": [
-    {
-      "type": "priority",
-      "summary": "收集并标注用户手动指挥的战术样本（如步兵推进、坦克待命的场景），扩充初始训练数据集",
-      "detail": "下一步优先学习方向"
-    },
     {
       "type": "priority",
       "summary": "建立基础战术模式库，优先学习覆盖不同兵力对比下的进攻/防守策略",
@@ -258,6 +253,12 @@
       "type": "priority",
       "summary": "探索用户指令与AI自动决策的混合模式，学习何时采纳用户建议、何时自主决策",
       "detail": "下一步优先学习方向"
+    },
+    {
+      "type": "success_pattern",
+      "summary": "最近 7 次成功操作",
+      "detail": "成功操作分布: {'combat': 9, 'predictor': 3, 'command': 2, 'self_learn': 24}",
+      "suggestion": "保持当前良好状态"
     }
   ],
   "初始探索率": 0.8,
