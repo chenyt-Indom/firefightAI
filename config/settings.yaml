@@ -40,12 +40,12 @@ llm:
   fallback_api_key: sk-394781b26d46426598d6974f28ce2e5c
   fallback_model: deepseek-chat
   fallback_provider: deepseek
-  max_tokens: 384           # 精简输出(多向指令需更多token)
+  max_tokens: 384
   model: deepseek-chat
   provider: deepseek
-  retry_count: 1            # 减少重试(2→1)
+  retry_count: 2
   temperature: 0.3
-  timeout: 8                # 缩短超时(10→8s)
+  timeout: 15
 
 # ── 实战学习系统 ──
 learning:
