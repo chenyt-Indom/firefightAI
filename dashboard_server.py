@@ -5472,47 +5472,59 @@ def _apply_patches():
     gc_mod.GameController._fast_decide = _patched_fast_decide
     
     # 🔥 CRITICAL: patch commander._call_llm to use requests (bypass Windows DLL block)
-    _orig_call_llm = cmd_mod.TacticalCommander._call_llm
     def _patched_call_llm(self, game_state, use_fallback=False):
-        import requests as req_lib
-        cfg = load_config()
-        llm_cfg = cfg.get("llm", {})
-        api_key = self.fallback_api_key if use_fallback else self.api_key
-        api_base = self.fallback_api_base if use_fallback else self.api_base
-        model = self.fallback_model if use_fallback else self.model
-        
-        if not api_key or api_key == "YOUR_DEEPSEEK_API_KEY" or api_key == "YOUR_GLM_API_KEY":
-            return None
-        
-        state_text = game_state.to_llm_text()
-        user_message = self._build_user_message(state_text)
-        system_content = self._system_prompt
-        if self._tactics_rules:
-            system_content += self._tactics_rules
-        
-        for attempt in range(1, self.retry_count + 2):
-            try:
-                resp = req_lib.post(
-                    f"{api_base}/chat/completions",
+        try:
+            import requests as _req
+            api_key = self.fallback_api_key if use_fallback else self.api_key
+            api_base = self.fallback_api_base if use_fallback else self.api_base
+            model = self.fallback_model if use_fallback else self.model
+            
+            if not api_key or "YOUR_" in api_key:
+                logger.error(f"API Key未配置 ({'fallback' if use_fallback else 'primary'})")
+                return None
+            
+            state_text = game_state.to_llm_text()
+            user_message = self._build_user_message(state_text)
+            system_content = (self._system_prompt or "")[:3000]
+            
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": user_message[:5000]}
+                ],
+                "max_tokens": self.max_tokens or 384,
+                "temperature": self.temperature or 0.3,
+            }
+            
+            resp = _req.post(
+                f"{api_base.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload, timeout=(8, self.timeout + 15)
+            )
+            
+            if resp.status_code != 200:
+                logger.warning(f"LLM API返回{resp.status_code}: {resp.text[:200]}")
+                if use_fallback:
+                    return None
+                # retry once more
+                resp = _req.post(
+                    f"{api_base.rstrip('/')}/chat/completions",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                    json={"model": model, "messages": [{"role": "system", "content": system_content[:4000]}, {"role": "user", "content": user_message[:6000]}], "max_tokens": self.max_tokens, "temperature": self.temperature},
-                    timeout=(5, self.timeout + 10)
+                    json=payload, timeout=(5, self.timeout + 10)
                 )
                 if resp.status_code != 200:
-                    if attempt < self.retry_count + 1:
-                        continue
                     return None
-                raw_text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-                if not raw_text:
-                    continue
-                llm_response = self._parse_response(raw_text)
-                if llm_response:
-                    return llm_response
-            except Exception:
-                if attempt < self.retry_count + 1:
-                    continue
-        return None
+            
+            raw = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+            if not raw:
+                return None
+            return self._parse_response(raw)
+        except Exception as e:
+            logger.error(f"LLM调用异常: {e}")
+            return None
     cmd_mod.TacticalCommander._call_llm = _patched_call_llm
+    logger.info("🔥 Commander._call_llm已patch为requests直连模式")
     
     _orig_fe = gc_mod.GameController._fast_execute
     def _patched_fe(self, commands, state):
