@@ -1505,21 +1505,25 @@ def on_ai_chat(data: dict):
 
     is_correction = data.get("is_correction", False)
     correction_type = data.get("correction_type", "")
+    
+    # 🔥 是否附带实时战场截图
+    screenshot_b64 = data.get("screenshot", "")
+    include_vision = data.get("include_vision", False) and bool(screenshot_b64)
+    
+    # 🔥 是否为键鼠操控指令
+    control_action = data.get("control_action", {})  # {type: "tap/swipe/key/type", x, y, key, text}
 
     # 🔥 检测是否为"记录到学习日志"指令
     log_keywords = ["记录到学习日志", "添加到学习日志", "学习日志记录", "记录这条", "记录到日志", "记住这条", "记下这条"]
     is_log_request = any(kw in message for kw in log_keywords)
     
     if is_log_request:
-        # 提取要记录的内容（去掉关键词本身）
         log_content = message
         for kw in log_keywords:
             log_content = log_content.replace(kw, "").strip()
-        # 如果去掉关键词后还有内容，使用剩余内容；否则使用整条消息
         if not log_content:
             log_content = message
         
-        # 根据内容分类
         category = "ai_chat"
         if "战术" in log_content or "策略" in log_content:
             category = "tactics"
@@ -1531,6 +1535,8 @@ def on_ai_chat(data: dict):
             category = "params"
         elif "纠正" in log_content or "修正" in log_content:
             category = "correction"
+        elif "操控" in log_content or "控制" in log_content or "键鼠" in log_content:
+            category = "control"
         
         add_learning_log(category, f"用户记录: {log_content[:100]}", log_content[:300])
         _chat_history.append({"role": "assistant", "content": f"已记录到学习日志 [{category}]: {log_content[:100]}", "time": time.time()})
@@ -1538,7 +1544,18 @@ def on_ai_chat(data: dict):
         socketio.emit("learning_log_update", {"entry": {"time": datetime.now().strftime("%H:%M:%S"), "category": category, "message": f"用户记录: {log_content[:100]}", "detail": log_content[:300]}, "total": len(_learning_log)})
         return
 
-    emit("ai_chat_start", {"message": message})
+    # 🔥 处理键鼠操控指令
+    if control_action and control_action.get("type"):
+        _execute_control_action(control_action, message)
+        return
+
+    # 🔥 检测消息中的键鼠操控指令（自然语言解析）
+    control_result = _parse_control_command(message)
+    if control_result:
+        _execute_control_action(control_result, message)
+        return
+
+    emit("ai_chat_start", {"message": message, "has_vision": include_vision})
 
     def do_chat():
         try:
@@ -1546,26 +1563,55 @@ def on_ai_chat(data: dict):
             llm_cfg = cfg["llm"]
 
             sys_prompt = (
-                "你是 Firefight AI 战术指挥系统的 AI 助手。你可以：\n"
-                "1. 分析战场局势并给出战术建议\n"
-                "2. 解释你的决策逻辑\n"
-                "3. 回答关于游戏机制、单位、战术的问题\n"
-                "4. 帮助指挥官制定作战计划\n"
-                "5. 接受指挥官的行为纠正并调整策略\n\n"
+                "你是 Firefight AI 战术指挥系统的 AI 助手。你具备以下能力：\n"
+                "1. 分析战场截图并给出战术建议（当用户发送截图时）\n"
+                "2. 分析战场局势并给出战术建议\n"
+                "3. 解释你的决策逻辑\n"
+                "4. 回答关于游戏机制、单位、战术的问题\n"
+                "5. 帮助指挥官制定作战计划\n"
+                "6. 接受指挥官的行为纠正并调整策略\n"
+                "7. 指导键鼠操控：当你需要执行具体操作时，用【操控:类型,参数】格式输出\n"
+                "   例如：【操控:tap,500,300】=点击坐标(500,300)\n"
+                "         【操控:swipe,100,200,500,600】=从(100,200)滑动到(500,600)\n"
+                "         【操控:key,back】=按返回键\n"
+                "         【操控:type,输入文字】=输入文字\n\n"
                 "请用中文回答，保持专业、简洁。如果涉及战术决策，请分步骤说明你的思考过程。"
             )
 
             if is_correction:
                 sys_prompt += (
                     "\n\n【重要】指挥官正在纠正你的行为。请仔细分析纠正内容，"
-                    "并说明你将如何调整后续的战术决策。"
+                    "并说明你将如何调整后续的战术决策和操控方式。"
                 )
 
+            # 构建消息列表
             messages = [{"role": "system", "content": sys_prompt}]
+            
+            # 添加历史消息（排除包含截图的消息以节省token）
             for h in _chat_history[-10:]:
-                messages.append({"role": h["role"], "content": h["content"]})
+                if isinstance(h.get("content"), str):
+                    messages.append({"role": h["role"], "content": h["content"]})
 
-            result = _deepseek_chat(messages, max_tokens=800, temperature=0.1, stream=True)
+            # 🔥 如果有截图，构建vision消息
+            user_content = message + context
+            if include_vision and screenshot_b64:
+                # 使用vision格式：先发送截图分析请求，再发送文字
+                user_content = [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{screenshot_b64}"}
+                    },
+                    {
+                        "type": "text",
+                        "text": f"【实时战场截图】请分析当前截图中显示的战场情况，包括：\n1. 识别屏幕上的单位位置和血量\n2. 当前战况评估\n3. 建议的下一步操作\n\n用户消息: {message}{context}"
+                    }
+                ]
+                # 使用vision-capable模型
+                result = _deepseek_vision_chat(messages, user_content, max_tokens=1200, temperature=0.1, stream=True)
+            else:
+                messages.append({"role": "user", "content": user_content})
+                result = _deepseek_chat(messages, max_tokens=800, temperature=0.1, stream=True)
+
             if not result["success"]:
                 emit("ai_chat_error", {"error": result["error"]})
                 return
@@ -1574,6 +1620,15 @@ def on_ai_chat(data: dict):
                 socketio.emit("ai_chat_token", data)
 
             full_response = _deepseek_stream_to_end(result["response"], emit_token)
+            
+            # 🔥 解析AI响应中的操控指令
+            control_actions = _extract_control_actions(full_response)
+            if control_actions:
+                for action in control_actions:
+                    _execute_adb_action(action)
+                    socketio.emit("ai_chat_token", {"token": "", "done": False, 
+                        "full": f"\n[已执行操控: {action.get('type','')} {action}]"})
+            
             emit("ai_chat_token", {"token": "", "done": True, "full": full_response})
             _chat_history.append({"role": "assistant", "content": full_response, "time": time.time()})
 
@@ -1616,6 +1671,242 @@ def on_ai_chat_clear():
     global _chat_history
     _chat_history = []
     emit("ai_chat_cleared", {})
+
+
+# ═══════════════════════════════════════════════════════════════
+# Vision Chat + 键鼠操控 + 指令解析
+# ═══════════════════════════════════════════════════════════════
+
+def _deepseek_vision_chat(messages: list, user_content, max_tokens: int = 1200, temperature: float = 0.1, stream: bool = True, timeout: int = 60) -> dict:
+    """调用DeepSeek API进行视觉聊天（支持截图分析）"""
+    import requests as req
+    cfg = load_config()
+    llm_cfg = cfg["llm"]
+    
+    # 构建vision消息
+    vision_messages = list(messages)  # 复制system prompt等
+    vision_messages.append({"role": "user", "content": user_content})
+    
+    try:
+        resp = req.post(
+            f"{llm_cfg['api_base']}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {llm_cfg['api_key']}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": llm_cfg.get("vision_model", llm_cfg.get("model", "deepseek-chat")),
+                "messages": vision_messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stream": stream,
+            },
+            timeout=(10, timeout),
+        )
+        resp.raise_for_status()
+        if stream:
+            return {"success": True, "response": resp, "stream": True}
+        else:
+            data = resp.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return {"success": True, "content": content, "stream": False}
+    except Exception as e:
+        # 如果vision模型不支持，回退到普通chat（去掉图片部分）
+        logger.warning(f"Vision API调用失败，回退到普通模式: {e}")
+        text_parts = []
+        if isinstance(user_content, list):
+            for part in user_content:
+                if part.get("type") == "text":
+                    text_parts.append(part["text"])
+        fallback_msg = "\n".join(text_parts) if text_parts else str(user_content)
+        messages.append({"role": "user", "content": fallback_msg})
+        return _deepseek_chat(messages, max_tokens, temperature, stream, timeout)
+
+
+def _parse_control_command(message: str) -> dict:
+    """解析自然语言中的键鼠操控指令"""
+    msg_lower = message.lower()
+    
+    # 点击指令
+    import re as _regex
+    
+    # 匹配: 点击(x,y) 或 点击 x y 或 tap x y
+    tap_match = _regex.search(r'(?:点击|tap|click)\s*[\(（]?\s*(\d+)\s*[,，\s]\s*(\d+)\s*[\)）]?', msg_lower)
+    if tap_match:
+        return {"type": "tap", "x": int(tap_match.group(1)), "y": int(tap_match.group(2))}
+    
+    # 滑动指令: 滑动(x1,y1,x2,y2) 或 swipe x1 y1 x2 y2
+    swipe_match = _regex.search(r'(?:滑动|swipe|drag)\s*[\(（]?\s*(\d+)\s*[,，\s]\s*(\d+)\s*[,，\s]\s*(\d+)\s*[,，\s]\s*(\d+)\s*[\)）]?', msg_lower)
+    if swipe_match:
+        return {"type": "swipe", "x1": int(swipe_match.group(1)), "y1": int(swipe_match.group(2)),
+                "x2": int(swipe_match.group(3)), "y2": int(swipe_match.group(4))}
+    
+    # 按键指令: 按键(key) 或 key xxx
+    key_match = _regex.search(r'(?:按键|key|按下)\s*[\(（]?\s*(\w+)\s*[\)）]?', msg_lower)
+    if key_match:
+        key_map = {"返回": "back", "back": "back", "home": "home", "主页": "home", 
+                   "菜单": "menu", "menu": "menu", "回车": "enter", "enter": "enter",
+                   "删除": "del", "del": "del", "空格": "space", "space": "space"}
+        key_name = key_match.group(1)
+        return {"type": "key", "key": key_map.get(key_name, key_name)}
+    
+    # 输入文字: 输入(xxx) 或 type xxx
+    type_match = _regex.search(r'(?:输入|type|text)\s*[\(（]?\s*(.+?)\s*[\)）]?$', msg_lower)
+    if type_match:
+        return {"type": "type", "text": type_match.group(1).strip()}
+    
+    return None
+
+
+def _extract_control_actions(response: str) -> list:
+    """从AI响应中提取【操控:xxx】格式的指令"""
+    import re as _regex
+    actions = []
+    pattern = _regex.compile(r'【操控:\s*(\w+)\s*,?\s*([^】]+)】')
+    for match in pattern.finditer(response):
+        action_type = match.group(1).strip()
+        params = match.group(2).strip()
+        try:
+            if action_type == "tap":
+                parts = [p.strip() for p in params.split(",")]
+                actions.append({"type": "tap", "x": int(parts[0]), "y": int(parts[1])})
+            elif action_type == "swipe":
+                parts = [p.strip() for p in params.split(",")]
+                actions.append({"type": "swipe", "x1": int(parts[0]), "y1": int(parts[1]),
+                               "x2": int(parts[2]), "y2": int(parts[3])})
+            elif action_type == "key":
+                actions.append({"type": "key", "key": params.strip()})
+            elif action_type == "type":
+                actions.append({"type": "type", "text": params.strip()})
+        except (ValueError, IndexError):
+            logger.warning(f"无法解析操控指令: {match.group(0)}")
+    return actions
+
+
+def _execute_control_action(action: dict, message: str = ""):
+    """执行键鼠操控指令"""
+    action_type = action.get("type", "")
+    try:
+        result = _execute_adb_action(action)
+        if result:
+            status_msg = f"已执行操控: {action_type} - {action}"
+            _chat_history.append({"role": "assistant", "content": f"[操控] {status_msg}", "time": time.time()})
+            socketio.emit("ai_chat_token", {"token": "", "done": True, "full": f"[操控] {status_msg}"})
+            add_learning_log("control", f"执行操控: {action_type}", str(action))
+            socketio.emit("control_action_executed", {"action": action, "success": True})
+        else:
+            err_msg = f"操控执行失败: {action_type}"
+            socketio.emit("ai_chat_token", {"token": "", "done": True, "full": f"[操控] {err_msg}"})
+            socketio.emit("control_action_executed", {"action": action, "success": False, "error": err_msg})
+    except Exception as e:
+        socketio.emit("ai_chat_token", {"token": "", "done": True, "full": f"[操控错误] {str(e)}"})
+
+
+def _execute_adb_action(action: dict) -> bool:
+    """通过ADB执行具体的操控动作"""
+    adb_exe = _get_adb_for_emulator()
+    port = str(_emulator_adb_port)
+    dev_id = f"emulator-{port}"
+    
+    try:
+        subprocess.run([adb_exe, "start-server"], capture_output=True, text=True, timeout=3)
+        
+        action_type = action.get("type", "")
+        if action_type == "tap":
+            x, y = action.get("x", 0), action.get("y", 0)
+            r = subprocess.run([adb_exe, "-s", dev_id, "shell", "input", "tap", str(x), str(y)],
+                             capture_output=True, text=True, timeout=5)
+            return r.returncode == 0
+            
+        elif action_type == "swipe":
+            x1, y1 = action.get("x1", 0), action.get("y1", 0)
+            x2, y2 = action.get("x2", 0), action.get("y2", 0)
+            # 计算滑动时长(ms)基于距离
+            duration = max(100, int(((x2-x1)**2 + (y2-y1)**2)**0.5 * 2))
+            r = subprocess.run([adb_exe, "-s", dev_id, "shell", "input", "swipe", 
+                              str(x1), str(y1), str(x2), str(y2), str(duration)],
+                             capture_output=True, text=True, timeout=5)
+            return r.returncode == 0
+            
+        elif action_type == "key":
+            key = action.get("key", "")
+            r = subprocess.run([adb_exe, "-s", dev_id, "shell", "input", "keyevent", key.upper()],
+                             capture_output=True, text=True, timeout=5)
+            return r.returncode == 0
+            
+        elif action_type == "type":
+            text = action.get("text", "")
+            # 转义特殊字符
+            text = text.replace(" ", "%s").replace("&", "\\&").replace("<", "\\<").replace(">", "\\>")
+            r = subprocess.run([adb_exe, "-s", dev_id, "shell", "input", "text", text],
+                             capture_output=True, text=True, timeout=5)
+            return r.returncode == 0
+            
+        elif action_type == "longpress":
+            x, y = action.get("x", 0), action.get("y", 0)
+            duration = action.get("duration", 1000)
+            r = subprocess.run([adb_exe, "-s", dev_id, "shell", "input", "swipe", 
+                              str(x), str(y), str(x), str(y), str(duration)],
+                             capture_output=True, text=True, timeout=5)
+            return r.returncode == 0
+            
+        logger.warning(f"未知操控类型: {action_type}")
+        return False
+    except Exception as e:
+        logger.error(f"ADB操控执行失败: {e}")
+        return False
+
+
+@app.route("/api/control/execute", methods=["POST"])
+def api_control_execute():
+    """通过API执行键鼠操控指令"""
+    data = request.get_json() or {}
+    action = data.get("action", {})
+    if not action or not action.get("type"):
+        return jsonify({"status": "error", "error": "缺少操控指令"}), 400
+    
+    success = _execute_adb_action(action)
+    if success:
+        add_learning_log("control", f"API操控: {action.get('type')}", str(action))
+        return jsonify({"status": "ok", "action": action})
+    else:
+        return jsonify({"status": "error", "error": "执行失败"}), 500
+
+
+@app.route("/api/control/screenshot", methods=["GET"])
+def api_control_screenshot():
+    """获取当前战场截图（base64 JPEG格式）"""
+    import base64, struct, io
+    try:
+        adb_exe = _get_adb_for_emulator()
+        dev_id = f"emulator-{_emulator_adb_port}"
+        r = subprocess.run([adb_exe, "-s", dev_id, "exec-out", "screencap"],
+                          capture_output=True, timeout=3)
+        if r.returncode != 0 or len(r.stdout) < 20:
+            dev_id = f"localhost:{_emulator_adb_port}"
+            r = subprocess.run([adb_exe, "-s", dev_id, "exec-out", "screencap"],
+                             capture_output=True, timeout=3)
+        if r.returncode != 0 or len(r.stdout) < 20:
+            return jsonify({"error": "截图失败"}), 500
+        
+        raw_data = r.stdout
+        width = struct.unpack_from("<I", raw_data, 0)[0]
+        height = struct.unpack_from("<I", raw_data, 4)[0]
+        pixels = raw_data[12:]
+        
+        try:
+            from PIL import Image
+            img = Image.frombytes("RGBA", (width, height), pixels, "raw")
+            img_rgb = img.convert("RGB")
+            buf = io.BytesIO()
+            img_rgb.save(buf, format="JPEG", quality=70, optimize=True)
+            img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            return jsonify({"screenshot": img_b64, "width": width, "height": height, "format": "jpeg"})
+        except ImportError:
+            img_b64 = base64.b64encode(pixels).decode("ascii")
+            return jsonify({"screenshot": img_b64, "width": width, "height": height, "format": "raw"})
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -4932,16 +5223,22 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
 <!-- ═══ AI 对话 ═══ -->
 <div class="tab-content" id="tab-chat">
   <div class="panel" style="margin-bottom:0;">
-    <h3>与 AI 对话（支持行为纠正）</h3>
+    <h3>与 AI 对话（支持战场截图分析 + 键鼠操控）</h3>
     <div class="chat-container">
       <div class="chat-messages" id="chat-messages">
-        <div class="chat-msg assistant"><div class="avatar">AI</div><div class="bubble">你好！我是Firefight AI战术助手。你可以：<br>1. 询问战场情况<br>2. 下达指令<br>3. 纠正我的行为（如"你应该优先防守"）<br>我会展示思考过程并从纠正中学习。</div></div>
+        <div class="chat-msg assistant"><div class="avatar">AI</div><div class="bubble">你好！我是Firefight AI战术助手。新功能：<br>1. <b>战场截图分析</b>：点击"截图发送"截取模拟器画面让我分析<br>2. <b>键鼠操控</b>：输入"点击(500,300)"或"滑动(100,200,500,600)"直接操控<br>3. <b>记录到学习日志</b>：输入"记录到学习日志：xxx"保存知识<br>4. <b>纠正AI</b>：点击"纠正AI"按钮纠正我的行为</div></div>
       </div>
       <div class="chat-input-area" style="flex-wrap:wrap">
         <div id="chat-drop-zone" style="width:100%;border:2px dashed #252a33;border-radius:8px;padding:8px;margin-bottom:6px;text-align:center;font-size:11px;color:#666;transition:all 0.2s;display:none">
           &#128194; 拖放文件到此处分析 | 或输入本地文件路径如: D:\data\config.yaml
         </div>
-        <textarea id="chat-input" placeholder="输入消息，或拖入文件/输入文件路径..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat()}" oninput="checkChatFileInput()"></textarea>
+        <div style="display:flex;gap:4px;margin-bottom:4px;flex-wrap:wrap">
+          <button class="btn-verify" onclick="captureScreenshotForChat()" style="font-size:10px;padding:4px 8px;background:#2196f3;color:#fff" title="截取模拟器当前画面发送给AI分析">&#128247; 截图发送</button>
+          <button class="btn-verify" onclick="sendVisionChat()" style="font-size:10px;padding:4px 8px;background:#9c27b0;color:#fff" title="附带截图让AI分析战场">&#128269; 视觉分析</button>
+          <span style="font-size:10px;color:#888;align-self:center" id="screenshot-status"></span>
+          <span style="font-size:10px;color:#888;margin-left:auto">操控指令: 点击(x,y) 滑动(x1,y1,x2,y2) 按键(back)</span>
+        </div>
+        <textarea id="chat-input" placeholder="输入消息，或拖入文件/输入文件路径...&#10;操控指令: 点击(500,300) 滑动(100,200,500,600) 按键(back)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat()}" oninput="checkChatFileInput()"></textarea>
         <div style="display:flex;gap:6px;align-self:flex-end">
           <input type="file" id="chat-file-input" style="display:none" onchange="handleChatFileSelect(event)">
           <button class="btn-clear" onclick="document.getElementById('chat-file-input').click()" style="font-size:10px;padding:4px 8px" title="选择文件">&#128206;</button>
@@ -5336,6 +5633,20 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
 
 <!-- ═══ 参数学习 ═══ -->
 <div class="tab-content" id="tab-params">
+  <div class="panel" style="margin-bottom:12px">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <h3 style="margin:0;border:none;padding:0">AI学习参数管理</h3>
+      <div style="display:flex;gap:6px;align-items:center">
+        <span style="font-size:10px;color:#888" id="params-sync-status"></span>
+        <button class="btn-start" onclick="saveParamsToLocal()" style="font-size:10px;padding:4px 10px">保存参数</button>
+        <button class="btn-push" onclick="pushParamsToGitHub()" style="font-size:10px;padding:4px 10px;background:#ff9800">推送到GitHub</button>
+        <button class="btn-deploy" onclick="pushParamsToServer()" style="font-size:10px;padding:4px 10px">上传到服务器</button>
+        <button class="btn-verify" onclick="pullParamsFromGitHub()" style="font-size:10px;padding:4px 10px">从GitHub拉取</button>
+        <button class="btn-verify" onclick="syncParamsAll()" style="font-size:10px;padding:4px 10px;background:#7c4dff;color:#fff">全部同步</button>
+      </div>
+    </div>
+    <div id="params-current" style="font-size:10px;color:#888;margin-top:6px;font-family:monospace;background:#0a0e14;padding:8px;border-radius:4px"></div>
+  </div>
   <div class="panel">
     <h3>上传训练参数</h3>
     <div class="upload-area" onclick="document.getElementById('params-input').click()"><p>点击上传配置文件 (.yaml, .json, .txt, .cfg)</p><input type="file" id="params-input" multiple accept=".yaml,.json,.txt,.cfg" onchange="uploadParams()"></div>
@@ -5618,18 +5929,69 @@ function createInstallPackage(){
 }
 
 // ── AI 对话 ──
+var _pendingScreenshot = null;  // 暂存的截图base64
+
 function sendChat(){
   if(!socket||!socket.connected){alert('Socket.IO 未连接');return;}
   var inp=document.getElementById('chat-input');var msg=inp.value.trim();if(!msg)return;
   addChatMessage('user',msg);inp.value='';
-  socket.emit('ai_chat',{message:msg,include_battlefield:true,is_correction:false});
+  var data = {message:msg, include_battlefield:true, is_correction:false};
+  // 如果有暂存截图，附带发送
+  if(_pendingScreenshot){
+    data.screenshot = _pendingScreenshot;
+    data.include_vision = true;
+    _pendingScreenshot = null;
+    document.getElementById('screenshot-status').textContent = '';
+  }
+  socket.emit('ai_chat', data);
 }
+
+function sendVisionChat(){
+  if(!socket||!socket.connected){alert('Socket.IO 未连接');return;}
+  var inp=document.getElementById('chat-input');var msg=inp.value.trim();
+  if(!msg){msg='请分析当前战场截图并给出战术建议';}
+  addChatMessage('user','[截图分析] '+msg);inp.value='';
+  captureScreenshotForChat(function(){
+    socket.emit('ai_chat', {message:msg, include_battlefield:true, is_correction:false, 
+      screenshot: _pendingScreenshot, include_vision: true});
+    _pendingScreenshot = null;
+    document.getElementById('screenshot-status').textContent = '';
+  });
+}
+
+function captureScreenshotForChat(callback){
+  var status = document.getElementById('screenshot-status');
+  status.textContent = '截图中...';
+  status.style.color = '#ff9800';
+  fetch('/api/control/screenshot').then(r=>r.json()).then(d=>{
+    if(d.error){
+      status.textContent = '截图失败: '+d.error;
+      status.style.color = '#e53935';
+      return;
+    }
+    _pendingScreenshot = d.screenshot;
+    status.textContent = '截图已就绪 ('+d.width+'x'+d.height+')';
+    status.style.color = '#4caf50';
+    if(callback) callback();
+  }).catch(function(e){
+    status.textContent = '截图失败';
+    status.style.color = '#e53935';
+  });
+}
+
 function sendCorrection(){
   if(!socket||!socket.connected){alert('Socket.IO 未连接');return;}
   var inp=document.getElementById('chat-input');var msg=inp.value.trim();if(!msg)return;
   addChatMessage('user','[纠正] '+msg);inp.value='';
-  socket.emit('ai_chat',{message:msg,include_battlefield:true,is_correction:true});
-  socket.emit('ai_correct_behavior',{correction:msg});
+  var data = {message:msg, include_battlefield:true, is_correction:true};
+  if(_pendingScreenshot){
+    data.screenshot = _pendingScreenshot;
+    data.include_vision = true;
+    _pendingScreenshot = null;
+    document.getElementById('screenshot-status').textContent = '';
+  }
+  socket.emit('ai_chat', data);
+  socket.emit('ai_correct_behavior', {correction:msg});
 }
 function clearChat(){
   if(!socket||!socket.connected){return;}
@@ -6553,10 +6915,85 @@ _on('training_complete',function(d){
 _on('github_push_complete',function(d){document.getElementById('train-status-text').textContent+=' | GitHub推送: '+(d.success?'成功':'失败')})
 
 // ── 参数学习 ──
-function loadParams(){fetch('/api/params/list').then(r=>r.json()).then(data=>{var html='';data.forEach(function(p){html+='<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1a1f2b"><span>'+p.name+'</span><span style="color:#888">'+p.size_kb+'KB</span></div>'});document.getElementById('params-list').innerHTML=html||'暂无参数文件'})}
+function loadParams(){fetch('/api/params/list').then(r=>r.json()).then(data=>{var html='';data.forEach(function(p){html+='<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1a1f2b"><span>'+p.name+'</span><span style="color:#888">'+p.size_kb+'KB</span></div>'});document.getElementById('params-list').innerHTML=html||'暂无参数文件'});refreshParamsDisplay()}
 function uploadParams(){var files=document.getElementById('params-input').files;if(!files.length)return;var fd=new FormData();for(var i=0;i<files.length;i++)fd.append('file_'+i,files[i]);var s=document.getElementById('params-upload-status');s.innerHTML='<div class="alert info">上传中...</div>';fetch('/api/params/upload',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{s.innerHTML='<div class="alert success">已上传 '+d.count+' 个文件</div>';loadParams()}).catch(e=>{s.innerHTML='<div class="alert error">失败</div>'})}
 function learnFromParams(){var r=document.getElementById('params-learn-result');r.innerHTML='<div class="alert info"><span class="spinner"></span> AI 正在学习参数...</div>';fetch('/api/params/learn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(res=>res.json()).then(d=>{r.innerHTML='<div class="alert info">学习已启动, 等待 AI 分析...</div>'})}
 _on('params_learned',function(d){var r=document.getElementById('params-learn-result');if(d.error){r.innerHTML='<div class="alert error">'+d.error+'</div>'}else{r.innerHTML='<div class="alert success"><strong>AI 学习结果:</strong><br><pre style="font-size:10px;white-space:pre-wrap;margin-top:6px;color:#aaa">'+escapeHtml(d.analysis||'')+'</pre></div>'}})
+
+// 🔥 参数管理 - 保存/推送/拉取/同步
+function refreshParamsDisplay(){
+  fetch('/api/learn/params').then(r=>r.json()).then(d=>{
+    var el=document.getElementById('params-current');
+    if(el) el.innerHTML = '温度: <b>'+d.temperature+'</b> | 学习率: <b>'+d.learning_rate+'</b> | 进攻性: <b>'+d.tactical_aggressiveness+'</b> | 置信阈值: <b>'+d.confidence_threshold+'</b> | 学习次数: <b>'+d.total_learnings+'</b>';
+  });
+}
+function saveParamsToLocal(){
+  var status = document.getElementById('params-sync-status');
+  status.textContent = '保存中...'; status.style.color = '#ff9800';
+  fetch('/api/learn/params',{method:'GET'}).then(r=>r.json()).then(d=>{
+    fetch('/api/learn/params',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}).then(r=>r.json()).then(r2=>{
+      status.textContent = '已保存'; status.style.color = '#4caf50';
+      refreshParamsDisplay();
+      setTimeout(function(){status.textContent=''},2000);
+    });
+  });
+}
+function pushParamsToGitHub(){
+  var status = document.getElementById('params-sync-status');
+  status.textContent = '推送到GitHub...'; status.style.color = '#ff9800';
+  fetch('/api/params/upload_github',{method:'POST'}).then(r=>r.json()).then(d=>{
+    if(d.status==='ok'||d.success){
+      status.textContent = '已推送到GitHub'; status.style.color = '#4caf50';
+    }else{
+      status.textContent = '推送失败: '+(d.error||d.message||''); status.style.color = '#e53935';
+    }
+    setTimeout(function(){status.textContent=''},3000);
+  }).catch(function(e){
+    status.textContent = '推送失败'; status.style.color = '#e53935';
+  });
+}
+function pushParamsToServer(){
+  var status = document.getElementById('params-sync-status');
+  status.textContent = '上传到服务器...'; status.style.color = '#ff9800';
+  fetch('/api/params/upload_server',{method:'POST'}).then(r=>r.json()).then(d=>{
+    if(d.status==='ok'||d.success){
+      status.textContent = '已上传到服务器'; status.style.color = '#4caf50';
+    }else{
+      status.textContent = '上传失败: '+(d.error||''); status.style.color = '#e53935';
+    }
+    setTimeout(function(){status.textContent=''},3000);
+  }).catch(function(e){
+    status.textContent = '上传失败'; status.style.color = '#e53935';
+  });
+}
+function pullParamsFromGitHub(){
+  var status = document.getElementById('params-sync-status');
+  status.textContent = '从GitHub拉取...'; status.style.color = '#ff9800';
+  fetch('/api/params/pull_github',{method:'POST'}).then(r=>r.json()).then(d=>{
+    if(d.status==='ok'){
+      status.textContent = '已同步'; status.style.color = '#4caf50';
+      refreshParamsDisplay();
+    }else{
+      status.textContent = '拉取失败: '+(d.error||''); status.style.color = '#e53935';
+    }
+    setTimeout(function(){status.textContent=''},3000);
+  }).catch(function(e){
+    status.textContent = '拉取失败'; status.style.color = '#e53935';
+  });
+}
+function syncParamsAll(){
+  var status = document.getElementById('params-sync-status');
+  status.textContent = '全部同步中...'; status.style.color = '#ff9800';
+  fetch('/api/params/sync',{method:'POST'}).then(r=>r.json()).then(d=>{
+    var ok = d.results && d.results.github === 'pushed';
+    status.textContent = ok ? '同步完成' : '部分失败';
+    status.style.color = ok ? '#4caf50' : '#ff9800';
+    refreshParamsDisplay();
+    setTimeout(function(){status.textContent=''},3000);
+  }).catch(function(e){
+    status.textContent = '同步失败'; status.style.color = '#e53935';
+  });
+}
 
 function learnFromCombat(){var r=document.getElementById('combat-learn-result');r.innerHTML='<div class="alert info"><span class="spinner"></span> AI 从实战数据学习...</div>';fetch('/api/combat/learn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(res=>res.json()).then(d=>{r.innerHTML='<div class="alert info">学习已启动</div>'})}
 _on('combat_learn_result',function(d){var r=document.getElementById('combat-learn-result');if(d.error){r.innerHTML='<div class="alert error">'+d.error+'</div>'}else{var html='<div class="alert success">学习完成! 共'+d.total_experiences+'条经验</div>';if(d.stats)html+='<div style="font-size:10px;color:#888">平均分: '+d.stats.avg_score+' | 正向率: '+d.stats.positive_rate+'%</div>';if(d.rules&&d.rules.length)html+='<div style="font-size:10px;color:#4caf50">新规则: '+d.rules.join('; ')+'</div>';if(d.summary)html+='<div style="font-size:10px;color:#aaa;margin-top:4px;white-space:pre-wrap">'+escapeHtml(d.summary)+'</div>';r.innerHTML=html}})
