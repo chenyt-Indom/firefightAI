@@ -87,29 +87,59 @@ class CommandParser:
         )
 
     def generate_fallback_commands(self, game_state: GameState) -> list["ParsedCommand"]:
-        """生成保守防御指令(LLM失败时的降级策略)
-
-        将所有友方单位向屏幕中央下方收缩,采取防御姿态
-        """
+        """LLM失败时的高级战术策略 - 不再单纯防御，而是主动接敌"""
         sw, sh = self.screen_size
         ally_ids = [u.track_id for u in game_state.allies]
+        enemy_list = game_state.enemies
 
         if not ally_ids:
             return []
 
-        # 防御位置:屏幕中央偏下
-        defense_x = int(sw * 0.5)
-        defense_y = int(sh * 0.65)
-
-        return [
-            ParsedCommand(
-                action=ActionType.MOVE,
-                unit_ids=ally_ids,
-                target_pixel=(defense_x, defense_y),
-                target_enemy_pixel=None,
-                reason="[降级] LLM不可用,执行保守防御",
-            )
-        ]
+        # 🔥 如果有敌人，分散友军进攻最近敌人
+        if enemy_list:
+            cmds = []
+            # 分批：一半进攻，一半掩护
+            mid = len(ally_ids) // 2 or 1
+            attack_ids = ally_ids[:mid]
+            cover_ids = ally_ids[mid:]
+            
+            # 找最近敌人
+            center_x = int(sum(e.x for e in enemy_list) / len(enemy_list))
+            center_y = int(sum(e.y for e in enemy_list) / len(enemy_list))
+            
+            if attack_ids:
+                cmds.append(ParsedCommand(
+                    action=ActionType.SELECT, unit_ids=attack_ids,
+                    target_pixel=None, reason="[智能] 选中进攻编队"
+                ))
+                cmds.append(ParsedCommand(
+                    action=ActionType.MOVE, unit_ids=attack_ids,
+                    target_pixel=(min(sw-50, max(50, center_x+20)), min(sh-50, max(50, center_y+10))),
+                    reason="[智能] 主动接敌"
+                ))
+            if cover_ids:
+                cmds.append(ParsedCommand(
+                    action=ActionType.MOVE, unit_ids=cover_ids,
+                    target_pixel=(int(sw*0.5), int(sh*0.7)),
+                    reason="[智能] 掩护编队"
+                ))
+            return cmds
+        
+        # 无敌人：扇形散开搜索
+        spread = len(ally_ids)
+        cmds = []
+        for i, uid in enumerate(ally_ids):
+            angle = (i / spread) * 3.14 - 0.8
+            sx = int(sw * 0.5 + sw * 0.35 * (i / max(spread-1, 1) - 0.5))
+            sy = int(sh * 0.3 + abs(i - spread/2) * 8)
+            sx = max(50, min(sw-50, sx))
+            sy = max(50, min(sh-150, sy))
+            cmds.append(ParsedCommand(
+                action=ActionType.MOVE, unit_ids=[uid],
+                target_pixel=(sx, sy),
+                reason="[智能] 扇形搜索"
+            ))
+        return cmds
 
     @staticmethod
     def _clamp(value: float, min_val: float, max_val: float) -> float:
