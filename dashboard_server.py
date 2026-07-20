@@ -21,6 +21,25 @@ app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading", max_http_buffer_size=100*1024*1024)
 
 # 🔥 全局JSON错误处理器 - 确保所有API错误返回JSON而非HTML
+# 关键修复：Flask的@app.errorhandler(Exception)不会捕获HTTPException子类(如400,405,413等)
+# 必须单独注册HTTPException处理器，否则SyntaxError: Unexpected token '<' 会出现在前端
+
+from werkzeug.exceptions import HTTPException
+
+@app.errorhandler(HTTPException)
+def handle_http_exception(e):
+    """捕获所有HTTP异常(400/405/413等) - 这是SyntaxError '<' 的根本原因"""
+    if request.path.startswith("/api/"):
+        logger.warning(f"API HTTP异常: {request.path} - {e.code} {e.name}: {e.description}")
+        return jsonify({
+            "status": "error", 
+            "error": f"{e.name}: {e.description}" if e.description else str(e),
+            "code": e.code,
+            "path": request.path
+        }), e.code
+    # 非API路径使用默认HTML响应
+    return e
+
 @app.errorhandler(404)
 def not_found(e):
     if request.path.startswith("/api/"):
@@ -35,12 +54,21 @@ def server_error(e):
 
 @app.errorhandler(Exception)
 def handle_exception(e):
-    """全局异常捕获 - 确保所有API返回JSON"""
+    """全局异常捕获 - 确保所有API返回JSON（不包含HTTPException，已单独处理）"""
     if request.path.startswith("/api/"):
         logger.error(f"API异常: {request.path} - {e}", exc_info=True)
         return jsonify({"status": "error", "error": str(e)[:300], "path": request.path}), 500
     # 非API路径返回HTML
     return "<h1>500 - 服务器错误</h1><pre>" + str(e)[:500] + "</pre>", 500
+
+@app.after_request
+def enforce_api_json(response):
+    """确保所有/api/路径的响应Content-Type为application/json
+    这是防止SyntaxError: Unexpected token '<'的最后一道防线"""
+    if request.path.startswith("/api/") and "text/html" in response.content_type:
+        logger.error(f"API返回了HTML而非JSON: {request.path} (status={response.status_code})")
+        response.content_type = "application/json"
+    return response
 
 PROJECT_ROOT = Path(__file__).parent
 APP_VERSION = "5.1.0"
@@ -497,7 +525,10 @@ def _git_env() -> dict:
 def _ensure_git_remote_with_token() -> bool:
     """确保git远程URL包含GitHub token认证，避免认证失败。
     从 settings.yaml 读取 github.token 和 github.repo 配置。
-    支持两种token格式：username:token 和 x-access-token:token
+    
+    关键：GitHub Personal Access Token (classic) 必须使用 username:token 格式，
+    不是 x-access-token:token 格式（后者仅用于 GitHub App Installation Token）。
+    
     返回 True 表示配置成功或已配置。"""
     try:
         cfg = load_config()
@@ -507,8 +538,12 @@ def _ensure_git_remote_with_token() -> bool:
         if not token or not repo:
             return False
         
-        # 🔥 统一使用 x-access-token 格式（GitHub官方推荐）
-        token_url = f"https://x-access-token:{token}@github.com/{repo}.git"
+        # 🔥 从repo URL中提取username
+        # repo格式: "chenyt-Indom/firefightAI" 或 "username/repo"
+        username = repo.split("/")[0] if "/" in repo else "chenyt-Indom"
+        
+        # 🔥 Personal Access Token 使用 username:token 格式（不是 x-access-token）
+        token_url = f"https://{username}:{token}@github.com/{repo}.git"
         
         # 检查当前remote URL是否已包含token
         r = subprocess.run(["git", "remote", "get-url", "origin"],
@@ -5404,6 +5439,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
       <button class="btn-stop" onclick="stopEmulator()">停止</button>
       <button class="btn-verify" onclick="installGameAPK()">安装游戏APK</button>
       <button class="btn-push" onclick="installAPKPrompt()">安装APK文件</button>
+      <button class="btn-push" onclick="analyzeAPK()" style="font-size:10px;padding:4px 10px">分析APK兼容性</button>
     </div>
     <div id="emu-status" style="font-size:12px;color:#888;margin-bottom:8px">
       <div class="diag-item"><span class="diag-name">SDK安装</span><span class="diag-status unknown" id="emu-installed">未知</span></div>
@@ -6420,10 +6456,10 @@ function pushToGitHub(){
       if(resultEl) resultEl.innerHTML='<div class="alert success">上传成功 ('+pushTime+')</div>';
       // 持久化保存最后上传时间
       try{localStorage.setItem('github_last_push_time',pushTime)}catch(e){}
-    }else if(d.status==='no_changes'){
+    }else if(d.status==='duplicate' || d.status==='no_changes'){
       btn.textContent='无变更';
       btn.className='conn-status online';
-      dl.textContent='无新变更需要推送';
+      dl.textContent=d.detail||d.message||'无新变更需要推送';
       if(resultEl) resultEl.innerHTML='<div class="alert success">无变更</div>';
     }else{
       btn.textContent='失败';
@@ -7679,6 +7715,39 @@ function installAPKPrompt(){
     if(d.status==='success')p.innerHTML='<div class="alert success">APK安装成功!</div>';
     else p.innerHTML='<div class="alert error">安装失败: '+(d.error||d.output||'未知')+'</div>';
   }).catch(function(e){p.innerHTML='<div class="alert error">安装失败: '+e+'</div>'})
+}
+function analyzeAPK(){
+  var p=document.getElementById('emu-progress');
+  p.innerHTML='<div class="alert info"><span class="spinner"></span> 正在分析APK兼容性...</div>';
+  fetch('/api/emulator/analyze_apk',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).then(d=>{
+    if(d.status==='error'||d.error){
+      p.innerHTML='<div class="alert error">分析失败: '+(d.error||'未知')+'</div>';
+      return;
+    }
+    var html='<div class="alert success">APK分析完成</div>';
+    html+='<div style="font-size:11px;margin-top:8px;line-height:1.6">';
+    html+='<strong>APK:</strong> '+d.apk_path+' ('+d.apk_size_mb+'MB)<br>';
+    if(d.manifest_info.package) html+='<strong>包名:</strong> '+d.manifest_info.package+'<br>';
+    if(d.manifest_info.version_name) html+='<strong>版本:</strong> '+d.manifest_info.version_name+'<br>';
+    if(d.manifest_info.min_sdk) html+='<strong>最低SDK:</strong> API '+d.manifest_info.min_sdk+'<br>';
+    if(d.manifest_info.target_sdk) html+='<strong>目标SDK:</strong> API '+d.manifest_info.target_sdk+'<br>';
+    if(d.manifest_info.native_arch) html+='<strong>原生架构:</strong> '+d.manifest_info.native_arch+'<br>';
+    if(d.manifest_info.opengl_es) html+='<strong>OpenGL ES:</strong> '+d.manifest_info.opengl_es+'<br>';
+    html+='</div>';
+    if(d.compatibility_issues && d.compatibility_issues.length>0 && d.compatibility_issues[0]!=='未检测到明显的兼容性问题'){
+      html+='<div style="margin-top:8px"><strong style="color:#e53935">兼容性问题:</strong></div>';
+      html+='<ul style="font-size:11px;color:#ff9800;margin:4px 0;padding-left:18px">';
+      d.compatibility_issues.forEach(function(issue){html+='<li>'+issue+'</li>'});
+      html+='</ul>';
+    }
+    if(d.recommendations && d.recommendations.length>0){
+      html+='<div style="margin-top:6px"><strong style="color:#58a5f3">建议:</strong></div>';
+      html+='<ul style="font-size:11px;color:#aaa;margin:4px 0;padding-left:18px">';
+      d.recommendations.forEach(function(rec){html+='<li>'+rec+'</li>'});
+      html+='</ul>';
+    }
+    p.innerHTML=html;
+  }).catch(function(e){p.innerHTML='<div class="alert error">分析失败: '+e+'</div>'})
 }
 function refreshEmulatorScreen(){
   // 如果MJPEG流已激活，不需要手动刷新
@@ -10109,6 +10178,167 @@ def api_emulator_install_apk():
         return jsonify({"status": "error", "error": str(e)[:300]}), 500
 
 
+@app.route("/api/emulator/analyze_apk", methods=["POST"])
+def api_emulator_analyze_apk():
+    """分析APK兼容性 - 检查APK内部manifest，诊断与模拟器的兼容性问题"""
+    data = request.get_json() or {}
+    apk_path = data.get("apk_path", "").strip()
+    
+    # 搜索APK
+    searched = [
+        str(PROJECT_ROOT / "apk" / "firefight.apk"),
+        str(PROJECT_ROOT / "dist" / "firefight.apk"),
+        str(PROJECT_ROOT / "Firefight.apk"),
+    ]
+    if not apk_path:
+        for p in searched:
+            if Path(p).exists():
+                apk_path = p
+                break
+    
+    if not apk_path or not Path(apk_path).exists():
+        return jsonify({"status": "error", "error": "APK文件不存在", "searched": searched}), 404
+    
+    result = {
+        "status": "ok",
+        "apk_path": apk_path,
+        "apk_size_mb": round(Path(apk_path).stat().st_size / (1024*1024), 2),
+        "compatibility_issues": [],
+        "recommendations": [],
+        "manifest_info": {},
+    }
+    
+    try:
+        # 尝试使用aapt/aapt2分析APK
+        aapt_candidates = [
+            str(ANDROID_SDK_ROOT / "build-tools" / "33.0.0" / "aapt.exe"),
+            str(ANDROID_SDK_ROOT / "build-tools" / "34.0.0" / "aapt.exe"),
+            str(ANDROID_SDK_ROOT / "build-tools" / "35.0.0" / "aapt.exe"),
+        ]
+        
+        aapt_exe = None
+        for p in aapt_candidates:
+            if Path(p).exists():
+                aapt_exe = p
+                break
+        
+        # 也搜索build-tools目录下任意版本
+        if not aapt_exe:
+            bt_dir = ANDROID_SDK_ROOT / "build-tools"
+            if bt_dir.exists():
+                for d in sorted(bt_dir.iterdir(), reverse=True):
+                    aapt = d / "aapt.exe"
+                    if aapt.exists():
+                        aapt_exe = str(aapt)
+                        break
+        
+        if aapt_exe:
+            # 获取APK基本信息
+            r = subprocess.run([aapt_exe, "dump", "badging", apk_path],
+                             capture_output=True, text=True, timeout=15)
+            if r.returncode == 0:
+                badging = r.stdout
+                for line in badging.split("\n"):
+                    line = line.strip()
+                    if line.startswith("package:"):
+                        # package: name='com.windowsgames.firefightbw' versionCode='1' versionName='1.0'
+                        import re as _re
+                        m = _re.search(r"name='([^']+)'", line)
+                        if m: result["manifest_info"]["package"] = m.group(1)
+                        m = _re.search(r"versionCode='([^']+)'", line)
+                        if m: result["manifest_info"]["version_code"] = m.group(1)
+                        m = _re.search(r"versionName='([^']+)'", line)
+                        if m: result["manifest_info"]["version_name"] = m.group(1)
+                    elif line.startswith("sdkVersion:"):
+                        m = _re.search(r"'(\d+)'", line)
+                        if m: result["manifest_info"]["min_sdk"] = int(m.group(1))
+                    elif line.startswith("targetSdkVersion:"):
+                        m = _re.search(r"'(\d+)'", line)
+                        if m: result["manifest_info"]["target_sdk"] = int(m.group(1))
+                    elif "native-code:" in line:
+                        m = _re.search(r"'([^']+)'", line)
+                        if m: result["manifest_info"]["native_arch"] = m.group(1)
+                    elif "uses-gl-es:" in line:
+                        m = _re.search(r"'([^']+)'", line)
+                        if m: result["manifest_info"]["opengl_es"] = m.group(1)
+                    elif line.startswith("supports-screens:"):
+                        result["manifest_info"]["supports_screens"] = line
+                    elif line.startswith("densities:"):
+                        result["manifest_info"]["densities"] = line
+                    elif line.startswith("application:"):
+                        result["manifest_info"]["app_label"] = line
+            
+            # 获取权限列表
+            r2 = subprocess.run([aapt_exe, "dump", "permissions", apk_path],
+                              capture_output=True, text=True, timeout=10)
+            if r2.returncode == 0:
+                perms = [l.strip() for l in r2.stdout.split("\n") if l.strip() and "permission" in l.lower()]
+                result["manifest_info"]["permissions"] = perms[:30]
+        else:
+            result["status"] = "partial"
+            result["compatibility_issues"].append("aapt工具未找到，无法深入分析APK，已安装Android SDK build-tools后可进行完整分析")
+        
+        # 兼容性分析
+        min_sdk = result["manifest_info"].get("min_sdk", 0)
+        target_sdk = result["manifest_info"].get("target_sdk", 0)
+        native_arch = result["manifest_info"].get("native_arch", "")
+        opengl_es = result["manifest_info"].get("opengl_es", "")
+        
+        # 检查SDK版本兼容性
+        if min_sdk and min_sdk > AVD_CONFIG["api_level"]:
+            result["compatibility_issues"].append(
+                f"APK要求最低API {min_sdk}，但模拟器配置为API {AVD_CONFIG['api_level']}，部分功能可能不可用"
+            )
+            result["recommendations"].append(f"将AVD API级别提升至{min_sdk}或更高")
+        
+        # 检查原生库架构
+        if native_arch:
+            emu_arch = AVD_CONFIG["arch"]  # x86_64
+            if "arm64" in native_arch and "x86" not in native_arch:
+                result["compatibility_issues"].append(
+                    f"APK仅包含ARM64原生库({native_arch})，但模拟器使用{emu_arch}架构。"
+                    "ARM→x86转译可能导致性能下降或部分内容加载失败"
+                )
+                result["recommendations"].append("在模拟器中启用ARM转译支持，或使用ARM64架构的AVD")
+            elif "armeabi" in native_arch and "x86" not in native_arch:
+                result["compatibility_issues"].append(
+                    f"APK包含ARMv7原生库({native_arch})，模拟器({emu_arch})需要ARM转译"
+                )
+                result["recommendations"].append("确保模拟器支持ARM→x86转译(Houdini/libndk)")
+        
+        # 检查OpenGL ES版本
+        if opengl_es:
+            gl_config = _emulator_gpu_config.get("gl_version", "3.0")
+            try:
+                required_gl = float(opengl_es.replace("0x", "")) if "0x" in opengl_es else float(opengl_es)
+                current_gl = float(gl_config)
+                if required_gl > current_gl:
+                    result["compatibility_issues"].append(
+                        f"APK要求OpenGL ES {opengl_es}，当前配置为{gl_config}。不匹配会导致渲染内容缺失"
+                    )
+                    result["recommendations"].append(f"将GPU OpenGL ES版本设置为{opengl_es}")
+            except:
+                pass
+        
+        # 通用建议
+        if not result["compatibility_issues"]:
+            result["compatibility_issues"].append("未检测到明显的兼容性问题")
+        
+        result["recommendations"].extend([
+            "尝试切换GPU模式为swiftshader（软件渲染，兼容性最高）",
+            "确保模拟器分辨率匹配游戏设计分辨率(1920x1080)",
+            "在模拟器设置中增加RAM至4GB+，增加VM堆大小",
+            "如果游戏使用Unity引擎，尝试添加 -gpu swiftshader_indirect 参数",
+        ])
+        
+        add_system_log("emulator", f"APK兼容性分析完成", f"issues={len(result['compatibility_issues'])}")
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"APK分析失败: {e}")
+        return jsonify({"status": "error", "error": str(e)[:300]}), 500
+
+
 @app.route("/api/emulator/screenshot")
 def api_emulator_screenshot():
     """高速ADB截图 - 使用raw screencap + JPEG压缩，目标20-30fps"""
@@ -11720,7 +11950,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Firefight AI Dashboard Server v5.1")
     parser.add_argument("--port", type=int, default=5000, help="服务器端口")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="服务器地址")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="服务器地址（0.0.0.0允许局域网/公网访问）")
     parser.add_argument("--debug", action="store_true", help="调试模式")
     args = parser.parse_args()
 
