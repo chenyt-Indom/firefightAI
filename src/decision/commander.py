@@ -131,7 +131,11 @@ class TacticalCommander:
         import requests as _req
         
         api_key = self.fallback_api_key if use_fallback else self.api_key
-        api_base = self.fallback_api_base if use_fallback else self.api_base
+        # 🔥 如果主备provider相同，用主api_base
+        if use_fallback and self.fallback_provider == self.provider:
+            api_base = self.api_base
+        else:
+            api_base = self.fallback_api_base if use_fallback else self.api_base
         model = self.fallback_model if use_fallback else self.model
         provider_name = self.fallback_provider if use_fallback else self.provider
         
@@ -193,11 +197,6 @@ class TacticalCommander:
         
         logger.error(f"LLM重试{self.retry_count}次后仍失败")
         return None
-                if attempt < self.retry_count:
-                    time.sleep(1)
-
-        logger.error(f"LLM重试{self.retry_count}次后仍失败")
-        return None
 
     def _build_user_message(self, state_text: str) -> str:
         """构建用户消息: 状态 + 静态few-shot + 动态学习示例"""
@@ -222,30 +221,39 @@ class TacticalCommander:
         return "\n".join(parts)
 
     def _parse_response(self, raw_text: str) -> Optional[LLMResponse]:
-        """解析LLM响应为LLMResponse"""
+        """解析LLM响应为LLMResponse - 兼容多种输出格式"""
         try:
-            # 清理可能的markdown代码块标记
             text = raw_text.strip()
             if text.startswith("```"):
-                # 移除markdown代码块
                 lines = text.split("\n")
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
+                if lines[0].startswith("```"): lines = lines[1:]
+                if lines and lines[-1].strip() == "```": lines = lines[:-1]
                 text = "\n".join(lines)
-
             data = json.loads(text)
-
-            # 使用pydantic校验
-            llm_response = LLMResponse.model_validate(data)
-            return llm_response
-
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON解析失败: {e}")
-            return None
+            
+            # 🔥 兼容简化格式: 没有analysis/commands字段时自动映射
+            if "analysis" not in data and "commands" not in data:
+                tactic = data.get("tactic", data.get("decision", data.get("action", "hold")))
+                reason = data.get("reason", data.get("分析", ""))
+                
+                from src.state.models import Command
+                cmds = []
+                tl = str(tactic).lower()
+                if "advance" in tl or "前进" in tl or "进攻" in tl:
+                    cmds.append(Command(action="move", unit_ids=[1], target=(0.55, 0.4), reason=f"{reason[:50]}"))
+                elif "retreat" in tl or "后退" in tl or "撤退" in tl:
+                    cmds.append(Command(action="move", unit_ids=[1], target=(0.5, 0.7), reason=f"{reason[:50]}"))
+                elif "defend" in tl or "防守" in tl:
+                    cmds.append(Command(action="move", unit_ids=[1], target=(0.5, 0.6), reason=f"{reason[:50]}"))
+                else:
+                    cmds.append(Command(action="select", unit_ids=[1], reason=f"{reason[:50]}"))
+                data = {"analysis": reason[:200] or str(tactic), "commands": [c.model_dump() for c in cmds]}
+            
+            if "commands" not in data: data["commands"] = []
+            if "analysis" not in data: data["analysis"] = "战术决策"
+            return LLMResponse.model_validate(data)
         except Exception as e:
-            logger.warning(f"LLMResponse校验失败: {e}")
+            logger.warning(f"解析失败: {e}")
             return None
 
     def _get_client(self, use_fallback: bool = False) -> Optional[OpenAI]:
