@@ -334,7 +334,7 @@ class AutoScheduler:
                 logger.warning(result["message"])
                 return result
 
-            # 确保GitHub远程URL包含token认证
+            # 🔥 确保GitHub远程URL包含token认证
             try:
                 import yaml
                 settings_path = git_dir / "config" / "settings.yaml"
