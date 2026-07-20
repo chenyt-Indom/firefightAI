@@ -1,0 +1,13 @@
+path: C:\Users\19853\WorkBuddy\2026-07-18-07-52-25\firefightAI\data\screen_yolo
+train: images
+val: images
+names:
+  0: You_flag
+  1: Enemy_flag
+  2: dropdown_list
+  3: OK_button
+  4: unit_select
+  5: start_battle
+  6: flag_point
+  7: other_button
+  8: enemy_select

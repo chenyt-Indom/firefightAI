@@ -1,0 +1,5 @@
+names:
+  0: goto_bar
+path: C:\Users\19853\WorkBuddy\2026-07-18-07-52-25\firefightAI\data\goto_yolo
+train: train/images
+val: train/images

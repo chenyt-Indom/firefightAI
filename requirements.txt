@@ -1,0 +1,32 @@
+# Firefight AI 指挥系统 - 依赖
+# Python 3.10+
+
+# 核心依赖
+ultralytics==8.2.*       # YOLOv8 + ByteTrack
+paddleocr==2.7.*         # OCR (PP-OCRv4)
+paddlepaddle-gpu==2.6.*  # PaddlePaddle GPU版 (CUDA 11.8+)
+# 若CPU版本: paddlepaddle==2.6.*
+
+# scrcpy 录屏
+scrcpy-client==2.*       # scrcpy Python绑定
+
+# LLM API
+openai==1.*              # DeepSeek API (兼容OpenAI接口)
+
+# 数据模型
+pydantic==2.*            # JSON schema校验
+
+# 工具库
+loguru==0.7.*            # 日志
+pyyaml==6.*              # 配置文件
+opencv-python==4.9.*     # 图像处理
+torch==2.2.*+cu121       # YOLO后端 (CUDA加速)
+torchvision==0.17.*+cu121
+
+# 图像处理辅助
+numpy==1.26.*
+pillow==10.*
+
+# 开发/测试
+pytest==8.*
+pytest-asyncio==0.23.*

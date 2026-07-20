@@ -1,0 +1,54 @@
+{
+  "created": "2026-07-19 21:07:23",
+  "models": {
+    "screen_ui36": {
+      "task": "UI按钮/国旗检测",
+      "classes": [
+        "You_flag",
+        "Enemy_flag",
+        "dropdown",
+        "OK",
+        "unit",
+        "start",
+        "flag",
+        "other",
+        "enemy"
+      ],
+      "images": 36,
+      "train_epochs": 80,
+      "mAP50": 0.995,
+      "precision": 0.995,
+      "date": "2026-07-19",
+      "size_mb": 5.2,
+      "registry_file": "models_registry/screen_ui36.pt"
+    },
+    "faction_30": {
+      "task": "阵营下拉列表17国位置检测",
+      "classes": [
+        "UN",
+        "Poland",
+        "UK",
+        "France",
+        "ODKB",
+        "USA",
+        "Japan",
+        "China",
+        "Korea",
+        "Germany",
+        "Italy",
+        "Ukraine",
+        "Scandinavia",
+        "MidEast",
+        "Balkans",
+        "CentralEU",
+        "Baltic"
+      ],
+      "images": 30,
+      "train_epochs": 80,
+      "mAP50": 0.995,
+      "date": "2026-07-19",
+      "size_mb": 5.2,
+      "registry_file": "models_registry/faction_30.pt"
+    }
+  }
+}

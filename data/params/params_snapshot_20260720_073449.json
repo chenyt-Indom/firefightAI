@@ -1,0 +1,20 @@
+{
+  "snapshot_time": "2026-07-20T07:34:49.567267",
+  "files": [
+    {
+      "name": "ai_learning_params.json",
+      "size": 1755,
+      "modified": "2026-07-20T07:30:36.778340"
+    },
+    {
+      "name": "battle_memory_20260720_073449.db",
+      "size": 266240,
+      "modified": "2026-07-20T07:24:06.902228"
+    },
+    {
+      "name": "tactics_rules_20260720_073449.yaml",
+      "size": 2239,
+      "modified": "2026-07-20T02:07:12.114485"
+    }
+  ]
+}
