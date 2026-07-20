@@ -1,0 +1,22 @@
+{
+  "logs": [
+    {
+      "time": "18:16:03",
+      "category": "self_learn",
+      "message": "AI自学习引擎启动",
+      "detail": "持续自主学习模式已激活"
+    }
+  ],
+  "params": {
+    "temperature": 0.3,
+    "max_tokens": 1024,
+    "confidence_threshold": 0.5,
+    "learning_rate": 0.01,
+    "tactical_aggressiveness": 0.5,
+    "unit_preference": "balanced",
+    "last_learned": null,
+    "total_learnings": 0,
+    "insights": []
+  },
+  "exported_at": "2026-07-20T18:19:10.605633"
+}

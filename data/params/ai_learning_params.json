@@ -1,0 +1,54 @@
+{
+  "temperature": 0.25,
+  "max_tokens": 1024,
+  "confidence_threshold": 0.5,
+  "learning_rate": 0.01,
+  "tactical_aggressiveness": 0.5,
+  "unit_preference": "balanced",
+  "last_learned": "2026-07-20T07:30:36.777908",
+  "total_learnings": 4,
+  "insights": [
+    {
+      "type": "error_pattern",
+      "summary": "发现 3 个错误，最常见: 推送失败",
+      "detail": "Top errors: [('推送失败', 3)]",
+      "suggestion": "建议检查相关模块配置或网络连接"
+    },
+    {
+      "type": "error_pattern",
+      "summary": "发现 3 个错误，最常见: 推送失败",
+      "detail": "Top errors: [('推送失败', 3)]",
+      "suggestion": "建议检查相关模块配置或网络连接"
+    },
+    {
+      "type": "success_pattern",
+      "summary": "最近 5 次成功操作",
+      "detail": "成功操作分布: {'emulator': 1, 'self_learn': 2, 'combat': 1, 'github': 18}",
+      "suggestion": "保持当前良好状态"
+    },
+    {
+      "type": "error_pattern",
+      "summary": "发现 4 个错误，最常见: 推送失败",
+      "detail": "Top errors: [('推送失败', 4)]",
+      "suggestion": "建议检查相关模块配置或网络连接"
+    },
+    {
+      "type": "success_pattern",
+      "summary": "最近 6 次成功操作",
+      "detail": "成功操作分布: {'emulator': 1, 'self_learn': 3, 'combat': 1, 'github': 20}",
+      "suggestion": "保持当前良好状态"
+    },
+    {
+      "type": "error_pattern",
+      "summary": "发现 4 个错误，最常见: 推送失败",
+      "detail": "Top errors: [('推送失败', 4)]",
+      "suggestion": "建议检查相关模块配置或网络连接"
+    },
+    {
+      "type": "success_pattern",
+      "summary": "最近 7 次成功操作",
+      "detail": "成功操作分布: {'emulator': 1, 'self_learn': 4, 'combat': 1, 'github': 20}",
+      "suggestion": "保持当前良好状态"
+    }
+  ]
+}
