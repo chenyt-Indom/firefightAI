@@ -523,11 +523,11 @@ def _git_env() -> dict:
     return env
 
 def _ensure_git_remote_with_token() -> bool:
-    """确保git远程URL包含GitHub token认证，避免认证失败。
+    """确保git远程URL配置正确，优先使用SSH（不受HTTPS封锁影响），回退HTTPS+Token。
     从 settings.yaml 读取 github.token 和 github.repo 配置。
     
-    关键：GitHub Personal Access Token (classic) 必须使用 username:token 格式，
-    不是 x-access-token:token 格式（后者仅用于 GitHub App Installation Token）。
+    关键发现：本地网络443端口(HTTPS)被封锁，导致无法连接GitHub。
+    但22端口(SSH)可用，因此优先使用SSH方式推送。
     
     返回 True 表示配置成功或已配置。"""
     try:
@@ -535,31 +535,50 @@ def _ensure_git_remote_with_token() -> bool:
         gh = cfg.get("github", {})
         token = gh.get("token", "").strip()
         repo = gh.get("repo", "").strip()
-        if not token or not repo:
+        if not repo:
             return False
         
-        # 🔥 从repo URL中提取username
-        # repo格式: "chenyt-Indom/firefightAI" 或 "username/repo"
-        username = repo.split("/")[0] if "/" in repo else "chenyt-Indom"
+        # 🔥 优先使用SSH（解决HTTPS 443端口被封锁的问题）
+        ssh_url = f"git@github.com:{repo}.git"
         
-        # 🔥 Personal Access Token 使用 username:token 格式（不是 x-access-token）
-        token_url = f"https://{username}:{token}@github.com/{repo}.git"
-        
-        # 检查当前remote URL是否已包含token
+        # 检查当前remote URL
         r = subprocess.run(["git", "remote", "get-url", "origin"],
                           cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=5)
         current_url = r.stdout.strip() if r.returncode == 0 else ""
         
-        if token in current_url:
-            return True  # 已配置token
+        # 如果已经是SSH格式，直接返回
+        if current_url.startswith("git@github.com:"):
+            return True
         
-        # 设置新的remote URL
-        subprocess.run(["git", "remote", "set-url", "origin", token_url],
-                      cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=5)
-        logger.info("GitHub远程URL已配置token认证")
-        return True
+        # 如果已经是HTTPS+token格式且token有效，保持
+        if token and token in current_url:
+            return True
+        
+        # 尝试SSH连接测试
+        ssh_test = subprocess.run(
+            ["ssh", "-T", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5", "git@github.com"],
+            capture_output=True, text=True, timeout=10
+        )
+        ssh_ok = "successfully authenticated" in (ssh_test.stdout + ssh_test.stderr).lower()
+        
+        if ssh_ok:
+            # SSH可用，使用SSH
+            subprocess.run(["git", "remote", "set-url", "origin", ssh_url],
+                          cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=5)
+            logger.info("GitHub远程URL已配置为SSH（HTTPS 443端口被封锁）")
+            return True
+        elif token:
+            # SSH不可用，回退到HTTPS+token
+            username = repo.split("/")[0] if "/" in repo else "chenyt-Indom"
+            token_url = f"https://{username}:{token}@github.com/{repo}.git"
+            subprocess.run(["git", "remote", "set-url", "origin", token_url],
+                          cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=5)
+            logger.info("GitHub远程URL已配置HTTPS+Token（SSH不可用）")
+            return True
+        else:
+            return False
     except Exception as e:
-        logger.warning(f"配置GitHub token失败: {e}")
+        logger.warning(f"配置GitHub远程失败: {e}")
         return False
 
 def _git_run(cmd: list, timeout: int = 15, cwd: str = None) -> tuple:
