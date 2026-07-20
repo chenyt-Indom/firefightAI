@@ -65,3 +65,9 @@ apk_analysis/frida-server*
 /frida-server*
 /frida-server*
 /dl_frida*.py
+
+# 大型二进制文件 (超过GitHub 100MB限制)
+data/game.apk
+android_emulator/
+*.zip
+!requirements*.txt

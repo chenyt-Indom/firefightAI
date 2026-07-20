@@ -1,0 +1,1655 @@
+{
+  "updated_at": "2026-07-20T08:00:00.011049",
+  "records": [
+    {
+      "decision": {
+        "action": "zoom_out",
+        "reason": "缩小视野寻找敌方旗帜位置"
+      },
+      "outcome_score": 2470.3,
+      "ally_count": 27,
+      "enemy_count": 34,
+      "timestamp": 1784465728.2368157
+    },
+    {
+      "decision": {
+        "action": "idle",
+        "reason": "无行动"
+      },
+      "outcome_score": 726.2,
+      "ally_count": 1,
+      "enemy_count": 4,
+      "timestamp": 1784464651.4053218
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面5单位激活接敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 710.9,
+      "ally_count": 6,
+      "enemy_count": 3,
+      "timestamp": 1784440998.11613
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "主力集火",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 686.7,
+      "ally_count": 15,
+      "enemy_count": 2,
+      "timestamp": 1784396296.7976096
+    },
+    {
+      "decision": {
+        "action": "zoom_out",
+        "reason": "缩小视野寻找敌方旗帜位置"
+      },
+      "outcome_score": 640.3,
+      "ally_count": 24,
+      "enemy_count": 7,
+      "timestamp": 1784466148.0633523
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "[降级] LLM不可用,执行保守防御",
+        "target": [
+          0.5,
+          0.65
+        ],
+        "unit_ids": [
+          0
+        ]
+      },
+      "outcome_score": 600.8,
+      "ally_count": 1,
+      "enemy_count": 4,
+      "timestamp": 1784464224.7116838
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面5单位激活",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 587.6,
+      "ally_count": 9,
+      "enemy_count": 3,
+      "timestamp": 1784441382.587758
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "侦察组: 2个单位前出至中场探测敌情，到达后见机撤退",
+        "target": [
+          0.5,
+          0.4
+        ],
+        "unit_ids": [
+          1,
+          2
+        ]
+      },
+      "outcome_score": 586.1,
+      "ally_count": 19,
+      "enemy_count": 55,
+      "timestamp": 1784387712.8634834
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "侦察组: 3个单位前出向敌方方向推进，探测敌方位置和火力配置",
+        "target": [
+          0.35,
+          0.2
+        ],
+        "unit_ids": [
+          1,
+          2,
+          3
+        ]
+      },
+      "outcome_score": 580.0,
+      "ally_count": 31,
+      "enemy_count": 0,
+      "timestamp": 1784394594.8032525
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 580.0,
+      "ally_count": 31,
+      "enemy_count": 0,
+      "timestamp": 1784440476.5150845
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "前锋集群",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 560.0,
+      "ally_count": 31,
+      "enemy_count": 0,
+      "timestamp": 1784394875.655715
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "前锋集群",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 560.0,
+      "ally_count": 32,
+      "enemy_count": 0,
+      "timestamp": 1784395827.4039488
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "侦察组: 3个单位前出向敌方方向推进，探测敌方位置和火力配置",
+        "target": [
+          0.35,
+          0.2
+        ],
+        "unit_ids": [
+          1,
+          2,
+          3
+        ]
+      },
+      "outcome_score": 550.0,
+      "ally_count": 31,
+      "enemy_count": 25,
+      "timestamp": 1784394474.0424094
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路推进",
+        "unit_ids": [
+          1,
+          3,
+          5,
+          7
+        ]
+      },
+      "outcome_score": 550.0,
+      "ally_count": 31,
+      "enemy_count": 0,
+      "timestamp": 1784394716.856671
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "前锋集群",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 550.0,
+      "ally_count": 33,
+      "enemy_count": 2,
+      "timestamp": 1784395647.105511
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "前锋集群",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "outcome_score": 550.0,
+      "ally_count": 31,
+      "enemy_count": 0,
+      "timestamp": 1784395895.2539017
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路步兵反坦克侦察",
+        "unit_ids": [
+          1,
+          2,
+          3
+        ]
+      },
+      "outcome_score": 543.2,
+      "ally_count": 8,
+      "enemy_count": 8,
+      "timestamp": 1784465430.1821918
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "[降级] LLM不可用,执行保守防御",
+        "target": [
+          0.5,
+          0.65
+        ],
+        "unit_ids": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "outcome_score": 542.1,
+      "ally_count": 13,
+      "enemy_count": 4,
+      "timestamp": 1784441227.1990852
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路推进",
+        "unit_ids": [
+          1,
+          3,
+          5,
+          7
+        ]
+      },
+      "outcome_score": 540.0,
+      "ally_count": 31,
+      "enemy_count": 0,
+      "timestamp": 1784394819.0380416
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "前锋集群",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 540.0,
+      "ally_count": 29,
+      "enemy_count": 0,
+      "timestamp": 1784395015.6813886
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "侦察组: 3个单位前出向敌方方向推进，探测敌方位置和火力配置",
+        "unit_ids": [
+          1,
+          2,
+          3
+        ]
+      },
+      "outcome_score": 530.0,
+      "ally_count": 32,
+      "enemy_count": 32,
+      "timestamp": 1784392455.2724876
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "[降级] LLM不可用,执行保守防御",
+        "target": [
+          0.5,
+          0.65
+        ],
+        "unit_ids": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "outcome_score": 520.0,
+      "ally_count": 31,
+      "enemy_count": 31,
+      "timestamp": 1784392380.394536
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "全员推进至中场，利用绝对兵力优势碾压敌方",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 520.0,
+      "ally_count": 30,
+      "enemy_count": 0,
+      "timestamp": 1784392519.3132756
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路4单位",
+        "unit_ids": [
+          1,
+          3,
+          5,
+          7
+        ]
+      },
+      "outcome_score": 520.0,
+      "ally_count": 31,
+      "enemy_count": 0,
+      "timestamp": 1784395949.6484225
+    },
+    {
+      "decision": {
+        "action": "zoom_out",
+        "reason": "缩小视野寻找敌方旗帜位置"
+      },
+      "outcome_score": 510.9,
+      "ally_count": 22,
+      "enemy_count": 6,
+      "timestamp": 1784466093.4217591
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路4单位",
+        "unit_ids": [
+          1,
+          3,
+          5,
+          7
+        ]
+      },
+      "outcome_score": 510.0,
+      "ally_count": 31,
+      "enemy_count": 0,
+      "timestamp": 1784395132.5902817
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 506.3,
+      "ally_count": 22,
+      "enemy_count": 5,
+      "timestamp": 1784401774.0689359
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左翼步兵反坦克",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "outcome_score": 500.0,
+      "ally_count": 31,
+      "enemy_count": 25,
+      "timestamp": 1784444626.6445694
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面15单位激活接敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 497.8,
+      "ally_count": 28,
+      "enemy_count": 17,
+      "timestamp": 1784440704.1506915
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面15单位激活接敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 495.2,
+      "ally_count": 16,
+      "enemy_count": 2,
+      "timestamp": 1784441447.7050054
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路4单位",
+        "unit_ids": [
+          1,
+          3,
+          5,
+          7
+        ]
+      },
+      "outcome_score": 470.0,
+      "ally_count": 31,
+      "enemy_count": 0,
+      "timestamp": 1784396261.860168
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路步兵反坦克侦察",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "outcome_score": 469.6,
+      "ally_count": 20,
+      "enemy_count": 5,
+      "timestamp": 1784465503.003533
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路主力步兵反坦克",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 467.1,
+      "ally_count": 15,
+      "enemy_count": 2,
+      "timestamp": 1784464215.1144307
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 459.9,
+      "ally_count": 30,
+      "enemy_count": 14,
+      "timestamp": 1784439993.2917016
+    },
+    {
+      "decision": {
+        "action": "zoom_out",
+        "reason": "缩小视野寻找敌方旗帜位置"
+      },
+      "outcome_score": 448.7,
+      "ally_count": 19,
+      "enemy_count": 5,
+      "timestamp": 1784465898.8116436
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "全军压上",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 440.0,
+      "ally_count": 28,
+      "enemy_count": 0,
+      "timestamp": 1784396736.2531567
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "全军压上",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 430.0,
+      "ally_count": 28,
+      "enemy_count": 0,
+      "timestamp": 1784396580.8716323
+    },
+    {
+      "decision": {
+        "action": "zoom_out",
+        "reason": "缩小视野寻找敌方旗帜位置"
+      },
+      "outcome_score": 426.3,
+      "ally_count": 19,
+      "enemy_count": 6,
+      "timestamp": 1784465548.1427937
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面15单位激活接敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 420.0,
+      "ally_count": 28,
+      "enemy_count": 3,
+      "timestamp": 1784440602.2205758
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "侦察组: 2个单位前出至中场探测敌情，到达后见机撤退",
+        "target": [
+          0.5,
+          0.4
+        ],
+        "unit_ids": [
+          1,
+          2
+        ]
+      },
+      "outcome_score": 412.5,
+      "ally_count": 24,
+      "enemy_count": 55,
+      "timestamp": 1784387780.192675
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "全军压上",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 410.0,
+      "ally_count": 28,
+      "enemy_count": 0,
+      "timestamp": 1784396478.781204
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "全军压上",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 410.0,
+      "ally_count": 28,
+      "enemy_count": 0,
+      "timestamp": 1784396828.5284867
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路步兵反坦克侦察",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 405.1,
+      "ally_count": 19,
+      "enemy_count": 3,
+      "timestamp": 1784464706.4994454
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面5单位激活",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 388.0,
+      "ally_count": 12,
+      "enemy_count": 2,
+      "timestamp": 1784441465.0592604
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左翼步兵组",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "outcome_score": 383.4,
+      "ally_count": 20,
+      "enemy_count": 0,
+      "timestamp": 1784444672.002131
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "全部单位自动推进歼敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 381.8,
+      "ally_count": 21,
+      "enemy_count": 24,
+      "timestamp": 1784401771.7214596
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "侦察组: 2个单位前出至中场探测敌情，到达后见机撤退",
+        "target": [
+          0.5,
+          0.4
+        ],
+        "unit_ids": [
+          1,
+          2
+        ]
+      },
+      "outcome_score": 362.7,
+      "ally_count": 22,
+      "enemy_count": 49,
+      "timestamp": 1784387827.1288705
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "侦察组: 2个单位前出至中场探测敌情，到达后自行撤退",
+        "target": [
+          0.5,
+          0.4
+        ],
+        "unit_ids": [
+          1,
+          2
+        ]
+      },
+      "outcome_score": 361.9,
+      "ally_count": 18,
+      "enemy_count": 53,
+      "timestamp": 1784387653.0483909
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "前锋集群",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 360.4,
+      "ally_count": 23,
+      "enemy_count": 0,
+      "timestamp": 1784396149.4606972
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "侦察组: 3个单位前出向敌方方向推进，探测敌方位置和火力配置",
+        "target": [
+          0.35,
+          0.2
+        ],
+        "unit_ids": [
+          1,
+          2,
+          3
+        ]
+      },
+      "outcome_score": 350.0,
+      "ally_count": 27,
+      "enemy_count": 29,
+      "timestamp": 1784387610.2508132
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面5单位激活接敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 350.0,
+      "ally_count": 6,
+      "enemy_count": 3,
+      "timestamp": 1784441039.3137424
+    },
+    {
+      "decision": {
+        "action": "idle",
+        "reason": "无行动"
+      },
+      "outcome_score": 344.3,
+      "ally_count": 1,
+      "enemy_count": 4,
+      "timestamp": 1784464237.8029017
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 340.0,
+      "ally_count": 28,
+      "enemy_count": 2,
+      "timestamp": 1784398018.632916
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路步兵反坦克侦察",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 336.9,
+      "ally_count": 17,
+      "enemy_count": 3,
+      "timestamp": 1784464383.956872
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路步兵反坦克",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 333.3,
+      "ally_count": 23,
+      "enemy_count": 4,
+      "timestamp": 1784464241.4229956
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "全军压上",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 320.0,
+      "ally_count": 28,
+      "enemy_count": 2,
+      "timestamp": 1784397327.0646684
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面激活15个单位压制敌军",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 312.2,
+      "ally_count": 32,
+      "enemy_count": 20,
+      "timestamp": 1784439976.4819424
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面15单位激活接敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 299.1,
+      "ally_count": 25,
+      "enemy_count": 10,
+      "timestamp": 1784440415.0626922
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "全部单位自动推进歼敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 297.9,
+      "ally_count": 24,
+      "enemy_count": 25,
+      "timestamp": 1784401769.368153
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "[降级] LLM不可用,执行保守防御",
+        "target": [
+          0.5,
+          0.65
+        ],
+        "unit_ids": [
+          0,
+          1,
+          2
+        ]
+      },
+      "outcome_score": 274.7,
+      "ally_count": 3,
+      "enemy_count": 2,
+      "timestamp": 1784464380.3757515
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面15单位激活接敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 267.2,
+      "ally_count": 29,
+      "enemy_count": 24,
+      "timestamp": 1784440686.8623977
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路步兵反坦克+侦察",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 260.0,
+      "ally_count": 27,
+      "enemy_count": 4,
+      "timestamp": 1784464204.026062
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "侦察组: 3个单位前出向敌方方向推进，探测敌方位置和火力配置",
+        "target": [
+          0.35,
+          0.2
+        ],
+        "unit_ids": [
+          1,
+          2,
+          3
+        ]
+      },
+      "outcome_score": 255.9,
+      "ally_count": 25,
+      "enemy_count": 40,
+      "timestamp": 1784387658.1206684
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路步兵反坦克侦察",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "outcome_score": 251.2,
+      "ally_count": 24,
+      "enemy_count": 3,
+      "timestamp": 1784464361.6958523
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面激活15个单位接敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 241.0,
+      "ally_count": 28,
+      "enemy_count": 7,
+      "timestamp": 1784439881.8830752
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "侦察组: 2个单位前出至中场探测敌情，到达后见机撤退",
+        "target": [
+          0.5,
+          0.4
+        ],
+        "unit_ids": [
+          1,
+          2
+        ]
+      },
+      "outcome_score": 239.1,
+      "ally_count": 24,
+      "enemy_count": 43,
+      "timestamp": 1784387790.7286046
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面15单位激活接敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 235.8,
+      "ally_count": 18,
+      "enemy_count": 3,
+      "timestamp": 1784441304.8274858
+    },
+    {
+      "decision": {
+        "action": "zoom_out",
+        "reason": "缩小视野寻找敌方旗帜位置"
+      },
+      "outcome_score": 219.9,
+      "ally_count": 25,
+      "enemy_count": 6,
+      "timestamp": 1784466478.9039216
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 218.8,
+      "ally_count": 24,
+      "enemy_count": 14,
+      "timestamp": 1784401366.5515804
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 210.0,
+      "ally_count": 33,
+      "enemy_count": 8,
+      "timestamp": 1784438896.9913518
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 210.0,
+      "ally_count": 33,
+      "enemy_count": 8,
+      "timestamp": 1784439127.8891816
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "侦察组: 2个单位前出至中场探测敌情，到达后见机撤退",
+        "target": [
+          0.5,
+          0.4
+        ],
+        "unit_ids": [
+          1,
+          2
+        ]
+      },
+      "outcome_score": 201.4,
+      "ally_count": 25,
+      "enemy_count": 34,
+      "timestamp": 1784387816.6906862
+    },
+    {
+      "decision": {
+        "action": "move",
+        "reason": "侦察组: 2个单位前出至中场探测敌情，到达后见机撤退",
+        "target": [
+          0.5,
+          0.4
+        ],
+        "unit_ids": [
+          1,
+          2
+        ]
+      },
+      "outcome_score": 201.0,
+      "ally_count": 26,
+      "enemy_count": 51,
+      "timestamp": 1784387806.0329204
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路步兵反坦克侦察",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "outcome_score": 201.0,
+      "ally_count": 23,
+      "enemy_count": 5,
+      "timestamp": 1784465631.3313468
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路步兵反坦克+侦察",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 200.0,
+      "ally_count": 24,
+      "enemy_count": 2,
+      "timestamp": 1784464357.5935888
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路步兵反坦克侦察",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "outcome_score": 200.0,
+      "ally_count": 26,
+      "enemy_count": 11,
+      "timestamp": 1784465385.5157485
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路步兵反坦克",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "outcome_score": 178.2,
+      "ally_count": 15,
+      "enemy_count": 4,
+      "timestamp": 1784464878.7545784
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "左路步兵反坦克",
+        "unit_ids": [
+          1,
+          2,
+          3
+        ]
+      },
+      "outcome_score": 163.7,
+      "ally_count": 10,
+      "enemy_count": 2,
+      "timestamp": 1784464815.7471824
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 159.9,
+      "ally_count": 16,
+      "enemy_count": 3,
+      "timestamp": 1784399928.036762
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 151.8,
+      "ally_count": 29,
+      "enemy_count": 8,
+      "timestamp": 1784440138.8068194
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面15单位激活接敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 146.2,
+      "ally_count": 28,
+      "enemy_count": 6,
+      "timestamp": 1784440723.553716
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 143.6,
+      "ally_count": 28,
+      "enemy_count": 7,
+      "timestamp": 1784439942.6952188
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 141.9,
+      "ally_count": 30,
+      "enemy_count": 8,
+      "timestamp": 1784440111.0175211
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面15单位激活接敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 140.0,
+      "ally_count": 28,
+      "enemy_count": 9,
+      "timestamp": 1784440355.7291582
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面15单位激活压制",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 137.5,
+      "ally_count": 28,
+      "enemy_count": 8,
+      "timestamp": 1784440256.3878546
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "全部单位自动推进歼敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 135.7,
+      "ally_count": 21,
+      "enemy_count": 5,
+      "timestamp": 1784401776.2749283
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 130.3,
+      "ally_count": 23,
+      "enemy_count": 5,
+      "timestamp": 1784401552.5305903
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 120.4,
+      "ally_count": 22,
+      "enemy_count": 5,
+      "timestamp": 1784401583.1434412
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 120.0,
+      "ally_count": 31,
+      "enemy_count": 7,
+      "timestamp": 1784438779.8354928
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面15单位激活接敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 119.9,
+      "ally_count": 27,
+      "enemy_count": 11,
+      "timestamp": 1784440695.328507
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面15单位激活接敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 118.6,
+      "ally_count": 22,
+      "enemy_count": 3,
+      "timestamp": 1784440897.2044966
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "正面15单位激活接敌",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 116.5,
+      "ally_count": 22,
+      "enemy_count": 3,
+      "timestamp": 1784441056.5898294
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 114.5,
+      "ally_count": 22,
+      "enemy_count": 5,
+      "timestamp": 1784401789.0309627
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 112.7,
+      "ally_count": 24,
+      "enemy_count": 5,
+      "timestamp": 1784401371.0854237
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 110.4,
+      "ally_count": 16,
+      "enemy_count": 3,
+      "timestamp": 1784400126.2938173
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "全选所有单位直接推进",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 109.4,
+      "ally_count": 16,
+      "enemy_count": 3,
+      "timestamp": 1784400063.424855
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "全选所有单位直接推进",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 109.2,
+      "ally_count": 16,
+      "enemy_count": 3,
+      "timestamp": 1784400067.24969
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 109.2,
+      "ally_count": 16,
+      "enemy_count": 3,
+      "timestamp": 1784400090.8343568
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 109.0,
+      "ally_count": 18,
+      "enemy_count": 2,
+      "timestamp": 1784399898.3027146
+    },
+    {
+      "decision": {
+        "action": "select",
+        "reason": "",
+        "unit_ids": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "outcome_score": 108.5,
+      "ally_count": 16,
+      "enemy_count": 3,
+      "timestamp": 1784399932.3407924
+    }
+  ]
+}
