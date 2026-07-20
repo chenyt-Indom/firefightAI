@@ -5434,25 +5434,19 @@ def _apply_patches():
         return _orig_run(self)
     gc_mod.GameController.run = _patched_run
     
-    # 🔥 修复过早游戏结束: ally_count==0必须连续5轮才判定
+    # 🔥 修复过早游戏结束: 只有画面无任何单位(双方都为0)才算结束
     _orig_check_game_over = gc_mod.GameController._check_game_over
-    _ally_zero_count = {"count": 0}
     def _patched_check_game_over(self, state):
         elapsed = time.time() - self._start_time
+        # 超时才算结束
         if elapsed > self.game_over_timeout:
+            logger.info(f"游戏超时({self.game_over_timeout:.0f}s)")
             return True
-        if state.ally_count == 0:
-            _ally_zero_count["count"] += 1
-            if self._cycle_count > 10 and _ally_zero_count["count"] >= 5:
-                logger.info("己方全灭(连续5轮确认)")
-                self._victory = False
-                return True
-        else:
-            _ally_zero_count["count"] = 0
-        if state.enemy_count == 0 and self._cycle_count > 10:
-            logger.info("敌方全灭, 胜利!")
-            self._victory = True
+        # 🔥 只有双方都为0(真正的结束画面)才判结束
+        if state.ally_count == 0 and state.enemy_count == 0 and self._cycle_count > 10:
+            logger.info("检测到结束画面(双方均为0)")
             return True
+        # 无效状态快速跳过
         return False
     gc_mod.GameController._check_game_over = _patched_check_game_over
     
