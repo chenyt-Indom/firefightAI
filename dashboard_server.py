@@ -882,134 +882,99 @@ def api_ai_self_improve():
     })
 
 @app.route("/api/learning_log/train", methods=["POST"])
-
 def api_learning_log_train():
     """将AI学习日志中的知识用于训练和调整AI参数，并同步到GitHub"""
     if len(_learning_log) < 3:
         return jsonify({"status": "error", "error": "学习日志条目不足（至少需要3条）"}), 400
-
+    
+    _train_status = {"running": True, "result": None}
     add_learning_log("self_learn", "开始从学习日志训练AI参数", f"共{len(_learning_log)}条知识")
 
     def do_train():
         try:
-            # 提取最近50条学习日志作为训练材料
             recent = _learning_log[-50:]
             knowledge_text = "\n".join([
                 f"[{e['category']}] {e['message']}" + (f" | {e['detail'][:200]}" if e.get('detail') else "")
                 for e in recent
             ])
 
-            prompt = f"""你是一个AI战术学习系统。以下是从实战、搜索和对话中积累的AI学习日志。请分析这些知识并输出可执行的战术参数调整方案。
-
-【AI学习日志（最近{len(recent)}条）】
-{knowledge_text[:6000]}
-
-请输出：
-1. **知识摘要**：总结AI学到了哪些关键战术知识（3-5条）
-2. **参数调整建议**：基于学到的知识，建议调整哪些AI参数（如temperature、learning_rate、决策权重等）
-3. **新战术规则**：提取2-3条可转化为规则的战术要点
-4. **优先级排序**：按重要性排列下一步应优先学习的方向
-
-请用中文，简洁专业。"""
-
-            r = _deepseek_chat([{"role": "user", "content": prompt}],
-                              max_tokens=1024, temperature=0.3, stream=False, timeout=60)
-            if not r.get("success"):
-                socketio.emit("learning_log_train_result", {"status": "error", "error": r.get("error", "分析失败")})
-                return
-
-            analysis = r["content"]
-            add_learning_log("self_learn", "学习日志训练完成", analysis[:300])
-
-            # 🔥 第二步：提取具体的参数调整值
-            param_prompt = f"""基于以下分析，请输出JSON格式的参数调整方案。只输出JSON，不要其他内容。
-
-分析：
-{analysis[:3000]}
-
-当前参数：
-{json.dumps(_self_learning_params, ensure_ascii=False)}
-
-请输出JSON格式，包含以下字段（只包含需要调整的字段）：
-{{
-    "temperature": 0.0-0.5之间的值,
-    "learning_rate": 0.001-0.1之间的值,
-    "tactical_aggressiveness": 0.0-1.0之间的值,
-    "confidence_threshold": 0.0-1.0之间的值,
-    "adjustment_reason": "调整原因简述"
-}}
-
-只输出JSON:"""
-
-            param_r = _deepseek_chat([{"role": "user", "content": param_prompt}],
-                                     max_tokens=512, temperature=0.1, stream=False, timeout=30)
+            # 🔥 简化版: 直接本地分析+调参，避免DeepSeek API超时
+            analysis_lines = []
+            params = _load_learning_params() or {}
             
-            params_adjusted = {}
-            if param_r.get("success"):
-                try:
-                    # 尝试提取JSON
-                    content = param_r["content"].strip()
-                    # 清理可能的markdown标记
-                    if "```json" in content:
-                        content = content.split("```json")[1].split("```")[0].strip()
-                    elif "```" in content:
-                        content = content.split("```")[1].split("```")[0].strip()
-                    
-                    suggested = json.loads(content)
-                    
-                    # 应用参数调整（在合理范围内）
-                    for key in ["temperature", "learning_rate", "tactical_aggressiveness", "confidence_threshold"]:
-                        if key in suggested and isinstance(suggested[key], (int, float)):
-                            _self_learning_params[key] = suggested[key]
-                    
-                    _self_learning_params["total_learnings"] = _self_learning_params.get("total_learnings", 0) + 1
-                    _self_learning_params["last_learned"] = datetime.now().isoformat()
-                    _self_learning_params["last_adjustment_reason"] = suggested.get("adjustment_reason", "基于学习日志训练")
-                    
-                    _save_learning_params()
-                    params_adjusted = {k: _self_learning_params[k] for k in ["temperature", "learning_rate", "tactical_aggressiveness", "confidence_threshold"]}
-                    
-                    add_learning_log("self_learn", "参数已自动调整", f"新参数: {json.dumps(params_adjusted, ensure_ascii=False)}")
-                except (json.JSONDecodeError, KeyError, ValueError) as e:
-                    logger.warning(f"参数解析失败: {e}, 原始内容: {content[:200]}")
-                    add_learning_log("self_learn", "参数解析失败，保留原参数", str(e)[:100])
-
-            # 保存训练结果到数据库
-            try:
-                db_path = PROJECT_ROOT / "data" / "firefight_ai.db"
-                conn = _sqlite3.connect(str(db_path))
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS learning_log_train_results (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        log_count INTEGER,
-                        analysis TEXT,
-                        params_adjusted TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                conn.execute(
-                    "INSERT INTO learning_log_train_results (log_count, analysis, params_adjusted) VALUES (?,?,?)",
-                    (len(recent), analysis[:5000], json.dumps(params_adjusted, ensure_ascii=False))
-                )
-                conn.commit()
-                conn.close()
-            except Exception:
-                pass
-
-            # 🔥 自动推送参数到GitHub
-            _auto_push_learning_params()
-            _auto_upload_params_to_server()
-
+            # 分析学习日志
+            categories = {}
+            for e in recent:
+                cat = e.get('category', 'unknown')
+                categories[cat] = categories.get(cat, 0) + 1
+            
+            analysis_lines.append(f"📊 分析{len(recent)}条日志: " + ", ".join(f"{k}:{v}条" for k,v in sorted(categories.items(), key=lambda x:-x[1])[:5]))
+            
+            # 提取战术关键词
+            all_text = knowledge_text.lower()
+            tactics_found = []
+            keywords = {
+                "侧翼包抄": ("tactical_aggressiveness", 0.08), "迂回": ("tactical_aggressiveness", 0.05),
+                "正面进攻": ("tactical_aggressiveness", 0.03), "防守": ("tactical_aggressiveness", -0.03),
+                "快速部署": ("execution_speed", 0.05), "火力压制": ("tactical_aggressiveness", 0.04),
+                "牺牲": ("defense_weight", 0.05), "撤退": ("tactical_aggressiveness", -0.05),
+                "闪电战": ("tactical_aggressiveness", 0.1), "稳扎稳打": ("tactical_aggressiveness", -0.02),
+            }
+            adjustments = {}
+            for kw, (param, delta) in keywords.items():
+                if kw in all_text:
+                    adjustments[param] = adjustments.get(param, 0) + delta
+                    tactics_found.append(kw)
+            
+            if tactics_found:
+                analysis_lines.append(f"🎯 识别战术: {', '.join(tactics_found[:8])}")
+            
+            # 应用参数调整
+            for param, delta in adjustments.items():
+                if param not in params:
+                    params[param] = 0.5
+                params[param] = max(0.01, min(0.99, params[param] + delta))
+            
+            params["total_learnings"] = params.get("total_learnings", 0) + len(recent)
+            params["last_trained"] = datetime.now().isoformat()
+            
+            # 🔥 优化操作速度
+            if "execution_speed" in adjustments:
+                params["tap_delay"] = max(0.05, params.get("tap_delay", 0.2) - 0.02)
+                params["swipe_duration"] = max(300, params.get("swipe_duration", 1000) - 50)
+                params["batch_execution"] = True
+                analysis_lines.append("⚡ 操作速度已优化: tap_delay↓ swipe_duration↓")
+            if len(recent) > 10:
+                params["multitasking"] = True
+                analysis_lines.append("🔀 多任务协同已启用")
+            
+            _save_learning_params(params)
+            analysis = "\n".join(analysis_lines)
+            
+            # 🔥 总是发送结果事件(无论成功失败)
             socketio.emit("learning_log_train_result", {
                 "status": "ok",
                 "log_count": len(recent),
                 "analysis": analysis,
-                "params_adjusted": params_adjusted,
-                "time": datetime.now().isoformat(),
+                "params_adjusted": list(adjustments.keys()),
+                "tactics_found": len(tactics_found),
             })
+            _train_status["result"] = "ok"
+            
+            # 也存到知识库
+            add_knowledge("self_learn", f"训练分析 ({len(tactics_found)}战术)", analysis, "auto_train")
+            
+            # 自动推送到服务器和GitHub
+            _auto_push_learning_params()
+            _auto_upload_params_to_server()
+            
         except Exception as e:
-            socketio.emit("learning_log_train_result", {"status": "error", "error": str(e)[:200]})
-
+            logger.error(f"训练失败: {e}")
+            socketio.emit("learning_log_train_result", {
+                "status": "error", "error": str(e)[:200]
+            })
+            _train_status["result"] = "error"
+    
     threading.Thread(target=do_train, daemon=True).start()
     return jsonify({"status": "training", "log_count": len(_learning_log)})
 
@@ -5320,6 +5285,93 @@ def _on_cycle_event(event: dict):
     
     socketio.emit("cycle_update", get_state())
     socketio.emit("ai_thinking_update", {"thinking": thinking, "cycle": cycle, "analysis": analysis, "reason": reason_display, "prediction_accuracy": _predictor.get_accumulated_wisdom().get("accuracy", 0) if _predictor else 0})
+
+# ═══ 自动缩放管理 + 速度优化 ═══
+_zoom_state = {"last_zoom_out": 0, "is_zoomed_in": False, "enemy_not_found_count": 0}
+_zoom_check_interval = 3  # 每3轮检查一次
+
+def _manage_auto_zoom(cycle: int, event: dict):
+    """自动缩放管理: 放大地图5秒内缩小，寻找敌人时自动放大后缩小"""
+    global _zoom_state
+    if cycle % _zoom_check_interval != 0:
+        return
+    
+    try:
+        allies = event.get("allies", 0)
+        enemies = event.get("enemies", 0)
+        now = time.time()
+        
+        # 如果看不见敌人超过5轮，放大寻找
+        if enemies == 0:
+            _zoom_state["enemy_not_found_count"] += 1
+            if _zoom_state["enemy_not_found_count"] >= 5:
+                # 放大寻找
+                _zoom_state["is_zoomed_in"] = True
+                _zoom_state["last_zoom_out"] = now
+                _zoom_state["enemy_not_found_count"] = 0
+                _do_zoom("in")
+                logger.debug("🔍 放大寻找敌人")
+        else:
+            _zoom_state["enemy_not_found_count"] = 0
+        
+        # 如果放大超过5秒，强制缩小
+        if _zoom_state["is_zoomed_in"] and now - _zoom_state["last_zoom_out"] > 5:
+            _do_zoom("out_max")  # 缩到最小
+            _zoom_state["is_zoomed_in"] = False
+            logger.debug("🔄 5秒限制: 强制缩小到最小")
+        
+        # 如果看不清楚蓝条（allies=0且之前有），缩小到正常
+        if allies == 0 and now - _zoom_state["last_zoom_out"] > 10:
+            _do_zoom("out")
+            
+    except Exception as e:
+        logger.debug(f"自动缩放异常: {e}")
+
+def _optimize_execution_speed(cycle: int, cycle_time_ms: float):
+    """根据每轮耗时自动优化操作速度"""
+    if cycle < 3:
+        return
+    
+    try:
+        params = _load_learning_params() or {}
+        target_ms = params.get("target_cycle_ms", 1000)
+        
+        # 如果每轮超过2秒，加速
+        if cycle_time_ms > 2000:
+            params["tap_delay"] = max(0.05, params.get("tap_delay", 0.2) - 0.01)
+            params["swipe_duration"] = max(300, params.get("swipe_duration", 1000) - 30)
+            logger.debug(f"⚡ 加速: tap_delay={params['tap_delay']:.3f}, swipe={params['swipe_duration']}")
+            _save_learning_params(params)
+        
+        # 如果连续3轮又快又准(<800ms)，可以放慢一点提高精度
+        elif cycle_time_ms < 500 and cycle > 6:
+            params["swipe_duration"] = min(1500, params.get("swipe_duration", 1000) + 50)
+            params["tap_delay"] = min(0.3, params.get("tap_delay", 0.2) + 0.01)
+            _save_learning_params(params)
+            
+    except Exception as e:
+        logger.debug(f"速度优化异常: {e}")
+
+def _do_zoom(direction: str):
+    """执行缩放（通过ADB发送按键）"""
+    try:
+        adb_exe = _find_adb_exe()
+        port = _emulator_adb_port
+        dev = f"127.0.0.1:{port}" if _emulator_type == "mumu" else f"emulator-{port}"
+        
+        if direction == "in":
+            subprocess.run([adb_exe, "-s", dev, "shell", "input", "keyevent", "KEYCODE_ZOOM_IN"], 
+                         capture_output=True, timeout=3)
+        elif direction == "out_max":
+            # 连按多次缩小到最小
+            for _ in range(8):
+                subprocess.run([adb_exe, "-s", dev, "shell", "input", "keyevent", "KEYCODE_ZOOM_OUT"],
+                             capture_output=True, timeout=2)
+        else:
+            subprocess.run([adb_exe, "-s", dev, "shell", "input", "keyevent", "KEYCODE_ZOOM_OUT"],
+                         capture_output=True, timeout=3)
+    except Exception as e:
+        logger.debug(f"缩放执行失败: {e}")
 
 
 # ── Patch (延迟导入，避免服务器端缺少游戏依赖) ──
