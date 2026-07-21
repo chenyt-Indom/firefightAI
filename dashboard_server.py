@@ -12064,55 +12064,68 @@ def api_emulator_screen():
 
 @app.route("/api/emulator/stream")
 def api_emulator_stream():
-    """MJPEG流式推送模拟器画面 - 使用ADB screencap"""
-    import struct, io, threading as _thr, queue as _queue
+    """MJPEG流 - 录屏级: raw screencap + PIL转换"""
+    import threading as _thr, queue as _queue, io
     from collections import deque
     
     adb_exe = _get_adb_for_emulator()
     port = _emulator_adb_port
     dev_id = f"127.0.0.1:{port}"
+    STREAM_WIDTH = 960
+    TARGET_FPS = 30
     
     frame_buffer = _queue.Queue(maxsize=2)
     capture_running = [True]
-    stats = {"frames_captured": 0, "errors": 0}
+    stats = {"frames_captured": 0}
     
-    def adb_capture_worker():
-        """ADB screencap截图工作线程"""
-        logger.info(f"ADB截图流启动: {dev_id}")
+    def capture_worker():
+        """ADB raw screencap 高速截取"""
+        t0 = time.perf_counter()
+        errors = 0
         while capture_running[0]:
             try:
-                # 1秒3帧
-                time.sleep(0.3)
-                r = subprocess.run(
-                    [adb_exe, "-s", dev_id, "exec-out", "screencap", "-p"],
-                    capture_output=True, timeout=3
-                )
+                r = subprocess.run([adb_exe, "-s", dev_id, "exec-out", "screencap"],
+                    capture_output=True, timeout=2)
                 if r.returncode == 0 and len(r.stdout) > 100:
                     try:
-                        frame_buffer.put_nowait(r.stdout)
-                        stats["frames_captured"] += 1
-                    except _queue.Full:
-                        try: frame_buffer.get_nowait()
+                        from PIL import Image
+                        raw = r.stdout
+                        w = struct.unpack_from("<I", raw, 0)[0]
+                        h = struct.unpack_from("<I", raw, 4)[0]
+                        pixels = raw[12:]
+                        img = Image.frombytes("RGBA", (w, h), pixels, "raw")
+                        img = img.convert("RGB")
+                        if w > STREAM_WIDTH:
+                            img = img.resize((STREAM_WIDTH, int(h * STREAM_WIDTH / w)), Image.LANCZOS)
+                        buf = io.BytesIO()
+                        img.save(buf, format="JPEG", quality=65)
+                        frame = buf.getvalue()
+                        try: frame_buffer.put_nowait(frame); stats["frames_captured"] += 1
                         except: pass
-                        try: frame_buffer.put_nowait(r.stdout)
-                        except: pass
-            except Exception as e:
-                stats["errors"] += 1
-                if stats["errors"] <= 3 or stats["errors"] % 30 == 0:
-                    logger.warning(f"ADB截图异常 #{stats['errors']}: {e}")
-                time.sleep(1)
+                    except: pass
+                else:
+                    errors += 1
+                    if errors <= 2: time.sleep(0.05)
+            except: time.sleep(0.1)
+    cap = _thr.Thread(target=capture_worker, daemon=True)
+    cap.start()
     
-    def scrcpy_worker():
-        adb_capture_worker()
+    # Wait for first frame
+    for _ in range(30):
+        if not frame_buffer.empty(): break
+        time.sleep(0.1)
     
-    cap_thread = _thr.Thread(target=adb_capture_worker, daemon=True)
-    cap_thread.start()
-    STREAM_WIDTH = 960
-    STREAM_QUALITY = 55
-    TARGET_FPS = 10
-    FRAME_BUDGET = 1.0 / TARGET_FPS
+    def gen():
+        while capture_running[0]:
+            try:
+                frame = frame_buffer.get(timeout=1)
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n" % len(frame) + frame + b"\r\n")
+            except: time.sleep(0.05)
     
-    def generate_frames():
+    def cleanup():
+        capture_running[0] = False
+    return Response(stream_with_context(gen()), mimetype="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control":"no-cache","Access-Control-Allow-Origin":"*","X-Accel-Buffering":"no"}, direct_passthrough=True)
         last_frame_time = time.perf_counter()
         frame_count = 0
         
@@ -12161,27 +12174,6 @@ def api_emulator_stream():
                 
             except Exception as e:
                 time.sleep(0.05)
-                continue
-    
-    # 客户端断开时停止捕获线程
-    def cleanup():
-        capture_running[0] = False
-    
-    return Response(
-        stream_with_context(generate_frames()),
-        mimetype="multipart/x-mixed-replace; boundary=frame",
-        headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-            "Connection": "close",
-            "Access-Control-Allow-Origin": "*",
-            "X-Accel-Buffering": "no",
-        },
-        direct_passthrough=True,
-    )
-
-
 @app.route("/api/decision_chain/benchmark")
 def api_decision_chain_benchmark():
     """决策链性能测试 - 确保截图→指令 < 2秒"""
