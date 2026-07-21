@@ -5154,7 +5154,16 @@ def _run_ai_loop():
     ocr = UIReader()
     ocr.load_model()
     state_manager = StateManager(screen_size=ss)
-    commander = TacticalCommander(provider=lc["provider"], model=lc["model"], api_key=lc["api_key"], api_base=lc["api_base"], temperature=lc["temperature"], max_tokens=lc["max_tokens"], timeout=lc["timeout"], retry_count=lc["retry_count"])
+    commander = TacticalCommander(
+        provider=lc["provider"], model=lc["model"],
+        api_key=lc["api_key"], api_base=lc["api_base"],
+        temperature=lc["temperature"], max_tokens=lc["max_tokens"],
+        timeout=lc["timeout"], retry_count=lc["retry_count"],
+        fallback_provider=lc.get("fallback_provider", "zhipu"),
+        fallback_model=lc.get("fallback_model", "glm-4-flash"),
+        fallback_api_key=lc.get("fallback_api_key", ""),
+        fallback_api_base=lc.get("fallback_api_base", "https://open.bigmodel.cn/api/paas/v4"),
+    )
     commander.load_prompts()
     parser = CommandParser(screen_size=ss)
     gs = str(int(time.time()))
