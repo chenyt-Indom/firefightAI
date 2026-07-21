@@ -278,6 +278,7 @@ def add_learning_log(category: str, message: str, detail: str = ""):
     socketio.emit("learning_log_update", {"entry": entry, "total": len(_learning_log)})
     _save_learning_log()  # 🔥 实时持久化到磁盘
     _sync_learning_to_github()  # 后台同步到GitHub
+    _maybe_condense_knowledge()  # 超过阈值自动压缩为长期记忆
 
 
 def add_system_log(category: str, message: str, detail: str = ""):
@@ -317,6 +318,40 @@ def _save_learning_log():
         _LEARNING_LOG_FILE.write_text(json.dumps(_learning_log[-500:], ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:
         logger.warning(f"保存学习日志失败: {e}")
+
+def _maybe_condense_knowledge():
+    """当学习条目超过100条时，自动将旧条目压缩为长期记忆摘要"""
+    global _learning_log, _ai_knowledge_base
+    if len(_learning_log) < 100:
+        return
+    try:
+        # 检查是否最近60秒内已压缩
+        last = getattr(_maybe_condense_knowledge, "_last", 0)
+        if time.time() - last < 60:
+            return
+        _maybe_condense_knowledge._last = time.time()
+        
+        # 取最旧的50条压缩为一条摘要
+        old = _learning_log[:50]
+        cats = {}
+        for e in old:
+            c = e.get("category", "other")
+            if c not in cats: cats[c] = []
+            cats[c].append(e.get("message", "")[:100])
+        
+        summary = "长期记忆摘要: " + "; ".join(f"{k}({len(v)}条)" for k, v in cats.items())
+        _ai_knowledge_base.append({
+            "type": "condensed", 
+            "time": time.time(), 
+            "summary": summary,
+            "source_count": len(old)
+        })
+        _save_knowledge_base()
+        # 保留最近50条，清掉已压缩的旧条目
+        _learning_log = _learning_log[30:]  # remove oldest 30
+        logger.info(f"知识压缩: {len(old)}条→1条摘要, 剩余{len(_learning_log)}条")
+    except Exception as e:
+        logger.debug(f"知识压缩跳过: {e}")
 
 def _sync_learning_to_github():
     """后台自动同步学习数据到GitHub"""
@@ -2271,32 +2306,64 @@ def on_ai_chat(data: dict):
                 "请用中文回答，保持专业、简洁。如果涉及战术决策，请分步骤说明你的思考过程。"
             )
 
-            # 🔥 注入今日学习内容 + 战术规则
-            from datetime import datetime as _dt
-            today = _dt.now().strftime("%Y-%m-%d")
+            # 🔥 持续记忆注入：全量学习摘要 + 今日详情 + 战术规则
+            from datetime import datetime as _dt, timedelta as _td
+            now = _dt.now()
+            today = now.strftime("%Y-%m-%d")
+            
+            # 累积学习统计
+            total_logs = len(_learning_log)
+            all_cats = {}
+            all_dates = set()
+            for e in _learning_log:
+                c = e.get("category", "other")
+                all_cats[c] = all_cats.get(c, 0) + 1
+                try:
+                    all_dates.add(_dt.fromtimestamp(e.get("time",0)).strftime("%m-%d"))
+                except: pass
+            
+            # 今日学习
             today_logs = [e for e in _learning_log if _dt.fromtimestamp(e.get("time",0)).strftime("%Y-%m-%d") == today]
+            # 昨天学习
+            yesterday = (now - _td(days=1)).strftime("%Y-%m-%d")
+            yesterday_logs = [e for e in _learning_log if _dt.fromtimestamp(e.get("time",0)).strftime("%Y-%m-%d") == yesterday]
+            
+            memory_section = (
+                f"\n\n══════════════════════════════════════"
+                f"\n【🧠 持续记忆】我是一套会持续积累的AI系统"
+                f"\n══════════════════════════════════════"
+                f"\n📊 积累总数：{total_logs} 条经验（覆盖 {len(all_dates)} 天）"
+                f"\n📂 分类：{', '.join(f'{k}:{v}条' for k,v in sorted(all_cats.items()))}"
+            )
+            
+            # 今日详情
             if today_logs:
-                sys_prompt += f"\n\n【📚 今日已学内容 ({today}, 共{len(today_logs)}条)】\n"
-                for e in today_logs[-15:]:
-                    sys_prompt += f"- [{e.get('category','')}] {e.get('message','')[:200]}\n"
-
-            # 加载战术规则库
+                memory_section += f"\n\n📅 今日({today})已学 {len(today_logs)} 条："
+                for e in today_logs[-10:]:
+                    memory_section += f"\n  • [{e.get('category','')}] {e.get('message','')[:150]}"
+            
+            # 昨日对比（展示持续性）
+            if yesterday_logs:
+                memory_section += f"\n\n📅 昨日已学 {len(yesterday_logs)} 条（持续积累中）"
+            
+            # 战术规则库
             tactics_file = PROJECT_ROOT / "data" / "tactics_rules.yaml"
             if tactics_file.exists():
                 try:
                     import yaml
                     tdata = yaml.safe_load(tactics_file.read_text(encoding='utf-8'))
-                    if tdata and isinstance(tdata, dict):
-                        rules = tdata.get("rules", tdata)
-                        if rules and isinstance(rules, list):
-                            sys_prompt += f"\n【🎯 战术规则库 (已学{len(rules)}条)】\n"
-                            for r in rules[-10:]:
-                                if isinstance(r, dict):
-                                    sys_prompt += f"- {r.get('name','')}: {r.get('desc','')}\n"
-                                else:
-                                    sys_prompt += f"- {str(r)[:200]}\n"
-                except:
-                    pass
+                    rules = tdata.get("rules", tdata) if isinstance(tdata, dict) else []
+                    if rules and isinstance(rules, list) and len(rules) > 0:
+                        memory_section += f"\n\n🎯 战术规则库 ({len(rules)}条)："
+                        for r in rules[-8:]:
+                            if isinstance(r, dict):
+                                memory_section += f"\n  • {r.get('name','')}: {r.get('desc','')[:100]}"
+                            else:
+                                memory_section += f"\n  • {str(r)[:150]}"
+                except: pass
+            
+            memory_section += "\n══════════════════════════════════════\n"
+            sys_prompt += memory_section
 
             if is_correction:
                 sys_prompt += (
@@ -3244,10 +3311,29 @@ def api_learning_pull():
         if result.returncode == 0:
             _load_persistent_logs()
             _load_knowledge_base()
-            return jsonify({"status": "ok", "logs": len(_learning_log), "knowledge": len(_ai_knowledge_base)})
+            return jsonify({"status": "ok", "logs": len(_learning_log), "knowledge": len(_ai_knowledge_base), "days": len(set(datetime.fromtimestamp(e.get("time",0)).strftime("%Y-%m-%d") for e in _learning_log if e.get("time")))})
         return jsonify({"status": "error", "detail": result.stderr[:200]})
     except Exception as e:
         return jsonify({"status": "error", "detail": str(e)})
+
+@app.route("/api/learning/summary")
+def api_learning_summary():
+    """获取学习总结：累积数据量、分类统计、覆盖天数"""
+    cats = {}
+    days = set()
+    for e in _learning_log:
+        c = e.get("category", "other")
+        cats[c] = cats.get(c, 0) + 1
+        try: days.add(datetime.fromtimestamp(e.get("time",0)).strftime("%Y-%m-%d"))
+        except: pass
+    return jsonify({
+        "total_entries": len(_learning_log),
+        "total_days": len(days),
+        "categories": cats,
+        "knowledge_base": len(_ai_knowledge_base),
+        "latest_entry": _learning_log[-1] if _learning_log else None,
+        "earliest_entry": _learning_log[0] if _learning_log else None,
+    })
 
 @app.route("/api/learning/push")
 def api_learning_push():
