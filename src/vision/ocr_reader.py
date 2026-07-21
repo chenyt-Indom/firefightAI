@@ -43,7 +43,7 @@ class UIReader:
             logger.info("PaddleOCR模型加载成功")
             return True
         except ImportError:
-            logger.warning("PaddleOCR未安装,UI读取功能不可用")
+            logger.debug("PaddleOCR未安装,UI读取功能不可用")
             return False
         except Exception as e:
             logger.error(f"PaddleOCR加载失败: {e}")

@@ -13,7 +13,7 @@ try:
     HAS_SCRCPY = True
 except ImportError:
     HAS_SCRCPY = False
-    logger.warning("scrcpy_client未安装,将使用ADB截图备选方案")
+    logger.debug("scrcpy_client未安装,使用ADB截图备选方案")
 
 from src.execution.adb_utils import ADBUtils
 

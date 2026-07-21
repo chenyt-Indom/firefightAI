@@ -113,7 +113,7 @@ class UnitDetector:
                 return False
 
         # 使用预训练模型作为临时替代
-        logger.warning("未找到训练好的模型,使用YOLOv8n预训练权重作为临时替代")
+        logger.debug("未指定模型路径,使用YOLOv8n预训练权重")
         try:
             self._model = YOLO("yolov8n.pt", task="detect")
             self._model_type = "pytorch_pretrained"
