@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Goto蓝条标注工具</title>
+<style>
+body{margin:0;background:#1a1a2e;color:white;font-family:Arial}
+#toolbar{position:fixed;top:0;left:0;right:0;z-index:10;background:#16213e;padding:10px;display:flex;gap:10px;align-items:center}
+#status{position:fixed;bottom:10px;left:10px;background:#16213e;padding:8px 15px;border-radius:5px;font-size:13px}
+#image-container{position:relative;margin-top:60px;display:inline-block}
+canvas{position:absolute;top:0;left:0}
+img{display:block}
+.btn{padding:6px 14px;border:none;border-radius:4px;cursor:pointer;font-size:13px}
+.btn-prev{background:#333;color:#fff}.btn-next{background:#333;color:#fff}
+.btn-save{background:#00cc66;color:#000}.btn-del{background:#cc3333;color:#fff}
+.btn-clear{background:#ff6600;color:#fff}
+#info{font-size:12px;color:#aaa;margin-left:10px}
+select{padding:5px;background:#333;color:#fff;border:none;border-radius:4px}
+h3{margin:0;color:#00bfff}
+</style></head><body>
+<div id="toolbar">
+<h3>Goto 蓝条标注</h3>
+<span id="info"></span>
+<button class="btn btn-prev" onclick="prevImg()">◀ 上一张</button>
+<button class="btn btn-next" onclick="nextImg()">下一张 ▶</button>
+<select id="classSelect"><option value="0">0-Goto蓝条</option><option value="1">1-单位</option><option value="2">2-其他蓝</option></select>
+<button class="btn btn-save" onclick="saveLabels()">💾 保存标注</button>
+<button class="btn btn-del" onclick="delLast()">✕ 删最后</button>
+<button class="btn btn-clear" onclick="clearAll()">清空</button>
+<button class="btn" style="background:#0066ff;color:#fff" onclick="exportAll()">📦 全部导出</button>
+</div>
+<div id="image-container"><img id="mainImage"><canvas id="canvas"></canvas></div>
+<div id="status">Ready</div>
+
+<script>
+let images=[];let idx=0;let boxes=[];let drawing=false;let sx,sy;
+let CLASS_NAMES=['goto_bar','unit','other_blue'];
+let currentClass=0;
+
+async function loadList(){
+  let r=await fetch('/images/list');
+  images=await r.json();
+  document.getElementById('info').textContent=`${images.length}张图`;
+  loadImage(0);
+}
+
+async function loadImage(i){
+  idx=i;boxes=[];
+  document.getElementById('status').textContent=`Loading #${i}: ${images[i]}`;
+  let img=document.getElementById('mainImage');
+  img.src=`/images/${images[i]}`;
+  await new Promise(r=>{img.onload=r});
+  // 加载已有标注
+  try{
+    let name=images[i].replace('.png','').replace('.jpg','');
+    let r=await fetch(`/labels/${name}.txt`);
+    if(r.ok){
+      let t=await r.text();
+      for(let l of t.split('\n')){
+        if(!l.trim())continue;
+        let p=l.trim().split(' ');
+        let cls=parseInt(p[0]);
+        let xc=parseFloat(p[1])*img.naturalWidth;
+        let yc=parseFloat(p[2])*img.naturalHeight;
+        let w=parseFloat(p[3])*img.naturalWidth;
+        let h=parseFloat(p[4])*img.naturalHeight;
+        boxes.push({cls,x:xc-w/2,y:yc-h/2,w,h});
+      }
+    }
+  }catch(e){}
+  drawAll();
+  document.getElementById('info').textContent=`[${i+1}/${images.length}] ${images[i]} (${boxes.length}标注)`;
+}
+
+function drawAll(){
+  let img=document.getElementById('mainImage');
+  let c=document.getElementById('canvas');
+  c.width=img.naturalWidth;c.height=img.naturalHeight;
+  c.style.width=img.clientWidth+'px';c.style.height=img.clientHeight+'px';
+  let ctx=c.getContext('2d');
+  ctx.clearRect(0,0,c.width,c.height);
+  let colors=['#00ff00','#ff00ff','#00ccff'];
+  for(let b of boxes){
+    ctx.strokeStyle=colors[b.cls];ctx.lineWidth=3;
+    ctx.strokeRect(b.x,b.y,b.w,b.h);
+    ctx.fillStyle=colors[b.cls];
+    ctx.fillText(CLASS_NAMES[b.cls],b.x,b.y-5);
+  }
+}
+
+document.getElementById('canvas').addEventListener('mousedown',e=>{
+  let img=document.getElementById('mainImage');
+  let rect=img.getBoundingClientRect();
+  let sx=(e.clientX-rect.left)*(img.naturalWidth/img.clientWidth);
+  let sy=(e.clientY-rect.top)*(img.naturalHeight/img.clientHeight);
+  boxes.push({cls:parseInt(document.getElementById('classSelect').value),x:sx,y:sy,w:0,h:0});
+  drawing={startX:sx,startY:sy,idx:boxes.length-1};
+});
+
+document.getElementById('canvas').addEventListener('mousemove',e=>{
+  if(!drawing)return;
+  let img=document.getElementById('mainImage');
+  let rect=img.getBoundingClientRect();
+  let ex=(e.clientX-rect.left)*(img.naturalWidth/img.clientWidth);
+  let ey=(e.clientY-rect.top)*(img.naturalHeight/img.clientHeight);
+  let b=boxes[drawing.idx];
+  b.x=Math.min(drawing.startX,ex);
+  b.y=Math.min(drawing.startY,ey);
+  b.w=Math.abs(ex-drawing.startX);
+  b.h=Math.abs(ey-drawing.startY);
+  drawAll();
+});
+
+document.getElementById('canvas').addEventListener('mouseup',e=>{
+  if(!drawing)return;
+  let b=boxes[drawing.idx];
+  if(b.w<3||b.h<3)boxes.pop();
+  drawing=null;drawAll();
+  document.getElementById('status').textContent=`${boxes.length}个标注`;
+});
+
+function saveLabels(){
+  let name=images[idx].replace('.png','').replace('.jpg','');
+  let img=document.getElementById('mainImage');
+  let W=img.naturalWidth,H=img.naturalHeight;
+  let lines=[];
+  for(let b of boxes){
+    if(b.w<3||b.h<3)continue;
+    let xc=(b.x+b.w/2)/W,yc=(b.y+b.h/2)/H,nw=b.w/W,nh=b.h/H;
+    lines.push(`${b.cls} ${xc.toFixed(6)} ${yc.toFixed(6)} ${nw.toFixed(6)} ${nh.toFixed(6)}`);
+  }
+  fetch(`/labels/${name}.txt`,{method:'PUT',body:lines.join('\n')})
+    .then(r=>{document.getElementById('status').textContent=`✅ 已保存 ${lines.length}个标注`})
+    .catch(e=>{document.getElementById('status').textContent='❌ 保存失败'});
+}
+
+function delLast(){boxes.pop();drawAll();}
+function clearAll(){boxes=[];drawAll();}
+function prevImg(){if(idx>0)loadImage(idx-1)}
+function nextImg(){if(idx<images.length-1)loadImage(idx+1)}
+function exportAll(){
+  let data={images:images,labels:{}};
+  for(let img of images){
+    let name=img.replace('.png','').replace('.jpg','');
+    fetch(`/labels/${name}.txt`).then(r=>r.text()).then(t=>{
+      data.labels[name]=t;
+      fetch('/export',{method:'POST',body:JSON.stringify(data)})
+        .then(r=>document.getElementById('status').textContent='✅ 已导出');
+    });
+  }
+}
+document.addEventListener('keydown',e=>{
+  if(e.key==='ArrowLeft')prevImg();
+  if(e.key==='ArrowRight')nextImg();
+  if(e.key==='s'&&e.ctrlKey){e.preventDefault();saveLabels();}
+  if(e.key==='z'&&e.ctrlKey){e.preventDefault();delLast();}
+});
+loadList();
+</script>
+</body></html>

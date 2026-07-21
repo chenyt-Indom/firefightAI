@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Firefight AI 控制面板</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0a0e14; color: #d0d0d0; min-height: 100vh; }
+    .header { background: #11151c; border-bottom: 1px solid #252a33; padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; }
+    .header h1 { font-size: 20px; font-weight: 600; color: #58a5f3; }
+    .header .status { font-size: 14px; padding: 6px 14px; border-radius: 6px; background: #1a1f2b; }
+    .header .status.running { color: #4caf50; }
+    .header .status.stopped { color: #888; }
+    .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+    .controls { display: flex; gap: 10px; margin-bottom: 20px; }
+    .controls button { padding: 10px 28px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+    .btn-start { background: #4caf50; color: #000; }
+    .btn-start:hover { background: #66bb6a; }
+    .btn-stop { background: #e53935; color: #fff; }
+    .btn-stop:hover { background: #f44336; }
+    .cmd-input-wrapper { display: flex; gap: 8px; flex: 1; max-width: 500px; margin-left: auto; }
+    .cmd-input-wrapper input { flex: 1; padding: 10px 14px; border: 1px solid #252a33; border-radius: 8px; background: #1a1f2b; color: #d0d0d0; font-size: 13px; outline: none; }
+    .cmd-input-wrapper input:focus { border-color: #58a5f3; }
+    .btn-send { background: #58a5f3; color: #000; padding: 10px 16px; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .btn-send:hover { background: #7ab8f5; }
+    .btn-pause { background: #ff9800; color: #000; }
+    .btn-pause:hover { background: #ffb74d; }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 20px; }
+    .stat-card { background: #11151c; border: 1px solid #252a33; border-radius: 10px; padding: 16px 18px; }
+    .stat-card .label { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+    .stat-card .value { font-size: 28px; font-weight: 700; }
+    .stat-card .value.blue { color: #58a5f3; }
+    .stat-card .value.red { color: #e53935; }
+    .stat-card .value.green { color: #4caf50; }
+    .stat-card .value.yellow { color: #ff9800; }
+    .main-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; }
+    .panel { background: #11151c; border: 1px solid #252a33; border-radius: 10px; padding: 16px; }
+    .panel h3 { font-size: 14px; font-weight: 600; color: #aaa; margin-bottom: 12px; border-bottom: 1px solid #252a33; padding-bottom: 8px; }
+    .chart-container { height: 300px; position: relative; }
+    .log-list { max-height: 300px; overflow-y: auto; font-size: 12px; }
+    .log-item { padding: 8px 8px; border-bottom: 1px solid #1a1f2b; }
+    .log-item .header { display: flex; gap: 6px; align-items: center; margin-bottom: 3px; background: none; border: none; padding: 0; }
+    .log-item .cyc { color: #888; min-width: 30px; font-size: 11px; }
+    .log-item .act { color: #58a5f3; font-weight: 600; font-size: 12px; flex: 1; }
+    .log-item .sco { min-width: 45px; text-align: right; font-size: 12px; font-weight: 600; }
+    .log-item .sco.pos { color: #4caf50; }
+    .log-item .sco.neg { color: #e53935; }
+    .log-item .reason { font-size: 11px; color: #999; padding-left: 36px; }
+    .cmd-item { background: #1a2530; border-left: 2px solid #ff9800; }
+    .full-width { grid-column: 1 / -1; }
+    .exp-bar { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+    .exp-bar .bar-bg { flex: 1; height: 6px; background: #252a33; border-radius: 3px; overflow: hidden; }
+    .exp-bar .bar-fill { height: 100%; background: #58a5f3; border-radius: 3px; transition: width 0.5s; }
+    .exp-bar span { font-size: 13px; color: #aaa; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>⚔️ Firefight AI 控制面板</h1>
+    <div class="status stopped" id="status-badge">● 已停止</div>
+  </div>
+  <div class="container">
+    <div class="controls">
+      <button class="btn-start" onclick="startAI()">▶ 上线 AI</button>
+      <button class="btn-stop" onclick="stopAI()">■ 停止</button>
+      <div class="cmd-input-wrapper">
+        <input type="text" id="cmd-input" placeholder="💬 输入战术指令, AI将在下一轮执行…" onkeydown="if(event.key==='Enter')sendCommand()">
+        <button class="btn-send" onclick="sendCommand()">发送</button>
+      </div>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card"><div class="label">当前轮次</div><div class="value blue" id="cycle">0</div></div>
+      <div class="stat-card"><div class="label">友军</div><div class="value blue" id="allies">0</div></div>
+      <div class="stat-card"><div class="label">敌军</div><div class="value red" id="enemies">0</div></div>
+      <div class="stat-card"><div class="label">本轮评分</div><div class="value yellow" id="score">0</div></div>
+      <div class="stat-card"><div class="label">总得分</div><div class="value green" id="total-score">0</div></div>
+      <div class="stat-card"><div class="label">平均耗时</div><div class="value" id="avg-time" style="color:#aaa">0ms</div></div>
+      <div class="stat-card"><div class="label">经验库</div><div class="value yellow" id="exp-count">0</div></div>
+      <div class="stat-card"><div class="label">战术规则</div><div class="value blue" id="rules-count">0</div></div>
+    </div>
+
+    <div class="main-grid">
+      <div class="panel full-width">
+        <h3>📊 分数趋势</h3>
+        <div class="chart-container"><canvas id="scoreChart"></canvas></div>
+      </div>
+      <div class="panel">
+        <h3>🧠 决策日志</h3>
+        <div class="log-list" id="decision-log"></div>
+      </div>
+      <div class="panel">
+        <h3>📈 学习进度</h3>
+        <div id="learning-info">
+          <div style="margin-bottom:12px; font-size:13px;">
+            <span style="color:#888">当前状态:</span>
+            <span id="battle-status" style="color:#58a5f3;">待上线</span>
+          </div>
+          <div class="exp-bar">
+            <span>经验:</span>
+            <div class="bar-bg"><div class="bar-fill" id="exp-bar-fill" style="width:0%"></div></div>
+            <span id="exp-label">0条</span>
+          </div>
+          <div style="margin-top:10px; font-size:12px; color:#888;" id="learning-detail"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const socket = io("http://localhost:5000");
+
+    let scoreChart = new Chart(document.getElementById('scoreChart'), {
+      type: 'line',
+      data: { labels: [], datasets: [
+        { label: '本轮评分', data: [], borderColor: '#ff9800', backgroundColor: 'rgba(255,152,0,0.1)', tension: 0.3, pointRadius: 2 },
+        { label: '累计得分', data: [], borderColor: '#4caf50', backgroundColor: 'rgba(76,175,80,0.1)', tension: 0.3, pointRadius: 2, yAxisID: 'y1' }
+      ]},
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#888', font: { size: 11 } } } },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#1a1f2b' } },
+          y: { ticks: { color: '#555' }, grid: { color: '#1a1f2b' } },
+          y1: { position: 'right', ticks: { color: '#555' }, grid: { display: false } }
+        },
+        interaction: { intersect: false, mode: 'index' }
+      }
+    });
+
+    let scoreData = { labels: [], scores: [], totals: [] };
+
+    function startAI() {
+      socket.emit('start');
+      document.getElementById('status-badge').className = 'status running';
+      document.getElementById('status-badge').textContent = '● 连接中...';
+    }
+
+    function stopAI() {
+      socket.emit('stop');
+      document.getElementById('status-badge').className = 'status stopped';
+      document.getElementById('status-badge').textContent = '● 已停止';
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function sendCommand() {
+      var inp = document.getElementById('cmd-input');
+      var cmd = inp.value.trim();
+      if (!cmd) return;
+      socket.emit('send_command', { command: cmd });
+      inp.value = '';
+      inp.placeholder = '指令已发送, AI将在下一轮执行...';
+      setTimeout(function() { inp.placeholder = '💬 输入战术指令, AI将在下一轮执行…'; }, 2000);
+    }
+
+    socket.on('connect', function() { startAI(); });
+
+    socket.on('command_recorded', function(data) {
+      var log = document.getElementById('decision-log');
+      var html = '<div class="log-item cmd-item">' +
+        '<div class="header"><span class="cyc">📝</span>' +
+        '<span class="act" style="color:#ff9800">指挥官: ' + escapeHtml(data.command) + '</span></div></div>' +
+        log.innerHTML;
+      log.innerHTML = html;
+    });
+
+    socket.on('command_analysis', function(data) {
+      var log = document.getElementById('decision-log');
+      var html = '<div class="log-item cmd-item">' +
+        '<div class="header"><span class="cyc">🤖</span>' +
+        '<span class="act" style="color:#58a5f3">AI见解</span></div>' +
+        '<div class="reason">' + escapeHtml(data.analysis || '') + '</div></div>' +
+        log.innerHTML;
+      log.innerHTML = html;
+
+      var detail = document.getElementById('learning-detail');
+      detail.textContent = '最新指令分析: ' + (data.analysis || '').substring(0, 60) + '...';
+    });
+
+    socket.on('cycle_update', function(data) {
+      // 状态卡片
+      document.getElementById('cycle').textContent = data.cycle;
+      document.getElementById('allies').textContent = data.allies;
+      document.getElementById('enemies').textContent = data.enemies;
+
+      var sc = data.score || 0;
+      var scEl = document.getElementById('score');
+      scEl.textContent = (sc >= 0 ? '+' : '') + sc;
+      scEl.className = 'value ' + (sc > 0 ? 'green' : sc < 0 ? 'red' : 'yellow');
+
+      document.getElementById('total-score').textContent = data.total_score || 0;
+      document.getElementById('avg-time').textContent = (data.avg_cycle_time_ms || 0) + 'ms';
+      document.getElementById('exp-count').textContent = data.experience_count || 0;
+      document.getElementById('rules-count').textContent = data.rules_count || 0;
+      document.getElementById('battle-status').textContent = data.status || '战斗中';
+
+      // 状态标签
+      var badge = document.getElementById('status-badge');
+      if (data.running || data.cycle > 0) {
+        badge.className = 'status running';
+        badge.textContent = '● ' + (data.status || '战斗中');
+      }
+
+      // 经验进度条
+      var exp = data.experience_count || 0;
+      var expPct = Math.min(100, exp / 10);  // 1000条=100%
+      document.getElementById('exp-bar-fill').style.width = expPct + '%';
+      document.getElementById('exp-label').textContent = exp + '条';
+      document.getElementById('learning-detail').textContent =
+        '规则数: ' + (data.rules_count || 0) + ' | 场次: ' + (data.game_session || '');
+
+      // 分数图表
+      if (data.scores_history) {
+        scoreData.labels = data.scores_history.map(s => '#' + s.cycle);
+        scoreData.scores = data.scores_history.map(s => s.score);
+        scoreData.totals = data.scores_history.map(s => s.total);
+        scoreChart.data.labels = scoreData.labels;
+        scoreChart.data.datasets[0].data = scoreData.scores;
+        scoreChart.data.datasets[1].data = scoreData.totals;
+        scoreChart.update();
+      }
+
+      // 决策日志
+      if (data.decisions) {
+        var log = document.getElementById('decision-log');
+        var html = '';
+        for (var i = data.decisions.length - 1; i >= 0; i--) {
+          var d = data.decisions[i];
+          var scClass = d.score > 0 ? 'pos' : d.score < 0 ? 'neg' : '';
+          var scStr = d.score > 0 ? '+' + d.score : '' + d.score;
+          html += '<div class="log-item">' +
+            '<div class="header">' +
+              '<span class="cyc">#' + d.cycle + '</span>' +
+              '<span class="act">' + escapeHtml(d.action || '-') + '</span>' +
+              '<span class="sco ' + scClass + '">' + scStr + '</span>' +
+            '</div>' +
+            '<div class="reason">💡 ' + escapeHtml(d.reason || d.decision || '') + '</div>' +
+            '</div>';
+        }
+        log.innerHTML = html;
+      }
+
+      // 决策简述
+      if (data.last_decision) {
+        document.getElementById('battle-status').textContent =
+          '#' + data.cycle + ' ' + data.last_decision;
+      }
+    });
+
+    socket.on('started', function() {
+      document.getElementById('status-badge').className = 'status running';
+      document.getElementById('status-badge').textContent = '● ⚔️ 战斗中';
+    });
+
+    socket.on('stopped', function() {
+      document.getElementById('status-badge').className = 'status stopped';
+      document.getElementById('status-badge').textContent = '● 已停止';
+    });
+  </script>
+</body>
+</html>

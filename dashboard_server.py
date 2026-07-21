@@ -4612,7 +4612,7 @@ h1{color:#4caf50;margin-bottom:8px;font-size:24px}
 <h1>Firefight AI</h1>
 <p class="sub">YOLO视觉 + LLM策略 游戏自动化</p>
 <div class="pkg"><strong>完整安装包</strong><br>含模型+参数+一键启动</div>
-<a class="btn btn-zip" href="/api/package/download">下载安装包 (.zip)</a>
+<a class="btn btn-zip" href="https://firefightai.top/api/package/download">下载安装包 (.zip)</a>
 <a class="btn btn-github" href="https://github.com/chenyt-Indom/firefightAI" target="_blank">GitHub 仓库</a>
 <a class="back" href="/">返回控制面板</a>
 </div>
@@ -6556,7 +6556,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
     </select>
     <span id="readiness-indicator" style="font-size:12px;padding:3px 10px;border-radius:10px;margin-left:4px;background:#e53935;color:#fff">检查中...</span>
     <span class="status" id="status-badge" style="font-size:13px;padding:5px 12px;border-radius:6px;background:#1a1f2b;color:#888">已停止</span>
-    <a href="/download" target="_blank" class="btn-download" title="下载完整应用" style="background:#4caf50;color:#fff;padding:6px 14px;border-radius:6px;text-decoration:none;font-size:12px;font-weight:600;display:flex;align-items:center;gap:4px;cursor:pointer;transition:all 0.2s" onmouseover="this.style.background='#45a049'" onmouseout="this.style.background='#4caf50'">下载应用</a>
+    <a href="https://firefightai.top/download" target="_blank" class="btn-download" title="下载完整应用" style="background:#4caf50;color:#fff;padding:6px 14px;border-radius:6px;text-decoration:none;font-size:12px;font-weight:600;display:flex;align-items:center;gap:4px;cursor:pointer;transition:all 0.2s" onmouseover="this.style.background='#45a049'" onmouseout="this.style.background='#4caf50'">下载应用</a>
   </div>
 </div>
 <div class="nav-tabs">
