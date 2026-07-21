@@ -280,9 +280,8 @@ class Command(BaseModel):
     @field_validator("unit_ids")
     @classmethod
     def validate_unit_ids(cls, v: list[int]) -> list[int]:
-        if not v:
-            raise ValueError("unit_ids不能为空")
-        return v
+        # zoom/select指令unit_ids可为空
+        return v or []
 
 
 class LLMResponse(BaseModel):

@@ -48,12 +48,10 @@ class CommandParser:
                 reason=cmd.reason,
             )
 
-        # 校验unit_ids是否存在
+        # 校验unit_ids是否存在 - 不存在的用全部友军代替
         valid_units = game_state.get_units_by_ids(cmd.unit_ids)
         if not valid_units:
-            logger.warning(f"指令中的unit_ids无效: {cmd.unit_ids}")
-            return None
-
+            valid_units = game_state.allies[:]  # 回退: 用所有友军
         valid_ids = [u.track_id for u in valid_units]
 
         # 转换目标坐标
