@@ -3035,6 +3035,10 @@ def _auto_push_learning_params():
 @app.route("/api/learn/status")
 def api_learn_status():
     """获取AI自学习引擎状态"""
+    # 🔥 懒加载: 如果未初始化则自动加载
+    global _self_learning_params
+    if _self_learning_params.get("total_learnings", 0) == 0:
+        _load_learning_params()
     return jsonify({
         "running": _self_learning_running,
         "params": _self_learning_params,
@@ -3485,8 +3489,16 @@ def api_prediction_status():
 
 @app.route("/api/auto_save/schedule")
 def api_auto_save_schedule():
-    """获取定时保存计划"""
+    """获取定时保存计划 — 调度器不存在时自动启动"""
     global _scheduler
+    if not _scheduler:
+        try:
+            from src.learning.auto_scheduler import AutoScheduler
+            _scheduler = AutoScheduler(project_root=PROJECT_ROOT)
+            _scheduler.start()
+            logger.info("AutoScheduler已自动启动")
+        except Exception as e:
+            pass  # 启动失败, 返回未初始化
     if _scheduler:
         try:
             status = _scheduler.get_status()
@@ -3499,7 +3511,7 @@ def api_auto_save_schedule():
             })
         except Exception as e:
             return jsonify({"status": "error", "error": str(e)})
-    return jsonify({"status": "not_initialized"})
+    return jsonify({"status": "not_initialized", "running": False, "total_saves": 0, "message": "调度器暂不可用,AI学习仍在运行"})
 
 # ═══════════════════════════════════════════════════════════════
 # 训练管线
