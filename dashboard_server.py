@@ -9808,12 +9808,18 @@ var _emuDragLine=null;  // 拖动轨迹线
       if(tmp){
         var imgW=emulatorScreenImage?emulatorScreenImage.naturalWidth:1920;
         var imgH=emulatorScreenImage?emulatorScreenImage.naturalHeight:1080;
-        var cx=Math.min(_emuAnnotateStartX,x)/imgW*100;
-        var cy=Math.min(_emuAnnotateStartY,y)/imgH*100;
-        var cw=Math.abs(x-_emuAnnotateStartX)/imgW*100;
-        var ch=Math.abs(y-_emuAnnotateStartY)/imgH*100;
-        tmp.style.left=cx+'%';tmp.style.top=cy+'%';
-        tmp.style.width=cw+'%';tmp.style.height=ch+'%';
+        // 🔥 修复：考虑object-fit缩放，用容器像素位置
+        var ctn=document.getElementById('emu-screen-container');
+        var r=ctn.getBoundingClientRect();
+        var sc=Math.min(r.width/imgW, r.height/imgH);
+        var dw=imgW*sc, dh=imgH*sc;
+        var ox=(r.width-dw)/2, oy=(r.height-dh)/2;
+        var x0=ox+(Math.min(_emuAnnotateStartX,x)/imgW)*dw;
+        var y0=oy+(Math.min(_emuAnnotateStartY,y)/imgH)*dh;
+        var w=Math.abs(x-_emuAnnotateStartX)/imgW*dw;
+        var h=Math.abs(y-_emuAnnotateStartY)/imgH*dh;
+        tmp.style.left=x0+'px';tmp.style.top=y0+'px';
+        tmp.style.width=w+'px';tmp.style.height=h+'px';
       }
     }
     // 🔥 触控模式：显示拖动轨迹线（像MUMU一样直观）
@@ -9826,17 +9832,31 @@ var _emuDragLine=null;  // 拖动轨迹线
       }
       var imgW=emulatorScreenImage?emulatorScreenImage.naturalWidth:1920;
       var imgH=emulatorScreenImage?emulatorScreenImage.naturalHeight:1080;
-      var sx=_emuMouseStartX/imgW*100;
-      var sy=_emuMouseStartY/imgH*100;
-      var ex=x/imgW*100;
-      var ey=y/imgH*100;
-      var dx=ex-sx, dy=ey-sy;
-      var len=Math.sqrt(dx*dx+dy*dy);
-      var angle=Math.atan2(dy,dx)*180/Math.PI;
-      _emuDragLine.style.left=sx+'%';
-      _emuDragLine.style.top=sy+'%';
-      _emuDragLine.style.width=len+'%';
-      _emuDragLine.style.transform='rotate('+angle+'deg)';
+      // 🔥 关键修复：用原始像素计算角度和长度，避免16:9非正方形图像的偏差
+      var dx_px = x - _emuMouseStartX;
+      var dy_px = y - _emuMouseStartY;
+      var len_px = Math.sqrt(dx_px*dx_px + dy_px*dy_px);
+      // 容器实际像素宽高（考虑 object-fit: contain 的缩放）
+      var container = document.getElementById('emu-screen-container');
+      var rect = container.getBoundingClientRect();
+      // 图片在容器中的实际显示宽高（保持宽高比）
+      var scale = Math.min(rect.width / imgW, rect.height / imgH);
+      var dispW = imgW * scale, dispH = imgH * scale;
+      var offsetX = (rect.width - dispW) / 2;
+      var offsetY = (rect.height - dispH) / 2;
+      // 起点在容器中的像素位置
+      var sxDisp = offsetX + (_emuMouseStartX / imgW) * dispW;
+      var syDisp = offsetY + (_emuMouseStartY / imgH) * dispH;
+      // 终点在容器中的像素位置
+      var exDisp = offsetX + (x / imgW) * dispW;
+      var eyDisp = offsetY + (y / imgH) * dispH;
+      var dispDx = exDisp - sxDisp, dispDy = eyDisp - syDisp;
+      var dispLen = Math.sqrt(dispDx*dispDx + dispDy*dispDy);
+      var dispAngle = Math.atan2(dispDy, dispDx) * 180 / Math.PI;
+      _emuDragLine.style.left = sxDisp + 'px';
+      _emuDragLine.style.top = syDisp + 'px';
+      _emuDragLine.style.width = dispLen + 'px';
+      _emuDragLine.style.transform = 'rotate(' + dispAngle + 'deg)';
     }
   });
   container.addEventListener('mouseup', function(e){
@@ -9887,11 +9907,17 @@ var _emuDragLine=null;  // 拖动轨迹线
 function drawEmuAnnotationBoxes(){
   var container=document.getElementById('emu-screen-container');
   container.querySelectorAll('.emu-annotate-box').forEach(function(el){el.remove()});
+  var imgW=emulatorScreenImage?emulatorScreenImage.naturalWidth:1920;
+  var imgH=emulatorScreenImage?emulatorScreenImage.naturalHeight:1080;
+  var r=container.getBoundingClientRect();
+  var sc=Math.min(r.width/imgW, r.height/imgH);
+  var dw=imgW*sc, dh=imgH*sc;
+  var ox=(r.width-dw)/2, oy=(r.height-dh)/2;
   _emuAnnotateBoxes.forEach(function(b,i){
     var div=document.createElement('div');
     div.className='emu-annotate-box';
     div.style.cssText='position:absolute;border:2px solid #ff9800;background:rgba(255,152,0,0.15);pointer-events:none;z-index:998;'+
-      'left:'+(b.x/1920*100)+'%;top:'+(b.y/1080*100)+'%;width:'+(b.w/1920*100)+'%;height:'+(b.h/1080*100)+'%';
+      'left:'+(ox+(b.x/imgW)*dw)+'px;top:'+(oy+(b.y/imgH)*dh)+'px;width:'+(b.w/imgW*dw)+'px;height:'+(b.h/imgH*dh)+'px';
     var label=document.createElement('span');
     label.style.cssText='position:absolute;top:-18px;left:0;background:#ff9800;color:#000;font-size:10px;padding:1px 5px;border-radius:3px;white-space:nowrap';
     label.textContent=b.name;
