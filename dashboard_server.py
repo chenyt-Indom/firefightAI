@@ -456,25 +456,39 @@ def _auto_sync_params_from_server():
 
 
 def _auto_upload_params_to_server() -> bool:
-    """自动上传参数到服务器"""
+    """自动上传参数到服务器（HTTP+SSH双通道）"""
     import threading as _thr
     def _do_upload():
+        # 通道1: HTTP上传到 firefightai.top
         try:
             import urllib.request
             params = _load_learning_params() or {}
             data = json.dumps({
                 "machine_id": socket.gethostname(),
                 "params": params,
-                "total_learnings": _get_params_version().get("total_learnings", 0),
+                "total_learnings": _self_learning_params.get("total_learnings", 0),
             }).encode()
             req = urllib.request.Request(
                 "https://firefightai.top/api/sync/params/upload",
                 data=data, headers={"Content-Type": "application/json"}
             )
             urllib.request.urlopen(req, timeout=15)
-            logger.info("参数已上传到服务器")
+            logger.info("参数已HTTP上传到服务器")
         except Exception as e:
-            logger.debug(f"上传跳过: {e}")
+            logger.debug(f"HTTP上传跳过: {e}")
+        # 通道2: SSH直传到腾讯云服务器
+        try:
+            params_file = PROJECT_ROOT / "data" / "params" / "ai_learning_params.json"
+            if params_file.exists():
+                import base64
+                content = params_file.read_bytes()
+                b64 = base64.b64encode(content).decode("ascii")
+                cmd = f"mkdir -p /home/ubuntu/firefightAI/data/params && echo '{b64}' | base64 -d > /home/ubuntu/firefightAI/data/params/ai_learning_params.json"
+                ok, _, _ = _ssh_exec(cmd, timeout=15)
+                if ok:
+                    socketio.emit("params_uploaded_server", {"success": True, "message": "学习参数已SSH上传到服务器", "time": datetime.now().isoformat()})
+        except Exception:
+            pass
     _thr.Thread(target=_do_upload, daemon=True).start()
     return True
 
@@ -3013,30 +3027,6 @@ def _deep_analyze_learning_logs(logs: list) -> list:
 
     return insights
 
-
-def _auto_upload_params_to_server():
-    """自动上传学习参数到腾讯云服务器"""
-    try:
-        params_file = PROJECT_ROOT / "data" / "params" / "ai_learning_params.json"
-        if not params_file.exists():
-            return
-
-        content = params_file.read_bytes()
-        import base64
-        b64 = base64.b64encode(content).decode("ascii")
-        remote_dir = "/home/ubuntu/firefightAI/data/params"
-        remote_path = f"{remote_dir}/ai_learning_params.json"
-
-        cmd = f"mkdir -p {remote_dir} && echo '{b64}' | base64 -d > {remote_path}"
-        ok, _, err = _ssh_exec(cmd, timeout=15)
-        if ok:
-            socketio.emit("params_uploaded_server", {
-                "success": True,
-                "message": "学习参数已上传到服务器",
-                "time": datetime.now().isoformat()
-            })
-    except Exception:
-        pass  # 静默失败
 
 
 def _analyze_learning_patterns(logs: list) -> list:
