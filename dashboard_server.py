@@ -3551,6 +3551,20 @@ def api_upload_images():
     add_system_log("training", f"上传{len(uploaded)}张图片到数据集 {dataset_name}", "")
     return jsonify({"uploaded": uploaded, "dataset": dataset_name})
 
+@app.route("/api/train/check")
+def api_train_check():
+    """检测训练环境"""
+    try:
+        import torch
+        cuda = torch.cuda.is_available()
+        return jsonify({
+            "cuda_available": cuda,
+            "gpu_name": torch.cuda.get_device_name(0) if cuda else "N/A",
+            "torch_version": torch.__version__
+        })
+    except:
+        return jsonify({"cuda_available": False, "reason": "WDAC blocked"})
+
 @app.route("/api/train/start", methods=["POST"])
 def api_train_start():
     global _training_process
@@ -7107,9 +7121,16 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
     <label style="align-items:center;flex-direction:row;gap:6px"><input type="checkbox" id="auto-push-github">训练后推送到GitHub</label>
   </div>
   <div style="display:flex;gap:10px;align-items:center;">
-    <button class="btn-start" onclick="startTraining()" id="btn-train-start">开始训练</button>
+    <button class="btn-start" onclick="startTraining()" id="btn-train-start">本地训练</button>
     <button class="btn-stop" onclick="stopTraining()" id="btn-train-stop" style="display:none">停止</button>
     <span id="train-status-text" style="font-size:12px;color:#888"></span>
+  </div>
+  <div id="colab-hint" style="margin-top:10px;padding:10px;background:#1a1f2b;border-radius:6px;border-left:3px solid #f9ab00;display:none">
+    <strong style="color:#f9ab00">Colab GPU训练</strong><br>
+    <span style="font-size:12px;color:#aaa">本地GPU被WDAC拦截? 用Google Colab免费T4 GPU训练</span><br>
+    <span style="font-size:11px;color:#666">1. 桌面 dataset.zip + FirefightAI_Training.ipynb 上传到 colab.research.google.com</span><br>
+    <span style="font-size:11px;color:#666">2. Runtime → T4 GPU → Run All → 上传dataset.zip</span><br>
+    <button class="btn-start" onclick="window.open('https://colab.research.google.com/','_blank')" style="margin-top:6px;font-size:11px;padding:5px 12px;background:#f9ab00">打开 Colab</button>
   </div>
   <div class="train-progress" id="train-progress-container" style="display:none"><div class="train-progress-bar" id="train-progress-bar" style="width:0%">0%</div></div>
   <div class="train-log" id="train-log"></div>
@@ -8479,7 +8500,11 @@ function loadDatasets(){loadUnifiedDataset()}  // 兼容旧调用
 function selectDataset(name){unifiedDataset=name;loadUnifiedDataset()}
 function loadModels(){fetch('/api/models').then(r=>r.json()).then(data=>{var html='';data.forEach(function(m){html+='<div class="model-card"><div class="name">'+m.name+'</div><div class="info">'+m.size_mb+'MB</div></div>'});document.getElementById('model-list').innerHTML=html||'暂无模型'})}
 function uploadImages(){var files=document.getElementById('file-input').files;if(!files.length)return;var fd=new FormData();for(var i=0;i<files.length;i++)fd.append('file_'+i,files[i]);fd.append('dataset',unifiedDataset);var s=document.getElementById('upload-status');s.innerHTML='<div class="alert info">上传中...</div>';fetch('/api/upload_images',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{s.innerHTML='<div class="alert success">已上传 '+d.uploaded.length+' 张到 '+d.dataset+'</div>';loadUnifiedDataset()}).catch(e=>{s.innerHTML='<div class="alert error">失败: '+e+'</div>'})}
-function startTraining(){var ep=parseInt(document.getElementById('train-epochs').value)||50;var md=document.getElementById('train-model').value;var isz=parseInt(document.getElementById('train-imgsz').value)||640;var autoPush=document.getElementById('auto-push-github').checked;var device=document.getElementById('train-device').value;var removeAfter=document.getElementById('remove-after-train').checked;document.getElementById('btn-train-start').style.display='none';document.getElementById('btn-train-stop').style.display='inline-block';document.getElementById('train-progress-container').style.display='block';document.getElementById('train-log').innerHTML='';document.getElementById('train-status-text').textContent='训练中 ('+device.toUpperCase()+')...';document.getElementById('train-results').innerHTML='';document.getElementById('train-progress-bar').style.width='0%';document.getElementById('train-progress-bar').textContent='0%';fetch('/api/train/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dataset:unifiedDataset,model_name:md,epochs:ep,imgsz:isz,device:device,remove_after_train:removeAfter,auto_push_github:autoPush})}).then(r=>r.json()).then(d=>{if(d.error)alert(d.error)})}
+function startTraining(){var ep=parseInt(document.getElementById('train-epochs').value)||50;var md=document.getElementById('train-model').value;var isz=parseInt(document.getElementById('train-imgsz').value)||640;var autoPush=document.getElementById('auto-push-github').checked;var device=document.getElementById('train-device').value;var removeAfter=document.getElementById('remove-after-train').checked;document.getElementById('btn-train-start').style.display='none';document.getElementById('btn-train-stop').style.display='inline-block';document.getElementById('train-progress-container').style.display='block';document.getElementById('train-log').innerHTML='';document.getElementById('train-status-text').textContent='训练中 ('+device.toUpperCase()+')...';document.getElementById('train-results').innerHTML='';document.getElementById('train-progress-bar').style.width='0%';document.getElementById('train-progress-bar').textContent='0%';fetch('/api/train/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dataset:unifiedDataset,model_name:md,epochs:ep,imgsz:isz,device:device,remove_after_train:removeAfter,auto_push_github:autoPush})}).then(r=>r.json()).then(d=>{if(d.error){document.getElementById('train-status-text').textContent=d.error;document.getElementById('btn-train-start').style.display='inline-block';document.getElementById('btn-train-stop').style.display='none';document.getElementById('colab-hint').style.display='block'}})}}
+
+// 自动显示Colab提示(本地WDAC拦截GPU)
+function checkTrainingReady(){fetch('/api/train/check').then(r=>r.json()).then(d=>{if(d.cuda_available)document.getElementById('colab-hint').style.display='none';else document.getElementById('colab-hint').style.display='block'}).catch(()=>document.getElementById('colab-hint').style.display='block')}
+setTimeout(checkTrainingReady,2000)
 function stopTraining(){fetch('/api/train/stop',{method:'POST'}).then(r=>r.json()).then(d=>{document.getElementById('train-status-text').textContent='已停止';document.getElementById('btn-train-start').style.display='inline-block';document.getElementById('btn-train-stop').style.display='none'})}
 _on('training_log',function(d){var l=document.getElementById('train-log');l.innerHTML+='<div>'+escapeHtml(d.line)+'</div>';l.scrollTop=l.scrollHeight})
 _on('training_state_update',function(d){
