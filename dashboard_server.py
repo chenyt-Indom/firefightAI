@@ -12034,7 +12034,7 @@ def api_emulator_screen():
                         "--max-size", str(max_width),
                         "--max-fps", str(max_fps),
                         "--video-bit-rate", str(bitrate),
-                        "--no-audio", "--render-driver=software",
+                        "--no-audio",
                         "--window-title", f"FirefightAI - {_emulator_type}",
                     ]
                     _scrcpy_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -12064,68 +12064,226 @@ def api_emulator_screen():
 
 @app.route("/api/emulator/stream")
 def api_emulator_stream():
-    """MJPEG流 - 录屏级: raw screencap + PIL转换"""
-    import threading as _thr, queue as _queue, io
+    """MJPEG流式推送模拟器画面 - 使用scrcpy实现60fps"""
+    import struct, io, threading as _thr, queue as _queue, base64 as _b64
     from collections import deque
     
     adb_exe = _get_adb_for_emulator()
     port = _emulator_adb_port
-    dev_id = f"127.0.0.1:{port}"
-    STREAM_WIDTH = 960
-    TARGET_FPS = 30
     
-    frame_buffer = _queue.Queue(maxsize=2)
+    # 🔥 优先使用scrcpy实现真正的60fps
+    scrcpy_exe = _find_scrcpy_exe()
+    
+    if scrcpy_exe:
+        # scrcpy模式: 硬件加速 60fps
+        def scrcpy_worker():
+            import struct
+            logger.info(f"scrcpy流启动: {scrcpy_exe}")
+            process = subprocess.Popen(
+                [scrcpy_exe, "--no-window", "--no-audio",
+                 "--max-fps", "60", "--bit-rate", "8M",
+                 "-s", f"127.0.0.1:{port}",
+                 "--render-driver=opengl",
+                 "--video-codec=h264"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+            try:
+                while capture_running[0]:
+                    header = process.stdout.read(12)
+                    if not header or len(header) < 12:
+                        break
+                    pts, _, size = struct.unpack(">QII", header[:12]) if len(header) >= 12 else (0, 0, 0)
+                    if size <= 0 or size > 10*1024*1024:
+                        continue
+                    data = process.stdout.read(size)
+                    if data:
+                        try:
+                            frame_buffer.put_nowait(data)
+                        except _queue.Full:
+                            try:
+                                frame_buffer.get_nowait()
+                                frame_buffer.put_nowait(data)
+                            except:
+                                pass
+                        stats["frames_captured"] += 1
+            except Exception as e:
+                logger.warning(f"scrcpy流异常: {e}")
+            finally:
+                process.terminate()
+        
+        cap_thread = _thr.Thread(target=scrcpy_worker, daemon=True)
+        cap_thread.start()
+    else:
+        # 回退到ADB screencap模式 (较慢)
+        STREAM_WIDTH = 960
+        STREAM_QUALITY = 55
+        TARGET_FPS = 60
+        FRAME_BUDGET = 1.0 / TARGET_FPS
+    
+    # 🔥 帧缓冲（非阻塞，跳过旧帧）
+    frame_buffer = _queue.Queue(maxsize=2)  # 只保留最新2帧
     capture_running = [True]
-    stats = {"frames_captured": 0}
+    stats = {"frames_captured": 0, "frames_sent": 0, "capture_ms": 0, "convert_ms": 0}
     
-    def capture_worker():
-        """ADB raw screencap 高速截取"""
-        t0 = time.perf_counter()
-        errors = 0
+    def _get_dev_id():
+        """获取可用的设备ID"""
+        for did in dev_ids:
+            r = subprocess.run([adb_exe, "-s", did, "shell", "echo", "ok"],
+                             capture_output=True, text=True, timeout=2)
+            if r.returncode == 0 and "ok" in r.stdout:
+                return did
+        return dev_ids[0]
+    
+    def capture_thread():
+        """独立捕获线程，不阻塞主循环"""
+        import base64 as _b64
+        dev_id = _get_dev_id()
+        last_dev_check = 0
+        
         while capture_running[0]:
             try:
-                r = subprocess.run([adb_exe, "-s", dev_id, "exec-out", "screencap"],
-                    capture_output=True, timeout=2)
-                if r.returncode == 0 and len(r.stdout) > 100:
+                # 每30秒重新检测设备ID
+                now = time.perf_counter()
+                if now - last_dev_check > 30:
+                    dev_id = _get_dev_id()
+                    last_dev_check = now
+                
+                t0 = time.perf_counter()
+                
+                # 🔥 使用raw screencap（比PNG快3-5倍）
+                r = subprocess.run(
+                    [adb_exe, "-s", dev_id, "exec-out", "screencap"],
+                    capture_output=True, timeout=2
+                )
+                
+                if r.returncode != 0 or len(r.stdout) < 20:
+                    time.sleep(0.05)
+                    continue
+                
+                capture_ms = (time.perf_counter() - t0) * 1000
+                raw_data = r.stdout
+                width = struct.unpack_from("<I", raw_data, 0)[0]
+                height = struct.unpack_from("<I", raw_data, 4)[0]
+                pixels = raw_data[12:]
+                
+                # 🔥 快速转换（使用PIL缩放+JPEG压缩）
+                t1 = time.perf_counter()
+                try:
+                    from PIL import Image
+                    img = Image.frombytes("RGBA", (width, height), pixels, "raw")
+                    img_rgb = img.convert("RGB")
+                    # 缩放降低分辨率
+                    if width > STREAM_WIDTH:
+                        ratio = STREAM_WIDTH / width
+                        new_h = int(height * ratio)
+                        img_rgb = img_rgb.resize((STREAM_WIDTH, new_h), Image.LANCZOS)
+                    buf = io.BytesIO()
+                    img_rgb.save(buf, format="JPEG", quality=STREAM_QUALITY, optimize=True)
+                    frame_data = buf.getvalue()
+                except ImportError:
+                    # 无PIL时发送原始数据
+                    frame_data = pixels
+                
+                convert_ms = (time.perf_counter() - t1) * 1000
+                
+                # 放入缓冲区（非阻塞：如果缓冲区满了，丢弃旧的）
+                try:
+                    frame_buffer.put_nowait(frame_data)
+                except _queue.Full:
                     try:
-                        from PIL import Image
-                        raw = r.stdout
-                        w = struct.unpack_from("<I", raw, 0)[0]
-                        h = struct.unpack_from("<I", raw, 4)[0]
-                        pixels = raw[12:]
-                        img = Image.frombytes("RGBA", (w, h), pixels, "raw")
-                        img = img.convert("RGB")
-                        if w > STREAM_WIDTH:
-                            img = img.resize((STREAM_WIDTH, int(h * STREAM_WIDTH / w)), Image.LANCZOS)
-                        buf = io.BytesIO()
-                        img.save(buf, format="JPEG", quality=65)
-                        frame = buf.getvalue()
-                        try: frame_buffer.put_nowait(frame); stats["frames_captured"] += 1
-                        except: pass
-                    except: pass
-                else:
-                    errors += 1
-                    if errors <= 2: time.sleep(0.05)
-            except: time.sleep(0.1)
-    cap = _thr.Thread(target=capture_worker, daemon=True)
-    cap.start()
+                        frame_buffer.get_nowait()  # 丢弃最旧的帧
+                        frame_buffer.put_nowait(frame_data)
+                    except:
+                        pass
+                
+                stats["frames_captured"] += 1
+                stats["capture_ms"] = capture_ms
+                stats["convert_ms"] = convert_ms
+                
+                # 控制捕获速率
+                elapsed = time.perf_counter() - t0
+                if elapsed < FRAME_BUDGET * 0.8:
+                    time.sleep(max(0.001, FRAME_BUDGET * 0.8 - elapsed))
+                    
+            except Exception as e:
+                time.sleep(0.05)
+                continue
     
-    # Wait for first frame
-    for _ in range(30):
-        if not frame_buffer.empty(): break
-        time.sleep(0.1)
+    # 启动捕获线程
+    cap_thread = _thr.Thread(target=capture_thread, daemon=True)
+    cap_thread.start()
     
-    def gen():
+    def generate_frames():
+        last_frame_time = time.perf_counter()
+        frame_count = 0
+        
         while capture_running[0]:
             try:
-                frame = frame_buffer.get(timeout=1)
-                yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n" % len(frame) + frame + b"\r\n")
-            except: time.sleep(0.05)
+                if not _emulator_screen_on:
+                    # 屏幕关闭时发送黑屏提示帧
+                    time.sleep(0.5)
+                    try:
+                        from PIL import Image, ImageDraw, ImageFont
+                        img = Image.new("RGB", (STREAM_WIDTH, 540), (10, 15, 20))
+                        draw = ImageDraw.Draw(img)
+                        try:
+                            font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 32)
+                        except:
+                            font = ImageFont.load_default()
+                        draw.text((STREAM_WIDTH//2 - 160, 240), "请打开模拟器屏幕", fill=(80, 80, 80), font=font)
+                        buf = io.BytesIO()
+                        img.save(buf, format="JPEG", quality=80)
+                        frame = buf.getvalue()
+                    except:
+                        frame = b""
+                    if frame:
+                        yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
+                    continue
+                
+                # 🔥 非阻塞获取帧
+                try:
+                    frame_data = frame_buffer.get(timeout=0.5)
+                except _queue.Empty:
+                    time.sleep(0.01)
+                    continue
+                
+                # 生成MJPEG帧
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(frame_data)).encode() + b"\r\n\r\n" + frame_data + b"\r\n")
+                
+                frame_count += 1
+                stats["frames_sent"] = frame_count
+                
+                # 帧率控制
+                now = time.perf_counter()
+                elapsed = now - last_frame_time
+                if elapsed < FRAME_BUDGET:
+                    time.sleep(max(0.001, FRAME_BUDGET - elapsed))
+                last_frame_time = time.perf_counter()
+                
+            except Exception as e:
+                time.sleep(0.05)
+                continue
     
+    # 客户端断开时停止捕获线程
     def cleanup():
         capture_running[0] = False
-    return Response(stream_with_context(gen()), mimetype="multipart/x-mixed-replace; boundary=frame",
-        headers={"Cache-Control":"no-cache","Access-Control-Allow-Origin":"*","X-Accel-Buffering":"no"}, direct_passthrough=True)
+    
+    return Response(
+        stream_with_context(generate_frames()),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "Connection": "close",
+            "Access-Control-Allow-Origin": "*",
+            "X-Accel-Buffering": "no",
+        },
+        direct_passthrough=True,
+    )
+
+
+@app.route("/api/decision_chain/benchmark")
 def api_decision_chain_benchmark():
     """决策链性能测试 - 确保截图→指令 < 2秒"""
     try:
