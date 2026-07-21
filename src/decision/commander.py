@@ -201,15 +201,44 @@ class TacticalCommander:
         return "\n".join(parts)
 
     def _parse_response(self, raw_text: str) -> Optional[LLMResponse]:
-        """解析LLM响应为LLMResponse - 兼容多种输出格式"""
+        """解析LLM响应 - 自动修复截断JSON"""
         try:
             text = raw_text.strip()
+            # 去掉markdown代码块
             if text.startswith("```"):
                 lines = text.split("\n")
                 if lines[0].startswith("```"): lines = lines[1:]
                 if lines and lines[-1].strip() == "```": lines = lines[:-1]
                 text = "\n".join(lines)
-            data = json.loads(text)
+            
+            # 🔥 尝试修复截断的JSON (常见于LLM输出被截断)
+            data = None
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                # 修复1: 补全缺失的引号
+                fixed = text
+                if fixed.count('"') % 2 != 0:
+                    fixed = fixed.rstrip() + '"'
+                    # 补全可能缺失的括号
+                    open_braces = fixed.count('{') - fixed.count('}')
+                    open_brackets = fixed.count('[') - fixed.count(']')
+                    fixed += ']' * open_brackets + '}' * open_braces
+                try:
+                    data = json.loads(fixed)
+                except:
+                    # 修复2: 找最后一个完整的{...}
+                    last_brace = text.rfind('}')
+                    if last_brace > 0:
+                        text = text[:last_brace+1]
+                        if text.count('{') > text.count('}'): text += '}'
+                        if text.count('[') > text.count(']'): text += ']'
+                        try: data = json.loads(text)
+                        except: pass
+            
+            if data is None:
+                logger.warning(f"JSON无法修复, 原始: {text[:100]}")
+                return None
             
             # 🔥 兼容简化格式: 没有analysis/commands字段时自动映射
             if "analysis" not in data and "commands" not in data:
@@ -219,14 +248,18 @@ class TacticalCommander:
                 from src.state.models import Command
                 cmds = []
                 tl = str(tactic).lower()
-                if "advance" in tl or "前进" in tl or "进攻" in tl:
-                    cmds.append(Command(action="move", unit_ids=[1], target=(0.55, 0.4), reason=f"{reason[:50]}"))
-                elif "retreat" in tl or "后退" in tl or "撤退" in tl:
-                    cmds.append(Command(action="move", unit_ids=[1], target=(0.5, 0.7), reason=f"{reason[:50]}"))
-                elif "defend" in tl or "防守" in tl:
-                    cmds.append(Command(action="move", unit_ids=[1], target=(0.5, 0.6), reason=f"{reason[:50]}"))
+                # 全选所有友军
+                all_ids = [1,2,3,4,5,6,7,8]  # 最多8个
+                if "advance" in tl or "前进" in tl or "进攻" in tl or "向前" in tl:
+                    cmds.append(Command(action="move", unit_ids=all_ids, target=(0.55, 0.35), reason=f"推进: {reason[:50]}"))
+                elif "retreat" in tl or "后退" in tl or "撤退" in tl or "后撤" in tl:
+                    cmds.append(Command(action="move", unit_ids=all_ids, target=(0.5, 0.75), reason=f"撤退: {reason[:50]}"))
+                elif "defend" in tl or "防守" in tl or "固守" in tl or "hold" in tl:
+                    cmds.append(Command(action="move", unit_ids=all_ids, target=(0.5, 0.55), reason=f"防守: {reason[:50]}"))
+                elif "attack" in tl or "攻击" in tl or "开火" in tl:
+                    cmds.append(Command(action="attack", unit_ids=all_ids, target_enemy_id=101, reason=f"攻击: {reason[:50]}"))
                 else:
-                    cmds.append(Command(action="select", unit_ids=[1], reason=f"{reason[:50]}"))
+                    cmds.append(Command(action="move", unit_ids=all_ids, target=(0.5, 0.45), reason=f"移动: {reason[:50]}"))
                 data = {"analysis": reason[:200] or str(tactic), "commands": [c.model_dump() for c in cmds]}
             
             if "commands" not in data: data["commands"] = []
