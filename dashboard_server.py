@@ -372,6 +372,29 @@ def _sync_learning_to_github():
     t = threading.Thread(target=_sync, daemon=True)
     t.start()
 
+def _auto_tune_params_from_training():
+    """训练完成后自动调整AI学习参数"""
+    global _self_learning_params
+    try:
+        # 检查训练数据量，调整学习参数
+        train_dir = PROJECT_ROOT / "data" / "faction_yolo" / "labels"
+        if train_dir.exists():
+            label_count = len(list(train_dir.glob("*.txt")))
+            if label_count > 30:
+                _self_learning_params["temperature"] = max(0.3, _self_learning_params.get("temperature", 0.7) - 0.05)
+                _self_learning_params["learning_rate"] = min(0.01, _self_learning_params.get("learning_rate", 0.005) + 0.001)
+                add_learning_log("self_improve", f"训练后自动调参: 温度={_self_learning_params['temperature']:.2f}, 学习率={_self_learning_params['learning_rate']:.4f}", f"标注量: {label_count}")
+        # 检查训练模型数量
+        models_dir = PROJECT_ROOT / "runs" / "detect"
+        if models_dir.exists():
+            model_count = len([d for d in models_dir.iterdir() if d.is_dir()])
+            if model_count > 3:
+                _self_learning_params["aggressiveness"] = min(0.9, _self_learning_params.get("aggressiveness", 0.5) + 0.03)
+                _self_learning_params["exploration_rate"] = max(0.1, _self_learning_params.get("exploration_rate", 0.3) - 0.02)
+                add_learning_log("self_improve", f"多轮训练优化: 攻击性={_self_learning_params['aggressiveness']:.2f}, 探索率={_self_learning_params['exploration_rate']:.2f}", f"已训练{model_count}个模型")
+    except Exception as e:
+        logger.debug(f"自动调参跳过: {e}")
+
 def _load_knowledge_base():
     global _ai_knowledge_base
     try:
@@ -3316,7 +3339,55 @@ def api_learning_pull():
     except Exception as e:
         return jsonify({"status": "error", "detail": str(e)})
 
-@app.route("/api/learning/summary")
+@app.route("/api/learning/status")
+def api_learning_status():
+    """完整学习状态 - 所有渠道的学习数据汇总"""
+    from datetime import datetime as _dt
+    stats = {
+        "total_logs": 0, "categories": {}, "sources": [], "sync_status": "unknown"
+    }
+    # 学习日志统计
+    cats = {}
+    for e in _learning_log:
+        c = e.get("category", "other")
+        cats[c] = cats.get(c, 0) + 1
+    stats["total_logs"] = len(_learning_log)
+    stats["categories"] = cats
+    
+    # 知识库
+    stats["knowledge_base"] = len(_ai_knowledge_base)
+    
+    # 训练数据
+    train_labels = PROJECT_ROOT / "data" / "faction_yolo" / "labels"
+    stats["training_labels"] = len(list(train_labels.glob("*.txt"))) if train_labels.exists() else 0
+    train_images = PROJECT_ROOT / "data" / "faction_yolo" / "images"
+    stats["training_images"] = len(list(train_images.glob("*"))) if train_images.exists() else 0
+    
+    # 训练模型
+    models_dir = PROJECT_ROOT / "runs" / "detect"
+    stats["trained_models"] = len([d for d in models_dir.iterdir() if d.is_dir()]) if models_dir.exists() else 0
+    
+    # 网页知识
+    web_dir = PROJECT_ROOT / "data" / "web_knowledge"
+    stats["web_knowledge"] = len(list(web_dir.glob("*.json"))) if web_dir.exists() else 0
+    
+    # 战术规则
+    tactics_file = PROJECT_ROOT / "data" / "tactics_rules.yaml"
+    if tactics_file.exists():
+        try:
+            import yaml
+            t = yaml.safe_load(tactics_file.read_text(encoding='utf-8'))
+            r = t.get("rules", t) if isinstance(t, dict) else []
+            stats["tactics_rules"] = len(r) if isinstance(r, list) else 0
+        except: stats["tactics_rules"] = -1
+    
+    # 自学习参数
+    stats["self_params"] = {k: round(v, 3) if isinstance(v, float) else v for k, v in _self_learning_params.items()}
+    
+    # 最近的5条学习
+    stats["recent"] = _learning_log[-5:] if _learning_log else []
+    
+    return jsonify(stats)
 def api_learning_summary():
     """获取学习总结：累积数据量、分类统计、覆盖天数"""
     cats = {}
@@ -4074,6 +4145,23 @@ def api_combat_export():
 
 WEB_KNOWLEDGE_DIR = PROJECT_ROOT / "data" / "web_knowledge"
 
+def _auto_save_search(query: str, summary: str):
+    """自动保存搜索结果到知识库并同步GitHub"""
+    try:
+        WEB_KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+        import hashlib
+        filename = f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(query.encode()).hexdigest()[:8]}.json"
+        entry = {
+            "query": query, "summary": summary, "saved_at": datetime.now().isoformat(),
+            "source": "auto_save"
+        }
+        (WEB_KNOWLEDGE_DIR / filename).write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+        add_learning_log("web_search", f"搜索结果已自动保存: {filename}", f"查询: {query[:50]}")
+        add_knowledge("web_search", query[:80], summary[:200], source="DeepSeek")
+        _sync_learning_to_github()
+    except Exception as e:
+        logger.debug(f"自动保存搜索结果跳过: {e}")
+
 @app.route("/api/web/search", methods=["POST"])
 def api_web_search():
     """Web search - 真正联网搜索: DuckDuckGo/Bing → DeepSeek总结"""
@@ -4136,6 +4224,8 @@ def _search_deepseek_rest(query: str):
         full_text = f"(AI总结失败: {r['error']})"
     socketio.emit("web_search_stream", {"text": full_text, "done": True})
     add_learning_log("web_search", f"搜索完成: {query[:50]}", full_text[:200])
+    # 🔥 自动保存搜索结果到知识库并同步
+    _auto_save_search(query, full_text)
     return jsonify({
         "query": query, "summary": full_text, "results": [],
         "searched_at": datetime.now().isoformat(), "source": "DeepSeek Knowledge Base",
@@ -6161,6 +6251,8 @@ def _start_training_background():
         socketio.emit("command_analysis", {"command": "训练", "cycle": 0, "analysis": f"GitHub: {upload_result.get('github',{}).get('message','')} | 服务器: {upload_result.get('server',{}).get('message','')}"})
         update_state(training_status="completed", training_progress=100, training_message="训练完成")
         add_learning_log("training", "AI训练完成", f"保存: {len(result.get('saved',[]))}个文件")
+        # 🔥 训练后自动调整AI学习参数
+        _auto_tune_params_from_training()
         socketio.emit("command_analysis", {"command": "训练", "cycle": 0, "analysis": "AI训练完成! 参数已保存并上传到GitHub和服务器。"})
     except Exception as e:
         update_state(training_status="error", training_message=str(e)[:100])
