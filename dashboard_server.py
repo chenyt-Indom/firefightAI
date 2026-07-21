@@ -5015,10 +5015,13 @@ def on_check_all_connections():
     def _check_deepseek():
         try:
             import requests
-            r = requests.get("https://api.deepseek.com/v1/models", headers={"Authorization": f"Bearer {load_config()['llm']['api_key']}"}, timeout=5)
-            return "online" if r.status_code == 200 else "error"
-        except:
-            return "offline"
+            r = requests.post("https://api.deepseek.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {load_config()['llm']['api_key']}", "Content-Type": "application/json"},
+                json={"model": "deepseek-chat", "messages": [{"role":"user","content":"ping"}], "max_tokens": 5},
+                timeout=10)
+            return "online" if r.status_code == 200 else f"error:{r.status_code}"
+        except Exception as e:
+            return f"offline:{str(e)[:30]}"
     results["deepseek"] = _get_cached_or_fetch("deepseek", _check_deepseek, _CACHE_TTL["deepseek"])
 
     # ADB - 实时检测（ADB检测很快，不需要缓存）
