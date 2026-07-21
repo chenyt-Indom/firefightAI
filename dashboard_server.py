@@ -12711,7 +12711,7 @@ def api_emulator_screenshot():
         t0 = time.perf_counter()
         adb_exe = _get_adb_for_emulator()
         # 🔥 自动尝试多种dev_id格式，兼容MuMu/雷电/蓝叠
-        global _emulator_adb_port
+        global _emulator_adb_port, _emulator_type
         candidates = [
             f"127.0.0.1:{_emulator_adb_port}",  # MuMu/雷电
             f"localhost:{_emulator_adb_port}",
@@ -12988,6 +12988,9 @@ def api_emulator_stream():
     frame_buffer = _queue.Queue(maxsize=2)  # 只保留最新2帧
     capture_running = [True]
     stats = {"frames_captured": 0, "frames_sent": 0, "capture_ms": 0, "convert_ms": 0}
+    
+    # 🔥 自动检测设备ID
+    dev_ids = [f"127.0.0.1:{port}", f"localhost:{port}", f"emulator-{port}"]
     
     def _get_dev_id():
         """获取可用的设备ID"""
