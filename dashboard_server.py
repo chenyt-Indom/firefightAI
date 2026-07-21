@@ -4584,6 +4584,40 @@ pause
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
+@app.route("/download")
+def page_download():
+    return """<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Firefight AI - 下载</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0e14;color:#fff;font-family:'Microsoft YaHei',Arial;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px}
+.card{background:#1a1f2b;border-radius:12px;padding:40px;max-width:500px;width:100%;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,.5)}
+h1{color:#4caf50;margin-bottom:8px;font-size:24px}
+.sub{color:#888;font-size:14px;margin-bottom:30px}
+.btn{display:block;padding:14px 20px;border-radius:8px;text-decoration:none;color:#fff;font-size:16px;margin-bottom:12px;transition:all .2s}
+.btn-github{background:#333}
+.btn-github:hover{background:#444}
+.btn-zip{background:#4caf50}
+.btn-zip:hover{background:#45a049}
+.pkg{background:#111;border-radius:8px;padding:12px;margin:10px 0;text-align:left;font-size:13px;color:#aaa}
+.pkg strong{color:#fff}
+.back{color:#4caf50;font-size:14px;display:inline-block;margin-top:20px}
+</style></head>
+<body>
+<div class="card">
+<h1>Firefight AI</h1>
+<p class="sub">YOLO视觉 + LLM策略 游戏自动化</p>
+<div class="pkg"><strong>完整安装包</strong><br>含模型+参数+一键启动</div>
+<a class="btn btn-zip" href="/api/package/download">下载安装包 (.zip)</a>
+<a class="btn btn-github" href="https://github.com/chenyt-Indom/firefightAI" target="_blank">GitHub 仓库</a>
+<a class="back" href="/">返回控制面板</a>
+</div>
+</body></html>"""
+
 @app.route("/api/package/download")
 def api_package_download():
     """下载安装包"""
@@ -6522,7 +6556,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
     </select>
     <span id="readiness-indicator" style="font-size:12px;padding:3px 10px;border-radius:10px;margin-left:4px;background:#e53935;color:#fff">检查中...</span>
     <span class="status" id="status-badge" style="font-size:13px;padding:5px 12px;border-radius:6px;background:#1a1f2b;color:#888">已停止</span>
-    <a href="/api/package/download" class="btn-download" title="下载完整应用+AI参数" style="background:#4caf50;color:#fff;padding:6px 14px;border-radius:6px;text-decoration:none;font-size:12px;font-weight:600;display:flex;align-items:center;gap:4px;cursor:pointer;transition:all 0.2s" onmouseover="this.style.background='#45a049'" onmouseout="this.style.background='#4caf50'">下载应用</a>
+    <a href="/download" target="_blank" class="btn-download" title="下载完整应用" style="background:#4caf50;color:#fff;padding:6px 14px;border-radius:6px;text-decoration:none;font-size:12px;font-weight:600;display:flex;align-items:center;gap:4px;cursor:pointer;transition:all 0.2s" onmouseover="this.style.background='#45a049'" onmouseout="this.style.background='#4caf50'">下载应用</a>
   </div>
 </div>
 <div class="nav-tabs">
@@ -10571,47 +10605,39 @@ function exportAllData() {
 }
 
 function copyToTraining() {
-  if (!currentImage || !project.images[currentImage]) { alert('没有选中的图片'); return; }
-  var img = project.images[currentImage];
-  if (!img.boxes.length) { alert('该图片无标注框，请先标注'); return; }
+  if (!project.activeId) { alert('没有选中的图片'); return; }
+  var img = project.images[project.activeId];
+  if (!boxes.length) { alert('该图片无标注框，请先标注'); return; }
   
-  // 获取当前图片的canvas数据
-  var viewImg = document.getElementById('viewImg');
-  var canvas = document.createElement('canvas');
-  canvas.width = viewImg.naturalWidth;
-  canvas.height = viewImg.naturalHeight;
-  var ctx = canvas.getContext('2d');
-  ctx.drawImage(viewImg, 0, 0);
-  var imgData = canvas.toDataURL('image/png');
-  
-  // 生成YOLO标注
+  var W = imgEl.naturalWidth, H = imgEl.naturalHeight;
   var yolo = [];
-  for (var i = 0; i < img.boxes.length; i++) {
-    var b = img.boxes[i];
-    var x = (b.x + b.w/2) / canvas.width;
-    var y = (b.y + b.h/2) / canvas.height;
-    var w = b.w / canvas.width;
-    var h = b.h / canvas.height;
-    yolo.push(b.classId + ' ' + x.toFixed(6) + ' ' + y.toFixed(6) + ' ' + w.toFixed(6) + ' ' + h.toFixed(6));
+  for (var i = 0; i < boxes.length; i++) {
+    var b = boxes[i];
+    var cx = ((b.x + b.w/2) / W).toFixed(6);
+    var cy = ((b.y + b.h/2) / H).toFixed(6);
+    var nw = (b.w / W).toFixed(6);
+    var nh = (b.h / H).toFixed(6);
+    yolo.push(b.cls + ' ' + cx + ' ' + cy + ' ' + nw + ' ' + nh);
   }
+  
+  var canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  canvas.getContext('2d').drawImage(imgEl, 0, 0);
   
   fetch('/api/annotate/to_training', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({
-      image_name: img.name || 'annotated_' + Date.now(),
-      image_data: imgData,
+      image_name: img.name,
+      image_data: canvas.toDataURL('image/png'),
       yolo_labels: yolo.join('\n'),
-      boxes: img.boxes,
-      width: canvas.width,
-      height: canvas.height
+      boxes: boxes.map(function(b){return {cls:b.cls, x:b.x, y:b.y, w:b.w, h:b.h}}),
+      width: W, height: H
     })
-  }).then(r=>r.json()).then(d=>{
-    document.getElementById('status').textContent = d.status === 'ok' 
-      ? '已复制到训练集: ' + img.name 
-      : '失败: ' + (d.error || '未知');
-  }).catch(e=>{
-    document.getElementById('status').textContent = '复制失败: ' + e;
+  }).then(function(r){return r.json()}).then(function(d){
+    document.getElementById('status').textContent = d.status==='ok' ? '已复制到训练集: '+img.name : '失败: '+(d.error||'');
+  }).catch(function(e){
+    document.getElementById('status').textContent = '复制失败: '+e;
   });
 }
 
