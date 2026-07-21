@@ -5486,7 +5486,7 @@ def _apply_patches():
                     d = c.reason or "无理由"
                     a = f"{c.action.value}({','.join(str(u) for u in (c.unit_ids or []))})"
                     break
-        cb({"cycle": self._cycle_count, "allies": state.ally_count, "enemies": state.enemy_count, "score": outcome.get("score", 0) if outcome else 0, "decision": d, "action": a, "cycle_time": int((time.time() - getattr(self, '_cycle_start', time.time())) * 1000)})
+        cb({"cycle": self._cycle_count, "allies": state.ally_count, "enemies": state.enemy_count, "score": outcome.get("score", 0) if isinstance(outcome, dict) else 0, "decision": d, "action": a, "cycle_time": int((time.time() - getattr(self, '_cycle_start', time.time())) * 1000)})
     gc_mod.GameController._record_cycle = _patched_record
     
     _orig_run = gc_mod.GameController.run
@@ -5614,7 +5614,7 @@ def _apply_patches():
     _orig_record2 = gc_mod.GameController._record_cycle
     def _patched_record2(self, state, outcome, commands):
         _orig_record2(self, state, outcome, commands)
-        if outcome and outcome.get("score", 0) > 20 and commands:
+        if isinstance(outcome, dict) and outcome.get("score", 0) > 20 and commands:
             for cmd in commands:
                 if cmd.action and cmd.action.value in ("move", "attack") and cmd.target_pixel:
                     _map_knowledge["routes"].append({
