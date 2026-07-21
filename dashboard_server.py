@@ -5521,6 +5521,20 @@ def _apply_patches():
         return _orig_fe(self, commands, state)
     gc_mod.GameController._fast_execute = _patched_fe
     
+    # 🔥 修复回放保存路径
+    from pathlib import Path as _Path
+    def _patched_save_replay(self):
+        import json
+        rp = _Path(PROJECT_ROOT) / "data" / "sessions" / f"replay_{int(self._start_time)}.json"
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(rp, "w", encoding="utf-8") as f:
+                json.dump(self._replay_data, f, ensure_ascii=False, indent=2)
+            logger.info(f"回放已保存: {rp}")
+        except Exception as e:
+            logger.error(f"保存回放失败: {e}")
+    gc_mod.GameController._save_replay = _patched_save_replay
+    
     _orig_build = cmd_mod.TacticalCommander._build_user_message
     def _patched_build(self, state_text):
         global _user_instruction
