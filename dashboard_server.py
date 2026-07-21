@@ -728,11 +728,15 @@ def api_knowledge_train():
 
 
 def _load_learning_params():
-    """加载AI学习参数"""
+    """加载AI学习参数并更新全局变量，返回加载的dict或None"""
+    global _self_learning_params
     try:
         pf = PROJECT_ROOT / "data" / "params" / "ai_learning_params.json"
         if pf.exists():
-            return json.loads(pf.read_text(encoding="utf-8", errors="ignore"))
+            loaded = json.loads(pf.read_text(encoding="utf-8", errors="ignore"))
+            if isinstance(loaded, dict):
+                _self_learning_params.update(loaded)
+                return loaded
     except:
         pass
 
@@ -3132,20 +3136,6 @@ def _save_learning_params(params=None):
         logger.warning(f"保存学习参数失败: {e}")
 
 
-def _load_learning_params():
-    """从文件加载学习参数"""
-    global _self_learning_params
-    try:
-        params_file = PROJECT_ROOT / "data" / "params" / "ai_learning_params.json"
-        if params_file.exists():
-            import json as _json
-            loaded = _json.loads(params_file.read_text())
-            _self_learning_params.update(loaded)
-            logger.info(f"已加载学习参数 (total_learnings: {_self_learning_params.get('total_learnings', 0)})")
-    except Exception as e:
-        logger.warning(f"加载学习参数失败: {e}")
-
-
 def _auto_push_learning_params():
     """自动推送学习参数到GitHub"""
     try:
@@ -4194,6 +4184,7 @@ def api_web_search():
                 full_text = f"(AI总结失败: {r['error']})"
             socketio.emit("web_search_stream", {"text": full_text, "done": True})
             add_learning_log("web_search", f"搜索完成: {query[:50]}", full_text[:200])
+            _auto_save_search(query, full_text)
             return jsonify({
                 "query": query, "summary": full_text, "results": results,
                 "searched_at": datetime.now().isoformat(), "source": "Web Search (DuckDuckGo/Bing)",
