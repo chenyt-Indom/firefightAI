@@ -1047,6 +1047,11 @@ def api_version():
     except:
         git_branch = "unknown"
         git_commit = "unknown"
+    # 🔥 实时检测DeepSeek
+    ds = "offline"
+    try:import requests as _r;r2=_r.post("https://api.deepseek.com/v1/chat/completions",headers={"Authorization":f"Bearer {load_config()['llm']['api_key']}","Content-Type":"application/json"},json={"model":"deepseek-chat","messages":[{"role":"user","content":"p"}],"max_tokens":2},timeout=5);ds="online" if r2.status_code==200 else f"err{r2.status_code}"
+    except:pass
+    update_state(api_status={"deepseek":ds})
     return jsonify({
         "version": APP_VERSION, "build": APP_BUILD, "python": sys.version,
         "api_status": get_state().get("api_status", {}),
