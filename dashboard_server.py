@@ -1031,6 +1031,10 @@ def api_system_log_export():
 # 版本管理 + 自更新
 # ═══════════════════════════════════════════════════════════════
 
+@app.route("/favicon.ico")
+def favicon():
+    return b"", 204
+
 @app.route("/api/version")
 def api_version():
     try:
