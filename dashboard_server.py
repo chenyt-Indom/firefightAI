@@ -12126,55 +12126,6 @@ def api_emulator_stream():
         capture_running[0] = False
     return Response(stream_with_context(gen()), mimetype="multipart/x-mixed-replace; boundary=frame",
         headers={"Cache-Control":"no-cache","Access-Control-Allow-Origin":"*","X-Accel-Buffering":"no"}, direct_passthrough=True)
-        last_frame_time = time.perf_counter()
-        frame_count = 0
-        
-        while capture_running[0]:
-            try:
-                if not _emulator_screen_on:
-                    # 屏幕关闭时发送黑屏提示帧
-                    time.sleep(0.5)
-                    try:
-                        from PIL import Image, ImageDraw, ImageFont
-                        img = Image.new("RGB", (STREAM_WIDTH, 540), (10, 15, 20))
-                        draw = ImageDraw.Draw(img)
-                        try:
-                            font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 32)
-                        except:
-                            font = ImageFont.load_default()
-                        draw.text((STREAM_WIDTH//2 - 160, 240), "请打开模拟器屏幕", fill=(80, 80, 80), font=font)
-                        buf = io.BytesIO()
-                        img.save(buf, format="JPEG", quality=80)
-                        frame = buf.getvalue()
-                    except:
-                        frame = b""
-                    if frame:
-                        yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
-                    continue
-                
-                # 🔥 非阻塞获取帧
-                try:
-                    frame_data = frame_buffer.get(timeout=0.5)
-                except _queue.Empty:
-                    time.sleep(0.01)
-                    continue
-                
-                # 生成MJPEG帧
-                yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(frame_data)).encode() + b"\r\n\r\n" + frame_data + b"\r\n")
-                
-                frame_count += 1
-                stats["frames_sent"] = frame_count
-                
-                # 帧率控制
-                now = time.perf_counter()
-                elapsed = now - last_frame_time
-                if elapsed < FRAME_BUDGET:
-                    time.sleep(max(0.001, FRAME_BUDGET - elapsed))
-                last_frame_time = time.perf_counter()
-                
-            except Exception as e:
-                time.sleep(0.05)
-@app.route("/api/decision_chain/benchmark")
 def api_decision_chain_benchmark():
     """决策链性能测试 - 确保截图→指令 < 2秒"""
     try:
