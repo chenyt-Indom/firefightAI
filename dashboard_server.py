@@ -277,6 +277,7 @@ def add_learning_log(category: str, message: str, detail: str = ""):
     update_state(learning_log=_learning_log[-50:])
     socketio.emit("learning_log_update", {"entry": entry, "total": len(_learning_log)})
     _save_learning_log()  # 🔥 实时持久化到磁盘
+    _sync_learning_to_github()  # 后台同步到GitHub
 
 
 def add_system_log(category: str, message: str, detail: str = ""):
@@ -316,6 +317,25 @@ def _save_learning_log():
         _LEARNING_LOG_FILE.write_text(json.dumps(_learning_log[-500:], ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:
         logger.warning(f"保存学习日志失败: {e}")
+
+def _sync_learning_to_github():
+    """后台自动同步学习数据到GitHub"""
+    import threading, subprocess
+    def _sync():
+        try:
+            repo = PROJECT_ROOT
+            subprocess.run(["git", "-C", str(repo), "add", "data/params/learning_log.json", "data/ai_knowledge.json", "data/tactics_rules.yaml"], 
+                         capture_output=True, timeout=10)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "学习同步: 知识库+日志+战术规则"], 
+                         capture_output=True, timeout=10)
+            result = subprocess.run(["git", "-C", str(repo), "push", "origin", "master"], 
+                         capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                logger.debug("学习数据已同步到GitHub")
+        except Exception as e:
+            logger.debug(f"GitHub同步跳过: {e}")
+    t = threading.Thread(target=_sync, daemon=True)
+    t.start()
 
 def _load_knowledge_base():
     global _ai_knowledge_base
@@ -3213,6 +3233,34 @@ def on_ai_correct_behavior(data: dict):
 @app.route("/api/chat_history")
 def api_chat_history():
     return jsonify(_chat_history[-50:])
+
+@app.route("/api/learning/pull")
+def api_learning_pull():
+    """从GitHub拉取学习数据到本地(跨机同步)"""
+    import subprocess
+    try:
+        repo = PROJECT_ROOT
+        result = subprocess.run(["git", "-C", str(repo), "pull", "origin", "master"], capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            _load_persistent_logs()
+            _load_knowledge_base()
+            return jsonify({"status": "ok", "logs": len(_learning_log), "knowledge": len(_ai_knowledge_base)})
+        return jsonify({"status": "error", "detail": result.stderr[:200]})
+    except Exception as e:
+        return jsonify({"status": "error", "detail": str(e)})
+
+@app.route("/api/learning/push")
+def api_learning_push():
+    """手动推送学习数据到GitHub"""
+    import subprocess
+    try:
+        repo = PROJECT_ROOT
+        subprocess.run(["git", "-C", str(repo), "add", "data/params/learning_log.json", "data/ai_knowledge.json", "data/tactics_rules.yaml"], capture_output=True, timeout=10)
+        subprocess.run(["git", "-C", str(repo), "commit", "-m", f"学习同步: {datetime.now().strftime('%H:%M')}"], capture_output=True, timeout=10)
+        r = subprocess.run(["git", "-C", str(repo), "push", "origin", "master"], capture_output=True, text=True, timeout=30)
+        return jsonify({"status": "ok" if r.returncode==0 else "error", "detail": r.stderr[:200]})
+    except Exception as e:
+        return jsonify({"status": "error", "detail": str(e)})
 
 @app.route("/api/daily_report")
 def api_daily_report():
