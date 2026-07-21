@@ -9772,7 +9772,7 @@ var _emuDragLine=null;  // 拖动轨迹线
   }
   
   container.addEventListener('mousedown', function(e){
-    if(!emulatorScreenImage) return;
+    var xy=getEventXY(e); var x=xy[0], y=xy[1];
     _emuMouseDown=true;
     _emuMouseStartX=x;
     _emuMouseStartY=y;
@@ -9840,7 +9840,7 @@ var _emuDragLine=null;  // 拖动轨迹线
     }
   });
   container.addEventListener('mouseup', function(e){
-    if(!_emuMouseDown||!emulatorScreenImage) return;
+    if(!_emuMouseDown) return;
     _emuMouseDown=false;
     // 🔥 清除拖动轨迹线
     if(_emuDragLine){_emuDragLine.remove();_emuDragLine=null;}
@@ -12347,26 +12347,41 @@ def api_emulator_analyze_apk():
 
 @app.route("/api/emulator/screenshot")
 def api_emulator_screenshot():
-    """高速ADB截图 - 使用raw screencap + JPEG压缩，目标20-30fps"""
+    """高速ADB截图 - 自动适配各种模拟器端口"""
     import base64, struct, io
     try:
         t0 = time.perf_counter()
         adb_exe = _get_adb_for_emulator()
-        # 使用raw格式（无PNG压缩，速度快3-5倍）
-        dev_id = f"emulator-{_emulator_adb_port}"
-        r = subprocess.run(
-            [adb_exe, "-s", dev_id, "exec-out", "screencap"],
-            capture_output=True, timeout=3
-        )
-        if r.returncode != 0 or len(r.stdout) < 20:
-            # 回退到 localhost 格式
-            dev_id = f"localhost:{_emulator_adb_port}"
-            r = subprocess.run(
-                [adb_exe, "-s", dev_id, "exec-out", "screencap"],
-                capture_output=True, timeout=3
-            )
-        if r.returncode != 0 or len(r.stdout) < 20:
-            return jsonify({"error": "截图失败", "stderr": str(r.stderr[:200]) if r.stderr else ""}), 500
+        # 🔥 自动尝试多种dev_id格式，兼容MuMu/雷电/蓝叠
+        global _emulator_adb_port
+        candidates = [
+            f"127.0.0.1:{_emulator_adb_port}",  # MuMu/雷电
+            f"localhost:{_emulator_adb_port}",
+            f"emulator-{_emulator_adb_port}",  # AVD
+            f"127.0.0.1:5555",
+            f"127.0.0.1:5554",
+        ]
+        r = None
+        last_err = ""
+        for dev_id in candidates:
+            try:
+                r = subprocess.run(
+                    [adb_exe, "-s", dev_id, "exec-out", "screencap"],
+                    capture_output=True, timeout=2
+                )
+                if r.returncode == 0 and len(r.stdout) > 100:
+                    # 🔥 自动修正端口和类型
+                    if "127.0.0.1" in dev_id and "mumu" not in _emulator_type.lower():
+                        port = dev_id.split(":")[-1]
+                        if port.isdigit():
+                            _emulator_adb_port = int(port)
+                            if port == "7555": _emulator_type = "mumu"
+                    break
+            except Exception as e:
+                last_err = str(e)
+                continue
+        if not r or r.returncode != 0 or len(r.stdout) < 20:
+            return jsonify({"error": f"所有ADB地址均失败。请确认MuMu已启动", "detail": last_err[:200]}), 500
         
         # 解析raw screencap格式: 4B width + 4B height + 4B pixel_format + raw RGBA
         raw_data = r.stdout
