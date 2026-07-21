@@ -5499,44 +5499,121 @@ def _apply_patches():
         return False
     gc_mod.GameController._check_game_over = _patched_check_game_over
     
-    # 🔥 快速决策引擎: 优势闪击/劣势固守/均衡LLM
+    # ═══ 地图学习系统 ═══
+    import json as _json
+    _map_file = PROJECT_ROOT / "data" / "map_knowledge.json"
+    _map_knowledge = {}
+    if _map_file.exists():
+        try: _map_knowledge = _json.loads(_map_file.read_text(encoding="utf-8"))
+        except: pass
+    
+    def _save_map_knowledge():
+        try: _map_file.write_text(_json.dumps(_map_knowledge, ensure_ascii=False, indent=2))
+        except: pass
+    
+    # Patch controller.run() to do pre-game scan
+    _orig_run2 = gc_mod.GameController.run
+    def _patched_run2(self):
+        logger.info("🗺️ 开局地图扫描...")
+        mapsig = f"{self._cycle_count}_{int(time.time())}"
+        
+        # 记录开局兵力分布
+        if not _map_knowledge.get("maps"):
+            _map_knowledge["maps"] = {}
+            _map_knowledge["total_games"] = 0
+            _map_knowledge["routes"] = []
+        
+        _map_knowledge["total_games"] += 1
+        _map_knowledge["last_game"] = datetime.now().isoformat()
+        
+        result = _orig_run2(self)
+        _save_map_knowledge()
+        return result
+    gc_mod.GameController.run = _patched_run2
+    
+    # 🔥 快速决策引擎: 地图感知+分组控制
     import src.decision.parser as _parser_mod
     ActionType = _parser_mod.ActionType
     ParsedCommand = _parser_mod.ParsedCommand
     _orig_fast_decide = gc_mod.GameController._fast_decide
-    _fast_cache = {}
+    _cycle_stats = {"route_hits": 0, "total_moves": 0}
     def _patched_fast_decide(self, state):
         a = state.ally_count
         e = state.enemy_count
         sh, sw = state.screen_size[1], state.screen_size[0]
+        cycle = self._cycle_count
+        _cycle_stats["total_moves"] += 1
         
-        # 多单位: 分组并行控制
+        # 🗺️ 开局规划: 扫描敌方旗帜位置
+        if cycle <= 3 and e > 0:
+            enemy_center_x = int(sum(u.x for u in state.enemies) / e)
+            enemy_center_y = int(sum(u.y for u in state.enemies) / e)
+            # 记录地图特征
+            mid = f"map_{mapsig if 'mapsig' in dir() else 'default'}"
+            if mid not in _map_knowledge["maps"]:
+                _map_knowledge["maps"][mid] = {"enemy_spawn": (enemy_center_x, enemy_center_y), "games": 0, "wins": 0}
+            _map_knowledge["maps"][mid]["games"] += 1
+        
+        # 🗺️ 路线学习: 从历史中找最优路线
+        best_route = None
+        if _map_knowledge["routes"] and a > 2:
+            for route in _map_knowledge["routes"][-10:]:
+                if route.get("ally_count") == a and route.get("score", 0) > 50:
+                    best_route = route
+                    break
+        if best_route:
+            _cycle_stats["route_hits"] += 1
+            cmd = ParsedCommand(action=ActionType.MOVE,
+                unit_ids=[u.track_id for u in state.allies],
+                target_pixel=(best_route.get("tx", int(sw*0.55)), best_route.get("ty", int(sh*0.35))),
+                reason=f"历史路线(得分{best_route['score']})")
+            return ([cmd], 0)
+        
+        # >=4单位: 分组协同
         if a >= 4:
             half = a // 2
-            front_ids = [u.track_id for u in state.allies[:half]]
-            back_ids = [u.track_id for u in state.allies[half:]]
+            front = [u.track_id for u in state.allies[:half]]
+            back = [u.track_id for u in state.allies[half:]]
             cmds = [
-                ParsedCommand(action=ActionType.MOVE, unit_ids=front_ids,
+                ParsedCommand(action=ActionType.MOVE, unit_ids=front,
                     target_pixel=(int(sw*0.55), int(sh*0.35)), reason="前锋推进"),
-                ParsedCommand(action=ActionType.MOVE, unit_ids=back_ids,
+                ParsedCommand(action=ActionType.MOVE, unit_ids=back,
                     target_pixel=(int(sw*0.45), int(sh*0.45)), reason="后卫掩护"),
             ]
             return (cmds, 0)
         
-        # 绝对优势 → 闪击
+        # 3x优势闪击
         if a > 0 and e > 0 and a >= e * 3:
             cmd = ParsedCommand(action=ActionType.MOVE, unit_ids=[u.track_id for u in state.allies],
-                target_pixel=(int(sw*0.55), int(sh*0.35)), reason=f"闪电战:{a}vs{e}")
+                target_pixel=(int(sw*0.55), int(sh*0.35)), reason=f"闪击{a}vs{e}")
             return ([cmd], 0)
         
-        # 劣势 → 固守
+        # 2x劣势固守
         if a > 0 and e >= a * 2:
             cmd = ParsedCommand(action=ActionType.MOVE, unit_ids=[u.track_id for u in state.allies],
-                target_pixel=(int(sw*0.5), int(sh*0.7)), reason=f"固守:{a}vs{e}")
+                target_pixel=(int(sw*0.5), int(sh*0.7)), reason=f"固守{a}vs{e}")
             return ([cmd], 0)
         
+        # 均衡→LLM
         return _orig_fast_decide(self, state)
     gc_mod.GameController._fast_decide = _patched_fast_decide
+    
+    # Patch record to save routes
+    _orig_record2 = gc_mod.GameController._record_cycle
+    def _patched_record2(self, state, outcome, commands):
+        _orig_record2(self, state, outcome, commands)
+        if outcome and outcome.get("score", 0) > 20 and commands:
+            for cmd in commands:
+                if cmd.action and cmd.action.value in ("move", "attack") and cmd.target_pixel:
+                    _map_knowledge["routes"].append({
+                        "ally_count": state.ally_count, "enemy_count": state.enemy_count,
+                        "tx": cmd.target_pixel[0], "ty": cmd.target_pixel[1],
+                        "score": int(outcome["score"]), "time": datetime.now().isoformat()
+                    })
+                    _map_knowledge["routes"] = _map_knowledge["routes"][-100:]
+                    _save_map_knowledge()
+                    break
+    gc_mod.GameController._record_cycle = _patched_record2
     
     _orig_fe = gc_mod.GameController._fast_execute
     def _patched_fe(self, commands, state):
