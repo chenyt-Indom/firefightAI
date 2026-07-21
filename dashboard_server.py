@@ -3551,20 +3551,6 @@ def api_upload_images():
     add_system_log("training", f"上传{len(uploaded)}张图片到数据集 {dataset_name}", "")
     return jsonify({"uploaded": uploaded, "dataset": dataset_name})
 
-@app.route("/api/train/check")
-def api_train_check():
-    """检测训练环境"""
-    try:
-        import torch
-        cuda = torch.cuda.is_available()
-        return jsonify({
-            "cuda_available": cuda,
-            "gpu_name": torch.cuda.get_device_name(0) if cuda else "N/A",
-            "torch_version": torch.__version__
-        })
-    except:
-        return jsonify({"cuda_available": False, "reason": "WDAC blocked"})
-
 @app.route("/api/train/start", methods=["POST"])
 def api_train_start():
     global _training_process
@@ -3578,17 +3564,6 @@ def api_train_start():
     auto_push = data.get("auto_push_github", False)
     device = "cpu"
     remove_after = data.get("remove_after_train", True)
-    # 检测torch是否可用
-    try:
-        import torch
-        if not torch.cuda.is_available():
-            socketio.emit("training_log", {"line": "⚠️ CUDA不可用(WDAC拦截),使用CPU训练 (慢但能用)"})
-    except Exception as e:
-        return jsonify({
-            "error": "PyTorch无法加载(WDAC拦截DLL)",
-            "detail": str(e)[:200],
-            "solution": "右键桌面 install_cuda.bat → 以管理员身份运行, 重启电脑"
-        }), 500
 
     dataset_path = PROJECT_ROOT / "data" / dataset_name / "data.yaml"
     if not dataset_path.exists():
@@ -7121,17 +7096,11 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
     <label style="align-items:center;flex-direction:row;gap:6px"><input type="checkbox" id="auto-push-github">训练后推送到GitHub</label>
   </div>
   <div style="display:flex;gap:10px;align-items:center;">
-    <button class="btn-start" onclick="startTraining()" id="btn-train-start">本地训练</button>
+    <button class="btn-start" onclick="startTraining()" id="btn-train-start">开始训练</button>
     <button class="btn-stop" onclick="stopTraining()" id="btn-train-stop" style="display:none">停止</button>
     <span id="train-status-text" style="font-size:12px;color:#888"></span>
   </div>
-  <div id="colab-hint" style="margin-top:10px;padding:10px;background:#1a1f2b;border-radius:6px;border-left:3px solid #f9ab00;display:none">
-    <strong style="color:#f9ab00">Colab GPU训练</strong><br>
-    <span style="font-size:12px;color:#aaa">本地GPU被WDAC拦截? 用Google Colab免费T4 GPU训练</span><br>
-    <span style="font-size:11px;color:#666">1. 桌面 dataset.zip + FirefightAI_Training.ipynb 上传到 colab.research.google.com</span><br>
-    <span style="font-size:11px;color:#666">2. Runtime → T4 GPU → Run All → 上传dataset.zip</span><br>
-    <button class="btn-start" onclick="window.open('https://colab.research.google.com/','_blank')" style="margin-top:6px;font-size:11px;padding:5px 12px;background:#f9ab00">打开 Colab</button>
-  </div>
+  <p style="font-size:11px;color:#f9ab00;margin:4px 0 0 0">GPU被锁？用 <a href="https://colab.research.google.com/" target="_blank" style="color:#4fc3f7">Colab免费T4</a> 训练，上传桌面 FirefightAI_Training.ipynb + dataset.zip</p>
   <div class="train-progress" id="train-progress-container" style="display:none"><div class="train-progress-bar" id="train-progress-bar" style="width:0%">0%</div></div>
   <div class="train-log" id="train-log"></div>
   <div id="train-results"></div></div>
@@ -8500,11 +8469,7 @@ function loadDatasets(){loadUnifiedDataset()}  // 兼容旧调用
 function selectDataset(name){unifiedDataset=name;loadUnifiedDataset()}
 function loadModels(){fetch('/api/models').then(r=>r.json()).then(data=>{var html='';data.forEach(function(m){html+='<div class="model-card"><div class="name">'+m.name+'</div><div class="info">'+m.size_mb+'MB</div></div>'});document.getElementById('model-list').innerHTML=html||'暂无模型'})}
 function uploadImages(){var files=document.getElementById('file-input').files;if(!files.length)return;var fd=new FormData();for(var i=0;i<files.length;i++)fd.append('file_'+i,files[i]);fd.append('dataset',unifiedDataset);var s=document.getElementById('upload-status');s.innerHTML='<div class="alert info">上传中...</div>';fetch('/api/upload_images',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{s.innerHTML='<div class="alert success">已上传 '+d.uploaded.length+' 张到 '+d.dataset+'</div>';loadUnifiedDataset()}).catch(e=>{s.innerHTML='<div class="alert error">失败: '+e+'</div>'})}
-function startTraining(){var ep=parseInt(document.getElementById('train-epochs').value)||50;var md=document.getElementById('train-model').value;var isz=parseInt(document.getElementById('train-imgsz').value)||640;var autoPush=document.getElementById('auto-push-github').checked;var device=document.getElementById('train-device').value;var removeAfter=document.getElementById('remove-after-train').checked;document.getElementById('btn-train-start').style.display='none';document.getElementById('btn-train-stop').style.display='inline-block';document.getElementById('train-progress-container').style.display='block';document.getElementById('train-log').innerHTML='';document.getElementById('train-status-text').textContent='训练中 ('+device.toUpperCase()+')...';document.getElementById('train-results').innerHTML='';document.getElementById('train-progress-bar').style.width='0%';document.getElementById('train-progress-bar').textContent='0%';fetch('/api/train/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dataset:unifiedDataset,model_name:md,epochs:ep,imgsz:isz,device:device,remove_after_train:removeAfter,auto_push_github:autoPush})}).then(r=>r.json()).then(d=>{if(d.error){document.getElementById('train-status-text').textContent=d.error;document.getElementById('btn-train-start').style.display='inline-block';document.getElementById('btn-train-stop').style.display='none';document.getElementById('colab-hint').style.display='block'}})}}
-
-// 自动显示Colab提示(本地WDAC拦截GPU)
-function checkTrainingReady(){fetch('/api/train/check').then(r=>r.json()).then(d=>{if(d.cuda_available)document.getElementById('colab-hint').style.display='none';else document.getElementById('colab-hint').style.display='block'}).catch(()=>document.getElementById('colab-hint').style.display='block')}
-setTimeout(checkTrainingReady,2000)
+function startTraining(){var ep=parseInt(document.getElementById('train-epochs').value)||50;var md=document.getElementById('train-model').value;var isz=parseInt(document.getElementById('train-imgsz').value)||640;var autoPush=document.getElementById('auto-push-github').checked;var device=document.getElementById('train-device').value;var removeAfter=document.getElementById('remove-after-train').checked;document.getElementById('btn-train-start').style.display='none';document.getElementById('btn-train-stop').style.display='inline-block';document.getElementById('train-progress-container').style.display='block';document.getElementById('train-log').innerHTML='';document.getElementById('train-status-text').textContent='训练中 ('+device.toUpperCase()+')...';document.getElementById('train-results').innerHTML='';document.getElementById('train-progress-bar').style.width='0%';document.getElementById('train-progress-bar').textContent='0%';fetch('/api/train/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dataset:unifiedDataset,model_name:md,epochs:ep,imgsz:isz,device:device,remove_after_train:removeAfter,auto_push_github:autoPush})}).then(r=>r.json()).then(d=>{if(d.error)alert(d.error)})}
 function stopTraining(){fetch('/api/train/stop',{method:'POST'}).then(r=>r.json()).then(d=>{document.getElementById('train-status-text').textContent='已停止';document.getElementById('btn-train-start').style.display='inline-block';document.getElementById('btn-train-stop').style.display='none'})}
 _on('training_log',function(d){var l=document.getElementById('train-log');l.innerHTML+='<div>'+escapeHtml(d.line)+'</div>';l.scrollTop=l.scrollHeight})
 _on('training_state_update',function(d){
@@ -10251,6 +10216,7 @@ img{display:block;max-width:100vw;max-height:70vh}
   <button class="btn btn-clear" onclick="clearAll()">清空</button>
   <button class="btn btn-export" onclick="exportYOLO()">&#x1F4E6; 导出YOLO</button>
   <button class="btn btn-export" style="background:#00b894" onclick="exportAllData()">&#x1F4BF; 全量导出</button>
+  <button class="btn btn-export" style="background:#e67e22" onclick="copyToTraining()">&#x1F4E4; 复制到训练集</button>
   <span style="color:#888;font-size:11px">Ctrl+S保存 | Ctrl+Z删除 | 0-8切换类别 | 拖拽框选 | 支持拖放导入</span>
 </div>
 
@@ -10602,6 +10568,51 @@ function exportAllData() {
   var totalBoxes = 0;
   for (var k in data.images) { totalBoxes += data.images[k].boxes.length; }
   document.getElementById('status').textContent = '全量导出: ' + project.order.length + '张图, ' + totalBoxes + '个标注';
+}
+
+function copyToTraining() {
+  if (!currentImage || !project.images[currentImage]) { alert('没有选中的图片'); return; }
+  var img = project.images[currentImage];
+  if (!img.boxes.length) { alert('该图片无标注框，请先标注'); return; }
+  
+  // 获取当前图片的canvas数据
+  var viewImg = document.getElementById('viewImg');
+  var canvas = document.createElement('canvas');
+  canvas.width = viewImg.naturalWidth;
+  canvas.height = viewImg.naturalHeight;
+  var ctx = canvas.getContext('2d');
+  ctx.drawImage(viewImg, 0, 0);
+  var imgData = canvas.toDataURL('image/png');
+  
+  // 生成YOLO标注
+  var yolo = [];
+  for (var i = 0; i < img.boxes.length; i++) {
+    var b = img.boxes[i];
+    var x = (b.x + b.w/2) / canvas.width;
+    var y = (b.y + b.h/2) / canvas.height;
+    var w = b.w / canvas.width;
+    var h = b.h / canvas.height;
+    yolo.push(b.classId + ' ' + x.toFixed(6) + ' ' + y.toFixed(6) + ' ' + w.toFixed(6) + ' ' + h.toFixed(6));
+  }
+  
+  fetch('/api/annotate/to_training', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      image_name: img.name || 'annotated_' + Date.now(),
+      image_data: imgData,
+      yolo_labels: yolo.join('\n'),
+      boxes: img.boxes,
+      width: canvas.width,
+      height: canvas.height
+    })
+  }).then(r=>r.json()).then(d=>{
+    document.getElementById('status').textContent = d.status === 'ok' 
+      ? '已复制到训练集: ' + img.name 
+      : '失败: ' + (d.error || '未知');
+  }).catch(e=>{
+    document.getElementById('status').textContent = '复制失败: ' + e;
+  });
 }
 
 // ── 键盘快捷键 ──
