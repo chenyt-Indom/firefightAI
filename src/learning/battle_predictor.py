@@ -582,12 +582,16 @@ threat_level范围0-100, 0=无威胁, 100=极度危险。"""
             return False
 
         try:
-            data = json.loads(load_path.read_text(encoding="utf-8"))
-
-            self._total_predictions = data.get("total_predictions", 0)
-            self._correct_predictions = data.get("correct_predictions", 0)
-            self._experience = data.get("experience", [])
-            self._map_cache = data.get("map_cache", {})
+            raw = load_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            # 文件名不是dict就跳过
+            if not isinstance(data, dict):
+                logger.warning(f"预测文件格式异常(type={type(data).__name__}), 重新初始化")
+                return False
+            self._total_predictions = int(data.get("total_predictions", 0))
+            self._correct_predictions = int(data.get("correct_predictions", 0))
+            self._experience = data.get("experience", []) if isinstance(data.get("experience"), list) else []
+            self._map_cache = data.get("map_cache", {}) if isinstance(data.get("map_cache"), dict) else {}
 
             # 裁剪经验到上限
             if len(self._experience) > MAX_EXPERIENCE:
