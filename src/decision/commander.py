@@ -122,75 +122,60 @@ class TacticalCommander:
         return result
 
     def _call_llm(self, game_state: GameState, use_fallback: bool = False) -> Optional[LLMResponse]:
-        """调用LLM API - 使用requests直连(绕过openai库DLL问题)"""
+        """LLM调用 - 双路冗余: DeepSeek主+Zhipu备"""
         import requests as _req
         
+        tag = "FALLBACK" if use_fallback else "PRIMARY"
         api_key = self.fallback_api_key if use_fallback else self.api_key
-        # 🔥 如果主备provider相同，用主api_base
-        if use_fallback and self.fallback_provider == self.provider:
-            api_base = self.api_base
-        else:
-            api_base = self.fallback_api_base if use_fallback else self.api_base
+        api_base = self.fallback_api_base if use_fallback else self.api_base
         model = self.fallback_model if use_fallback else self.model
-        provider_name = self.fallback_provider if use_fallback else self.provider
+        
+        _log.warning(f"[{tag}] START: provider={self.fallback_provider if use_fallback else self.provider} model={model} key={'YES' if api_key and 'YOUR_' not in api_key else 'NO'} base={api_base[:40]}")
         
         if not api_key or "YOUR_" in api_key:
-            logger.error(f"API Key未配置 ({provider_name})")
+            _log.error(f"[{tag}] API Key未配置")
             return None
         
-        state_text = game_state.to_llm_text()
-        user_message = self._build_user_message(state_text)
-        system_content = (self._system_prompt or "")[:3000]
-        if self._tactics_rules:
-            system_content += "\n" + self._tactics_rules[:500]
+        try:
+            state_text = game_state.to_llm_text()
+            user_message = self._build_user_message(state_text)
+            sp = (self._system_prompt or "")[:2000]
+            if self._tactics_rules:
+                sp += "\n" + self._tactics_rules[:300]
+            
+            body = {"model": model, "messages": [
+                {"role": "system", "content": sp},
+                {"role": "user", "content": user_message[:4000]}
+            ], "max_tokens": self.max_tokens or 384, "temperature": self.temperature or 0.3}
+            
+            for at in range(3):
+                try:
+                    t0 = time.time()
+                    resp = _req.post(f"{api_base.rstrip('/')}/chat/completions",
+                        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                        json=body, timeout=(10, self.timeout + 15))
+                    dt = (time.time() - t0) * 1000
+                    
+                    if resp.status_code == 200:
+                        raw = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                        if not raw:
+                            _log.warning(f"[{tag}] attempt{at+1}: 空响应")
+                            continue
+                        parsed = self._parse_response(raw)
+                        if parsed:
+                            _log.warning(f"[{tag}] OK attempt{at+1} {dt:.0f}ms: {parsed.analysis[:60]}")
+                            return parsed
+                        _log.warning(f"[{tag}] attempt{at+1}: 解析失败 raw={raw[:100]}")
+                        body["messages"].append({"role": "user", "content": "输出JSON格式"})
+                    else:
+                        _log.warning(f"[{tag}] attempt{at+1}: HTTP{resp.status_code} {resp.text[:80]}")
+                except Exception as e:
+                    _log.error(f"[{tag}] attempt{at+1}: {e}")
         
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": user_message[:5000]},
-            ],
-            "max_tokens": self.max_tokens or 384,
-            "temperature": self.temperature or 0.3,
-        }
+        except Exception as e:
+            _log.error(f"[{tag}] 构建消息失败: {e}")
         
-        for attempt in range(1, self.retry_count + 2):
-            try:
-                start_time = time.time()
-                log_decision(f"[{provider_name}/{model}] 第{attempt}次请求, 友={game_state.ally_count} 敌={game_state.enemy_count}")
-                
-                resp = _req.post(
-                    f"{api_base.rstrip('/')}/chat/completions",
-                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                    json=payload, timeout=(8, self.timeout + 10)
-                )
-                
-                if resp.status_code != 200:
-                    logger.warning(f"LLM返回{resp.status_code}: {resp.text[:150]}")
-                    continue
-                
-                elapsed = (time.time() - start_time) * 1000
-                self._decision_count += 1
-                self._total_decision_time += elapsed
-                
-                raw_text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-                if not raw_text:
-                    logger.warning(f"LLM返回空内容 (第{attempt}次)")
-                    continue
-                
-                log_decision(f"LLM响应 ({elapsed:.0f}ms): {raw_text[:200]}...")
-                llm_response = self._parse_response(raw_text)
-                if llm_response is not None:
-                    log_decision(f"决策完成: {llm_response.analysis[:100]}... ({len(llm_response.commands)}条指令)")
-                    return llm_response
-                
-                logger.warning(f"LLM输出格式错误 (第{attempt}次)")
-                messages = payload["messages"]
-                messages.append({"role": "user", "content": "请严格按照JSON schema格式输出"})
-            except Exception as e:
-                logger.error(f"LLM调用异常 (第{attempt}次): {e}")
-        
-        logger.error(f"LLM重试{self.retry_count}次后仍失败")
+        _log.error(f"[{tag}] 3次尝试后失败")
         return None
 
     def _build_user_message(self, state_text: str) -> str:
