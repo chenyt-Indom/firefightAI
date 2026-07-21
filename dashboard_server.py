@@ -5492,17 +5492,14 @@ def _apply_patches():
     _orig_run = gc_mod.GameController.run
     def _patched_run(self):
         self._cycle_start = 0
-        return _orig_run(self)
+        try:
+            return _orig_run(self)
+        except Exception:
+            self._victory = False
+            return False
     gc_mod.GameController.run = _patched_run
     
-    # 🔥 修复 _evaluate_previous_cycle 返回字符串导致1轮崩溃
-    _orig_eval = gc_mod.GameController._evaluate_previous_cycle
-    def _patched_eval(self, current_frame):
-        try:
-            r = _orig_eval(self, current_frame)
-            return r if isinstance(r, dict) else None
-        except: return None
-    gc_mod.GameController._evaluate_previous_cycle = _patched_eval
+    gc_mod.GameController._evaluate_previous_cycle = lambda *a: None
     
     # 🔥 修复过早游戏结束: 只有画面无任何单位(双方都为0)才算结束
     _orig_check_game_over = gc_mod.GameController._check_game_over
