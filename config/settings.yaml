@@ -130,7 +130,7 @@ touch_calibration:
   circle_offset_x: 30      # 圆圈X偏移 (单位中心→右)
   circle_offset_y: 61      # 圆圈Y偏移 (单位中心→下)
   cluster_eps: 50          # 距离聚类阈值(同班组士兵间距)
-  select_delay: 0.5        # 点击选中后等待注册时间(秒)
+  select_delay: 0.15       # 点击选中后等待注册时间(秒)
   max_commands_per_cycle: 8  # 每轮最多指令数
 mumu_ipc:
   dll_path: "D:\\MuMuPlayer\\nx_device\\12.0\\shell\\sdk\\external_renderer_ipc.dll"
