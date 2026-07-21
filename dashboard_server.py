@@ -395,6 +395,95 @@ def _auto_tune_params_from_training():
     except Exception as e:
         logger.debug(f"自动调参跳过: {e}")
 
+def _save_correction_rule(correction: str, ai_response: str):
+    """将用户的纠正自动沉淀为战术规则"""
+    try:
+        # 🔥 检测重复纠正 - 3次以上自动升级为硬规则
+        similar_count = sum(1 for e in _learning_log 
+                          if e.get("category") == "correction" 
+                          and _text_similarity(e.get("message",""), correction) > 0.5)
+        
+        rules_file = PROJECT_ROOT / "data" / "tactics_rules.yaml"
+        import yaml
+        rules = []
+        if rules_file.exists():
+            data = yaml.safe_load(rules_file.read_text(encoding='utf-8')) or {}
+            rules = data.get("rules", data) if isinstance(data, dict) else []
+            if not isinstance(rules, list): rules = []
+        
+        # 用DeepSeek提取核心规则 + 重要性标注
+        severity = "🔴硬规则" if similar_count >= 3 else "🟡软规则"
+        prompt = f"请将以下指挥官对AI的纠正提炼为一条简洁的战术禁止规则（15字以内）。已纠正{similar_count}次类似问题。\n纠正: {correction[:200]}\nAI: {ai_response[:200]}\n只输出规则本身，格式: 禁止xxx"
+        r = _deepseek_chat([{"role": "user", "content": prompt}], max_tokens=60, temperature=0.1, stream=False)
+        rule_name = r["content"].strip()[:40] if r["success"] else f"禁止: {correction[:40]}"
+        
+        rules.append({
+            "name": rule_name, 
+            "severity": severity,
+            "count": similar_count + 1,
+            "desc": f"纠正: {correction[:100]}\nAI: {ai_response[:100]}", 
+            "date": datetime.now().strftime("%Y-%m-%d")
+        })
+        
+        # 去重并保留硬规则
+        seen = set(); unique = []; hard = []
+        for rule in sorted(rules, key=lambda x: 0 if "🔴" in str(x.get("severity","")) else 1):
+            if isinstance(rule, dict) and rule.get("name") and rule["name"] not in seen:
+                seen.add(rule["name"]); unique.append(rule)
+                if "🔴" in str(rule.get("severity","")): hard.append(rule["name"])
+        
+        rules_file.parent.mkdir(parents=True, exist_ok=True)
+        rules_file.write_text(yaml.dump({"rules": unique[-50:], "hard_rules": hard[-20:]}, allow_unicode=True, default_flow_style=False), encoding='utf-8')
+        
+        status = "🔴硬规则已升级" if similar_count >= 2 else "规则已沉淀"
+        add_learning_log("correction", f"{status}: {rule_name}", f"纠正{xsimilar_count+1}次: {correction[:100]}")
+        
+        # 🔥 达到硬规则时主动通知
+        if similar_count >= 2:
+            socketio.emit("硬规则升级", {"rule": rule_name, "count": similar_count+1, "msg": f"该规则被纠正{similar_count+1}次，已自动升级为硬规则"})
+        
+        _sync_learning_to_github()
+    except Exception as e:
+        logger.debug(f"自动沉淀规则跳过: {e}")
+
+def _text_similarity(a: str, b: str) -> float:
+    """简单的文本相似度"""
+    if not a or not b: return 0
+    words_a = set(a) | set(a.lower().split())
+    words_b = set(b) | set(b.lower().split())
+    if not words_a or not words_b: return 0
+    return len(words_a & words_b) / max(len(words_a), len(words_b))
+
+def _auto_reflect_on_response(user_msg: str, ai_response: str, state: dict):
+    """AI自我反思：检查自己的回答是否可能犯错，主动学习"""
+    import threading
+    def _reflect():
+        try:
+            corrections = [e for e in _learning_log if e.get("category") == "correction"][-5:]
+            if not corrections: return
+            recent = "\n".join(f"- {c.get('message','')[:100]}" for c in corrections)
+            prompt = f"""你在上一轮回答了: {ai_response[:300]}
+最近5次被用户纠正的内容: {recent}
+请检查你的回答是否违反了任何已纠正的规则。如果是，请坦诚承认错误并表态改正。
+仅输出1句话（20字以内），格式: 反思: xxx。如果没问题则输出 反思: 无"""
+            r = _deepseek_chat([{"role": "user", "content": prompt}], max_tokens=60, temperature=0.1, stream=False)
+            if r["success"] and "无" not in r["content"] and len(r["content"]) > 5:
+                add_learning_log("self_reflect", r["content"].strip()[:120], f"用户: {user_msg[:100]}")
+        except: pass
+    t = threading.Thread(target=_reflect, daemon=True)
+    t.start()
+
+def _record_victory_reinforcement(state: dict):
+    """战斗胜利/得分增长时记录积极经验"""
+    try:
+        score = state.get("total_score", 0)
+        cycle = state.get("cycle", 0)
+        coms = [e for e in _learning_log if e.get("category") == "command"][-3:]
+        if coms and score > 0:
+            add_learning_log("self_improve", f"✅ 策略验证成功 (得分{score}, 第{cycle}轮)", 
+                           f"最近指令: {'; '.join(c.get('message','')[:80] for c in coms)}")
+    except: pass
+
 def _load_knowledge_base():
     global _ai_knowledge_base
     try:
@@ -2445,6 +2534,41 @@ def on_ai_chat(data: dict):
                     "\n\n【重要】指挥官正在纠正你的行为。请仔细分析纠正内容，"
                     "并说明你将如何调整后续的战术决策和操控方式。"
                 )
+            # 🔥 注入已学习的纠正规则 - 最高优先级
+            corrections = [e for e in _learning_log if e.get("category") == "correction"][-10:]
+            if corrections:
+                sys_prompt += "\n\n【📋 指挥官纠正记录 - 必须严格遵守】\n"
+                sys_prompt += "以下是指挥官过去纠正你的内容，你必须100%遵守，绝对不能再犯同样的错误：\n"
+                for c in corrections:
+                    sys_prompt += f"⚠️ 禁止: {c.get('message','')[:200]}\n"
+            # 🔥 注入硬规则（最高优先级，不可违反）
+            hard_rules = []
+            for e in _learning_log:
+                if e.get("category") == "correction":
+                    similar = sum(1 for e2 in _learning_log 
+                                if e2.get("category") == "correction" 
+                                and _text_similarity(e2.get("message",""), e.get("message","")) > 0.4)
+                    if similar >= 3:
+                        # 只取核心纠正语句（去掉"用户纠正: "前缀）
+                        msg = e.get("message", "").replace("用户纠正: ", "").replace("用户纠正：", "").strip()
+                        if msg and msg not in [h.get("rule","") for h in hard_rules]:
+                            hard_rules.append({"rule": msg[:100], "count": similar})
+            if hard_rules:
+                sys_prompt += "\n\n【🔴 硬规则 - 屡次纠正已升级为永久禁令，违反即失败】\n"
+                for h in hard_rules[-8:]:
+                    sys_prompt += f"🚫 绝对禁止 (纠正{h['count']}次): {h['rule']}\n"
+            # 🔥 注入知识库中的纠正经验
+            kb_corrections = [k for k in _ai_knowledge_base if k.get("category") in ("correction", "tactical_lesson")][-8:]
+            if kb_corrections:
+                sys_prompt += "\n【已沉淀的纠正知识】\n"
+                for k in kb_corrections:
+                    sys_prompt += f"- {k.get('title','')[:150]}: {k.get('content','')[:200]}\n"
+            # 🔥 注入最近的成功经验 - 学习什么做对了
+            successes = [e for e in _learning_log if e.get("category") in ("self_improve", "combat") and "胜利" in e.get("message","")]
+            if successes:
+                sys_prompt += f"\n【✅ 已验证的有效策略 ({len(successes)}条)】\n"
+                for s in successes[-5:]:
+                    sys_prompt += f"有效: {s.get('message','')[:150]}\n"
 
             # 构建消息列表
             messages = [{"role": "system", "content": sys_prompt}]
@@ -2494,14 +2618,20 @@ def on_ai_chat(data: dict):
             socketio.emit("ai_chat_token", {"token": "", "done": True, "full": full_response})
             _chat_history.append({"role": "assistant", "content": full_response, "time": time.time()})
 
-            # 如果是行为纠正，触发AI学习
+            # 如果是行为纠正，触发AI学习并沉淀为规则
             if is_correction:
                 add_learning_log("correction", f"用户纠正: {message[:100]}", full_response[:300])
+                add_knowledge("correction", f"纠正: {message[:80]}", full_response[:300], source="user_correction")
+                # 🔥 自动将纠正沉淀到战术规则库
+                _save_correction_rule(message, full_response[:200])
                 socketio.emit("ai_learned_from_correction", {
                     "correction": message[:200],
                     "response": full_response[:300],
                     "time": datetime.now().isoformat(),
                 })
+            else:
+                # 🔥 非纠正对话：AI自我反思是否可能犯错
+                _auto_reflect_on_response(message, full_response[:300], state)
 
             # 存入经验库
             try:
@@ -5614,6 +5744,8 @@ def _run_ai_loop():
         result = controller.run()
         update_state(status="胜利!" if result else "游戏结束", ai_thinking="")
         add_learning_log("combat", "战斗结束", f"结果: {'胜利' if result else '游戏结束'}, 总分: {get_state().get('total_score',0)}")
+        if result:
+            _record_victory_reinforcement(get_state())
     except Exception as e:
         logger.exception(f"AI异常: {e}")
         update_state(status=f"错误: {str(e)[:60]}", ai_thinking="")
