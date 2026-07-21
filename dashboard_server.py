@@ -395,6 +395,108 @@ def _auto_tune_params_from_training():
     except Exception as e:
         logger.debug(f"自动调参跳过: {e}")
 
+def _analyze_training_for_tactics():
+    """YOLO训练完成后：分析新标注的UI元素 → DeepSeek理解其战术用途 → 更新操控策略"""
+    import threading
+    def _analyze():
+        try:
+            labels_dir = PROJECT_ROOT / "data" / "faction_yolo" / "labels"
+            if not labels_dir.exists(): return
+            data_yaml = PROJECT_ROOT / "data" / "faction_yolo" / "data.yaml"
+            import yaml
+            classes = []
+            if data_yaml.exists():
+                cfg = yaml.safe_load(data_yaml.read_text(encoding='utf-8')) or {}
+                classes = cfg.get("names", cfg.get("names_dict", []))
+                if isinstance(classes, dict): classes = list(classes.values())
+            cat_counts = {}
+            for f in labels_dir.glob("*.txt"):
+                for line in f.read_text().strip().split("\n"):
+                    parts = line.strip().split()
+                    if parts and parts[0].isdigit():
+                        idx = int(parts[0])
+                        cat_counts[idx] = cat_counts.get(idx, 0) + 1
+            if not cat_counts: return
+            ui_desc = "\n".join(f"- {classes[idx] if idx < len(classes) else f'class_{idx}'}: {cnt}个标注框" for idx, cnt in sorted(cat_counts.items()))
+            prompt = f"""你是一个游戏UI战术分析师。以下YOLO模型新训练的UI元素识别列表：
+{ui_desc}
+请分析每个UI元素的战术用途，输出JSON：
+{{"ui_elements":[{{"name":"元素名","用途":"战术用途","操作建议":"AI应如何操作","优先级":"高/中/低"}}],"操控策略":"综合分析建议(50字)","新能力":"AI的新能力"}}
+只输出JSON。"""
+            r = _deepseek_chat([{"role": "user", "content": prompt}], max_tokens=600, temperature=0.1, stream=False)
+            if r["success"]:
+                try:
+                    result = json.loads(r["content"].strip().removeprefix("```json").removesuffix("```").strip())
+                    summary = result.get("操控策略", "")
+                    new_ability = result.get("新能力", "")
+                    if summary:
+                        add_learning_log("self_improve", f"🧠 UI战术分析: {summary}", new_ability)
+                        add_knowledge("ui_tactics", f"训练结果: {summary[:80]}", new_ability, source="training_analysis")
+                except: pass
+        except Exception as e:
+            logger.debug(f"训练战术分析跳过: {e}")
+    t = threading.Thread(target=_analyze, daemon=True)
+    t.start()
+
+@app.route("/api/replay/analyze", methods=["POST"])
+def api_replay_analyze():
+    """DeepSeek全局复盘：分析整场战斗的所有触控记录+截图+AI决策"""
+    data = request.get_json() or {}
+    events = data.get("events", [])
+    message = data.get("message", "")
+    if not events:
+        return jsonify({"error": "无录制数据"}), 400
+    try:
+        # 构建复盘摘要
+        taps = sum(1 for e in events if e.get("action") == "tap")
+        swipes = sum(1 for e in events if e.get("action") == "swipe")
+        summary_lines = [f"总操作: {len(events)}次 (点击{taps}, 滑动{swipes})"]
+        for i, e in enumerate(events[:50]):
+            t = e.get("timestamp", 0)
+            x = e.get("x", 0); y = e.get("y", 0)
+            a = e.get("action", "tap")
+            if a == "swipe":
+                summary_lines.append(f"  [{i}] {a}: ({x},{y})→({e.get('ex',x)},{e.get('ey',y)}) dt={e.get('duration','?')}ms")
+            else:
+                summary_lines.append(f"  [{i}] {a}: ({x},{y})")
+        replay_text = "\n".join(summary_lines)
+        
+        extras = ""
+        if message: extras = f"\n指挥官附加说明: {message}"
+        
+        prompt = f"""你是Firefight AI的战术复盘分析师。请分析以下一场战斗的操作记录：
+{replay_text}{extras}
+
+请深度复盘并输出JSON：
+{{
+    "整体评价": "这场战斗的总体表现评分和评价",
+    "关键决策点": "3-5个关键的战术决策时刻",
+    "操作模式": "发现的指挥官操作习惯和模式",
+    "改进建议": "AI应该从中学到的3条具体改进建议",
+    "可复用战术": "可以沉淀为规则的战术模式",
+    "评分": "1-10分"
+}}
+只输出JSON。"""
+        r = _deepseek_chat([{"role": "user", "content": prompt}], max_tokens=1000, temperature=0.1, stream=False)
+        if r["success"]:
+            try:
+                result = json.loads(r["content"].strip().removeprefix("```json").removesuffix("```").strip())
+                score = result.get("评分", "-")
+                suggestion = result.get("改进建议", "")
+                pattern = result.get("操作模式", "")
+                reusable = result.get("可复用战术", "")
+                
+                add_learning_log("replay", f"📺 战斗复盘 (评分{score}): {result.get('整体评价','')[:100]}", 
+                               f"改进: {str(suggestion)[:200]}\n可复用: {str(reusable)[:200]}")
+                add_knowledge("replay_analysis", f"战斗复盘分析", f"模式:{str(pattern)[:200]}\n改进:{str(suggestion)[:200]}\n战术:{str(reusable)[:200]}", source="replay")
+                _sync_learning_to_github()
+                return jsonify({"status": "ok", "analysis": result})
+            except:
+                return jsonify({"status": "partial", "raw": r["content"][:500]})
+        return jsonify({"error": r.get("error", "分析失败")}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500
+
 def _save_correction_rule(correction: str, ai_response: str):
     """将用户的纠正自动沉淀为战术规则"""
     try:
@@ -6417,7 +6519,8 @@ def _start_training_background():
         socketio.emit("command_analysis", {"command": "训练", "cycle": 0, "analysis": f"GitHub: {upload_result.get('github',{}).get('message','')} | 服务器: {upload_result.get('server',{}).get('message','')}"})
         update_state(training_status="completed", training_progress=100, training_message="训练完成")
         add_learning_log("training", "AI训练完成", f"保存: {len(result.get('saved',[]))}个文件")
-        # 🔥 训练后自动调整AI学习参数
+        # 🔥 训练后自动分析新识别的UI元素并更新操控策略
+        _analyze_training_for_tactics()
         _auto_tune_params_from_training()
         socketio.emit("command_analysis", {"command": "训练", "cycle": 0, "analysis": "AI训练完成! 参数已保存并上传到GitHub和服务器。"})
     except Exception as e:
