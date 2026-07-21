@@ -5434,25 +5434,33 @@ def _optimize_execution_speed(cycle: int, cycle_time_ms: float):
         logger.debug(f"速度优化异常: {e}")
 
 def _do_zoom(direction: str):
-    """执行缩放（通过ADB发送按键）"""
+    """Win32 Ctrl+Wheel 缩放(游戏真正生效的方式)"""
+    _win32_zoom(direction)
+
+def _win32_zoom(direction: str = "out", count: int = 8):
+    """Win32 Ctrl+鼠标滚轮 → MuMu窗口"""
     try:
-        adb_exe = _find_adb_exe()
-        port = _emulator_adb_port
-        dev = f"127.0.0.1:{port}" if _emulator_type == "mumu" else f"emulator-{port}"
-        
-        if direction == "in":
-            subprocess.run([adb_exe, "-s", dev, "shell", "input", "keyevent", "KEYCODE_ZOOM_IN"], 
-                         capture_output=True, timeout=3)
-        elif direction == "out_max":
-            # 连按多次缩小到最小
-            for _ in range(8):
-                subprocess.run([adb_exe, "-s", dev, "shell", "input", "keyevent", "KEYCODE_ZOOM_OUT"],
-                             capture_output=True, timeout=2)
-        else:
-            subprocess.run([adb_exe, "-s", dev, "shell", "input", "keyevent", "KEYCODE_ZOOM_OUT"],
-                         capture_output=True, timeout=3)
+        import ctypes
+        u32 = ctypes.windll.user32
+        result = []
+        def cb(h, _):
+            buf = ctypes.create_unicode_buffer(256)
+            u32.GetWindowTextW(h, buf, 256)
+            if "MuMu" in buf.value:
+                result.append(h)
+            return True
+        u32.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)(cb), 0)
+        hwnd = result[0] if result else None
+        if not hwnd: return
+        u32.SetForegroundWindow(hwnd)
+        sign = 120 if direction == "in" else -120
+        for _ in range(count):
+            u32.keybd_event(0x11, 0, 0, 0)
+            u32.mouse_event(0x0800, 0, 0, sign, 0)
+            u32.keybd_event(0x11, 0, 2, 0)
+            time.sleep(0.01)
     except Exception as e:
-        logger.debug(f"缩放执行失败: {e}")
+        logger.debug(f"Win32缩放失败: {e}")
 
 
 # ── Patch (延迟导入，避免服务器端缺少游戏依赖) ──
@@ -5561,7 +5569,12 @@ def _apply_patches():
         cycle = self._cycle_count
         _cycle_stats["total_moves"] += 1
         
-        # 🗺️ 开局规划: 扫描敌方旗帜位置
+        # 🔥 自动缩放: 看不到敌人时缩小搜索, 每10轮一次
+        if e == 0 and cycle % 10 == 0:
+            _win32_zoom("out", count=5)
+            logger.debug(f"🔍 自动缩小寻找敌人(第{cycle}轮)")
+        
+        # gg; 开局规划: 扫描敌方旗帜位置
         if cycle <= 3 and e > 0:
             enemy_center_x = int(sum(u.x for u in state.enemies) / e)
             enemy_center_y = int(sum(u.y for u in state.enemies) / e)
@@ -5762,18 +5775,16 @@ def _execute_user_command(cmd: str, allies: int, enemies: int, cycle: int):
                 result_msg = "🛡️ 全军撤退/防御 - 立即执行"
                 executed = True
                 
-            # 缩小地图
-            elif any(kw in cmd_lower for kw in ["缩小", "zoom out", "缩小地图", "缩放"]):
-                for _ in range(5):
-                    subprocess.run([adb_exe, "-s", dev, "shell", "input", "keyevent", "KEYCODE_ZOOM_OUT"], capture_output=True, timeout=1)
-                    time.sleep(0.03)
-                result_msg = "🔍 缩小到最小 - 已执行"
+            # 缩小地图 (Win32 Ctrl+Wheel → 真正生效)
+            elif any(kw in cmd_lower for kw in ["缩小", "zoom out", "缩小地图"]):
+                _win32_zoom("out", count=8)
+                result_msg = "🔍 缩小到最小 - Win32滚轮"
                 executed = True
                 
             # 放大
-            elif any(kw in cmd_lower for kw in ["放大", "zoom in"]):
-                subprocess.run([adb_exe, "-s", dev, "shell", "input", "keyevent", "KEYCODE_ZOOM_IN"], capture_output=True, timeout=2)
-                result_msg = "🔍 放大 - 已执行"
+            elif any(kw in cmd_lower for kw in ["放大", "zoom in", "放大地图"]):
+                _win32_zoom("in", count=4)
+                result_msg = "🔍 放大 - Win32滚轮"
                 executed = True
                 
             # 移动 / 点击指定位置
