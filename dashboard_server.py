@@ -4942,18 +4942,18 @@ def on_rebuild_chain():
     def rebuild():
         results = {}
         # 1. 验证DeepSeek API
-        emit("rebuild_progress", {"step": "验证DeepSeek API", "progress": 20})
+        socketio.emit("rebuild_progress", {"step": "验证DeepSeek API", "progress": 20})
         ds = verify_deepseek_api()
         results["deepseek"] = ds["status"]
         update_state(api_status={"deepseek": ds["status"]})
 
         if ds["status"] != "online":
-            emit("rebuild_progress", {"step": "DeepSeek API离线!", "progress": 30})
-            emit("rebuild_error", {"error": "DeepSeek API不可用，请检查API Key"})
+            socketio.emit("rebuild_progress", {"step": "DeepSeek API离线!", "progress": 30})
+            socketio.emit("rebuild_error", {"error": "DeepSeek API不可用，请检查API Key"})
             return
 
         # 2. 验证ADB
-        emit("rebuild_progress", {"step": "验证ADB连接", "progress": 40})
+        socketio.emit("rebuild_progress", {"step": "验证ADB连接", "progress": 40})
         try:
             cfg = load_config()
             dc = cfg["device"]
@@ -4973,7 +4973,7 @@ def on_rebuild_chain():
             results["adb"] = "error"
 
         # 3. 验证GitHub
-        emit("rebuild_progress", {"step": "验证GitHub", "progress": 60})
+        socketio.emit("rebuild_progress", {"step": "验证GitHub", "progress": 60})
         try:
             import requests
             r = requests.get("https://api.github.com", timeout=5)
@@ -4982,16 +4982,16 @@ def on_rebuild_chain():
             results["github"] = "offline"
 
         # 4. 验证服务器
-        emit("rebuild_progress", {"step": "验证腾讯云服务器", "progress": 80})
+        socketio.emit("rebuild_progress", {"step": "验证腾讯云服务器", "progress": 80})
         try:
             ok, out, _ = _ssh_exec("echo OK", timeout=10)
             results["server"] = "online" if ok and "OK" in out else "offline"
         except:
             results["server"] = "offline"
 
-        emit("rebuild_progress", {"step": "完成", "progress": 100})
+        socketio.emit("rebuild_progress", {"step": "完成", "progress": 100})
         add_system_log("system", "决策链重建完成", json.dumps(results, ensure_ascii=False))
-        emit("rebuild_complete", {"results": results, "time": datetime.now().isoformat()})
+        socketio.emit("rebuild_complete", {"results": results, "time": datetime.now().isoformat()})
 
     threading.Thread(target=rebuild, daemon=True).start()
 
