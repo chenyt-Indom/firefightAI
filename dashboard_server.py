@@ -5259,7 +5259,7 @@ def _on_cycle_event(event: dict):
     
     _last_cycle_time = {"time": time.time(), "cycle": cycle}
 
-    full = _last_full_decision
+    full = _last_full_decision if isinstance(_last_full_decision, dict) else {}
     analysis = full.get("analysis", decision)
     prediction = full.get("next_prediction", "")
     cd = full.get("commands", [])
