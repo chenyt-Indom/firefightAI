@@ -12888,17 +12888,28 @@ def api_emulator_touch():
 
     try:
         adb_exe = _get_adb_for_emulator()
-        # 🔥 优先使用 emulator-{port} 格式，因为 localhost:{port} 可能显示为offline
-        target = f"emulator-{_emulator_adb_port}"
-        
-        # 先验证设备是否在线
-        r = subprocess.run([adb_exe, "-s", target, "shell", "echo", "ok"], capture_output=True, text=True, timeout=5)
-        if r.returncode != 0 or "ok" not in r.stdout:
-            # 回退到 localhost:{port}
-            target = f"localhost:{_emulator_adb_port}"
-            r2 = subprocess.run([adb_exe, "-s", target, "shell", "echo", "ok"], capture_output=True, text=True, timeout=5)
-            if r2.returncode != 0 or "ok" not in r2.stdout:
-                return jsonify({"status": "error", "error": f"模拟器设备未连接 (emulator-{_emulator_adb_port} 和 localhost:{_emulator_adb_port} 均不可用)"}), 500
+        # 🔥 自动尝试多种地址，兼容MuMu/雷电/AVD
+        global _emulator_adb_port
+        candidates = [
+            f"127.0.0.1:{_emulator_adb_port}",  # MuMu/雷电
+            f"localhost:{_emulator_adb_port}",
+            f"emulator-{_emulator_adb_port}",  # AVD
+            f"127.0.0.1:7555",  # MuMu默认
+        ]
+        target = None
+        for c in candidates:
+            r = subprocess.run([adb_exe, "-s", c, "shell", "echo", "ok"], capture_output=True, text=True, timeout=3)
+            if r.returncode == 0 and "ok" in r.stdout:
+                target = c
+                # 自动修正
+                if "127.0.0.1" in c:
+                    port = c.split(":")[-1]
+                    if port.isdigit():
+                        _emulator_adb_port = int(port)
+                        if port == "7555": _emulator_type = "mumu"
+                break
+        if not target:
+            return jsonify({"status": "error", "error": f"模拟器未连接。请在MuMu中开启USB调试并确保端口7555可达"}), 500
 
         if action == "tap":
             subprocess.run(
