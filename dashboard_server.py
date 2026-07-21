@@ -148,6 +148,7 @@ AVD_CONFIG = {
 }
 _emulator_process = None
 _emulator_adb_port = 5556  # 内置模拟器ADB端口
+_emulator_screen_on = False
 _scrcpy_process = None
 _scrcpy_enabled = False
 _adb_monitor_running = False

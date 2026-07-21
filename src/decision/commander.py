@@ -1,7 +1,9 @@
 """战术指挥官 - 调用DeepSeek LLM进行战术决策"""
 from __future__ import annotations
 
-import json
+import json, logging
+_log = logging.getLogger("commander")
+_log.warning("===== COMMANDER v4 REQUESTS直连模式已加载 =====")
 import time
 from pathlib import Path
 from typing import Optional
@@ -108,21 +110,14 @@ class TacticalCommander:
         )
 
     def decide(self, game_state: GameState) -> Optional[LLMResponse]:
-        """主决策入口: 调用LLM进行战术决策
+        """主决策入口"""
 
-        Args:
-            game_state: 当前游戏状态
-
-        Returns:
-            LLMResponse或None(失败时)
-        """
         # 尝试主模型
         result = self._call_llm(game_state, use_fallback=False)
         if result is not None:
             return result
 
-        # 降级到备用模型
-        logger.warning("主模型调用失败,降级到备用模型")
+        # 降级
         result = self._call_llm(game_state, use_fallback=True)
         return result
 
