@@ -12034,7 +12034,7 @@ def api_emulator_screen():
                         "--max-size", str(max_width),
                         "--max-fps", str(max_fps),
                         "--video-bit-rate", str(bitrate),
-                        "--no-audio",
+                        "--no-audio", "--render-driver=software",
                         "--window-title", f"FirefightAI - {_emulator_type}",
                     ]
                     _scrcpy_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -12083,8 +12083,8 @@ def api_emulator_stream():
                 [scrcpy_exe, "--no-window", "--no-audio",
                  "--max-fps", "60", "--bit-rate", "8M",
                  "-s", f"127.0.0.1:{port}",
-                 "--render-driver=opengl",
-                 "--video-codec=h264"],
+                 "--video-codec=h264",
+                 "--record=-", "--render-driver=software"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
             )
             try:
