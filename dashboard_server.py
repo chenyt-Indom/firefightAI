@@ -3564,6 +3564,17 @@ def api_train_start():
     auto_push = data.get("auto_push_github", False)
     device = "cpu"
     remove_after = data.get("remove_after_train", True)
+    # 检测torch是否可用
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            socketio.emit("training_log", {"line": "⚠️ CUDA不可用(WDAC拦截),使用CPU训练 (慢但能用)"})
+    except Exception as e:
+        return jsonify({
+            "error": "PyTorch无法加载(WDAC拦截DLL)",
+            "detail": str(e)[:200],
+            "solution": "右键桌面 install_cuda.bat → 以管理员身份运行, 重启电脑"
+        }), 500
 
     dataset_path = PROJECT_ROOT / "data" / dataset_name / "data.yaml"
     if not dataset_path.exists():
