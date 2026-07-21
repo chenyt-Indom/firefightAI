@@ -2166,7 +2166,7 @@ def verify_deepseek_api() -> dict:
             result["status"] = "online"
             result["models"] = [m["id"] for m in data.get("data", [])]
             t1 = time.time()
-            r2 = req.post(f"{llm_cfg['api_base']}/chat/completions", headers={"Authorization": f"Bearer {llm_cfg['api_key']}", "Content-Type": "application/json"}, json={"model": llm_cfg.get("model", "deepseek-v4-flash"), "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}, timeout=10)
+            r2 = req.post(f"{llm_cfg['api_base']}/chat/completions", headers={"Authorization": f"Bearer {llm_cfg['api_key']}", "Content-Type": "application/json"}, json={"model": llm_cfg.get("model", "deepseek-chat"), "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}, timeout=10)
             result["chat_latency_ms"] = round((time.time() - t1) * 1000)
             result["chat_ok"] = r2.status_code == 200
         else:
@@ -2187,6 +2187,13 @@ def _deepseek_chat(messages: list, max_tokens: int = 800, temperature: float = 0
     import requests as req
     cfg = load_config()
     llm_cfg = cfg["llm"]
+    # 🔥 类型保护：避免字符串被传入API
+    try:
+        max_tokens = int(max_tokens)
+        temperature = float(temperature)
+    except (TypeError, ValueError):
+        max_tokens = 800
+        temperature = 0.1
     try:
         resp = req.post(
             f"{llm_cfg['api_base']}/chat/completions",
@@ -2195,7 +2202,7 @@ def _deepseek_chat(messages: list, max_tokens: int = 800, temperature: float = 0
                 "Content-Type": "application/json",
             },
             json={
-                "model": llm_cfg.get("model", "deepseek-v4-flash"),
+                "model": llm_cfg.get("model", "deepseek-chat"),
                 "messages": messages,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
@@ -2359,15 +2366,42 @@ def on_ai_chat(data: dict):
             for e in _learning_log:
                 c = e.get("category", "other")
                 all_cats[c] = all_cats.get(c, 0) + 1
+                # 🔥 兼容time字段的多种类型
+                t = e.get("time", 0)
                 try:
-                    all_dates.add(_dt.fromtimestamp(e.get("time",0)).strftime("%m-%d"))
-                except: pass
-            
+                    if isinstance(t, (int, float)):
+                        all_dates.add(_dt.fromtimestamp(t).strftime("%m-%d"))
+                    elif isinstance(t, str):
+                        if ":" in t:
+                            all_dates.add(_dt.strptime(t[:10], "%Y-%m-%d").strftime("%m-%d") if len(t) >= 10 else t[:5])
+                        else:
+                            all_dates.add(t)
+                except:
+                    pass
+
             # 今日学习
-            today_logs = [e for e in _learning_log if _dt.fromtimestamp(e.get("time",0)).strftime("%Y-%m-%d") == today]
+            today_logs = []
+            for e in _learning_log:
+                t = e.get("time", 0)
+                try:
+                    if isinstance(t, (int, float)):
+                        if _dt.fromtimestamp(t).strftime("%Y-%m-%d") == today: today_logs.append(e)
+                    elif isinstance(t, str) and len(t) >= 10:
+                        if t[:10] == today: today_logs.append(e)
+                except:
+                    pass
             # 昨天学习
             yesterday = (now - _td(days=1)).strftime("%Y-%m-%d")
-            yesterday_logs = [e for e in _learning_log if _dt.fromtimestamp(e.get("time",0)).strftime("%Y-%m-%d") == yesterday]
+            yesterday_logs = []
+            for e in _learning_log:
+                t = e.get("time", 0)
+                try:
+                    if isinstance(t, (int, float)):
+                        if _dt.fromtimestamp(t).strftime("%Y-%m-%d") == yesterday: yesterday_logs.append(e)
+                    elif isinstance(t, str) and len(t) >= 10:
+                        if t[:10] == yesterday: yesterday_logs.append(e)
+                except:
+                    pass
             
             memory_section = (
                 f"\n\n══════════════════════════════════════"
@@ -2441,7 +2475,7 @@ def on_ai_chat(data: dict):
                 result = _deepseek_chat(messages, max_tokens=800, temperature=0.1, stream=True)
 
             if not result["success"]:
-                emit("ai_chat_error", {"error": result["error"]})
+                socketio.emit("ai_chat_error", {"error": result["error"]})
                 return
 
             def emit_token(data):
@@ -2457,7 +2491,7 @@ def on_ai_chat(data: dict):
                     socketio.emit("ai_chat_token", {"token": "", "done": False, 
                         "full": f"\n[已执行操控: {action.get('type','')} {action}]"})
             
-            emit("ai_chat_token", {"token": "", "done": True, "full": full_response})
+            socketio.emit("ai_chat_token", {"token": "", "done": True, "full": full_response})
             _chat_history.append({"role": "assistant", "content": full_response, "time": time.time()})
 
             # 如果是行为纠正，触发AI学习
@@ -2488,7 +2522,7 @@ def on_ai_chat(data: dict):
 
         except Exception as e:
             logger.error(f"AI对话失败: {e}")
-            emit("ai_chat_error", {"error": str(e)[:200]})
+            socketio.emit("ai_chat_error", {"error": str(e)[:200]})
 
     t = threading.Thread(target=do_chat, daemon=True)
     t.start()
@@ -2708,26 +2742,36 @@ def api_control_screenshot():
     import base64, struct, io
     try:
         adb_exe = _get_adb_for_emulator()
+        global _emulator_adb_port, _emulator_type
+        # 🔥 重启ADB确保连接（截图前先重连）
+        try: subprocess.run([adb_exe, "start-server"], capture_output=True, timeout=3)
+        except: pass
+        subprocess.run([adb_exe, "connect", "127.0.0.1:7555"], capture_output=True, text=True, timeout=3)
         port = _emulator_adb_port
-        
+
         # 🔥 根据模拟器类型选择正确的设备ID
-        dev_ids = []
-        if _emulator_type == "mumu":
-            dev_ids = [f"127.0.0.1:{port}"]
-        elif _emulator_type == "generic":
-            dev_ids = [f"emulator-{port}", f"localhost:{port}", f"127.0.0.1:{port}"]
-        else:
-            dev_ids = [f"127.0.0.1:{port}", f"localhost:{port}", f"emulator-{port}"]
-        
+        dev_ids = [
+            f"127.0.0.1:{port}",
+            f"127.0.0.1:7555",
+            f"localhost:{port}",
+            f"emulator-{port}",
+            f"localhost:7555",
+        ]
+
         raw_data = None
         for dev_id in dev_ids:
-            r = subprocess.run([adb_exe, "-s", dev_id, "exec-out", "screencap"],
-                              capture_output=True, timeout=5)
-            if r.returncode == 0 and len(r.stdout) >= 20:
-                raw_data = r.stdout
-                break
-            time.sleep(0.5)
-        
+            try:
+                r = subprocess.run([adb_exe, "-s", dev_id, "exec-out", "screencap"],
+                                  capture_output=True, timeout=4)
+                if r.returncode == 0 and len(r.stdout) >= 100:
+                    raw_data = r.stdout
+                    # 自动修正
+                    if "127.0.0.1:7555" in dev_id: _emulator_type = "mumu"
+                    if "127.0.0.1:" in dev_id: _emulator_adb_port = int(dev_id.split(":")[-1])
+                    break
+            except:
+                continue
+
         if raw_data is None:
             return jsonify({"error": "截图失败: 模拟器未响应, 请确认已启动并连接"}), 500
         
@@ -3404,7 +3448,16 @@ def api_daily_report():
     """返回今日学习报告"""
     from datetime import datetime as _dt, date as _date
     today = _dt.now().strftime("%Y-%m-%d")
-    today_logs = [e for e in _learning_log if _dt.fromtimestamp(e.get("time",0)).strftime("%Y-%m-%d") == today]
+    today_logs = []
+    for e in _learning_log:
+        t = e.get("time", 0)
+        try:
+            if isinstance(t, (int, float)):
+                if _dt.fromtimestamp(t).strftime("%Y-%m-%d") == today: today_logs.append(e)
+            elif isinstance(t, str) and len(t) >= 10:
+                if t[:10] == today: today_logs.append(e)
+        except:
+            pass
     # 训练数据
     train_dir = PROJECT_ROOT / "data" / "faction_yolo" / "labels"
     today_labels = []
@@ -8366,7 +8419,7 @@ function refreshSearchKnowledge(){
       h+='<div style="padding:6px 8px;border-bottom:1px solid #1a1f2b;display:flex;gap:8px;align-items:flex-start;font-size:11px">'+
         '<input type="checkbox" '+checked+' onchange="selectKnowledge(\''+k.id+'\',this.checked)" style="margin-top:2px;accent-color:#58a5f3">'+
         '<div style="flex:1"><span style="color:#58a5f3">['+cat+']</span> '+
-        '<span style="color:#e6edf3">'+esc(k.title)+'</span> '+
+        '<span style="color:#e6edf3">'+escapeHtml(k.title)+'</span> '+
         '<span style="color:#666;font-size:10px">'+trained+'</span></div>'+
         '</div>';
     });
@@ -8977,11 +9030,11 @@ function refreshKnowledge(){
         '<div style="flex:1">'+
           '<div style="display:flex;gap:8px;align-items:center">'+
             '<span style="color:#58a5f3;font-weight:600">['+cat+']</span>'+
-            '<span style="color:#e6edf3">'+esc(k.title)+'</span>'+
+            '<span style="color:#e6edf3">'+escapeHtml(k.title)+'</span>'+
             '<span style="color:#666;font-size:10px">'+trained+'</span>'+
             '<span style="color:#555;font-size:10px;margin-left:auto">'+k.time+'</span>'+
           '</div>'+
-          '<div style="color:#888;margin-top:2px">'+esc((k.content||'').substring(0,120))+'</div>'+
+          '<div style="color:#888;margin-top:2px">'+escapeHtml((k.content||'').substring(0,120))+'</div>'+
         '</div>'+
       '</div>';
     });
