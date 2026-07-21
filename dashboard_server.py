@@ -5193,7 +5193,12 @@ def _run_ai_loop():
         _predictor = BattlefieldPredictor(screen_size=ss, api_key=lc["api_key"], api_base=lc["api_base"])
         _predictor.load()
         add_learning_log("predictor", "战场预测器已初始化", f"经验数: {len(_predictor._experience)}")
-        update_state(prediction_accuracy=_predictor.get_accumulated_wisdom().get("accuracy", 0))
+        try:
+            w = _predictor.get_accumulated_wisdom()
+            acc = w.get("accuracy", 0) if isinstance(w, dict) else 0
+            update_state(prediction_accuracy=acc)
+        except:
+            update_state(prediction_accuracy=0)
     except Exception as e:
         logger.warning(f"战场预测器初始化失败: {e}")
         _predictor = None
