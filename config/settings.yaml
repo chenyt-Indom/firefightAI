@@ -40,7 +40,7 @@ llm:
   fallback_api_key: a186a40ff4414b47b20ffc9fbd25f8b7.y23NdO1kJWpUxrF6
   fallback_model: glm-4-flash
   fallback_provider: zhipu
-  max_tokens: 384
+  max_tokens: 1024
   model: deepseek-chat
   provider: deepseek
   retry_count: 2
