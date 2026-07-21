@@ -2251,6 +2251,33 @@ def on_ai_chat(data: dict):
                 "请用中文回答，保持专业、简洁。如果涉及战术决策，请分步骤说明你的思考过程。"
             )
 
+            # 🔥 注入今日学习内容 + 战术规则
+            from datetime import datetime as _dt
+            today = _dt.now().strftime("%Y-%m-%d")
+            today_logs = [e for e in _learning_log if _dt.fromtimestamp(e.get("time",0)).strftime("%Y-%m-%d") == today]
+            if today_logs:
+                sys_prompt += f"\n\n【📚 今日已学内容 ({today}, 共{len(today_logs)}条)】\n"
+                for e in today_logs[-15:]:
+                    sys_prompt += f"- [{e.get('category','')}] {e.get('message','')[:200]}\n"
+
+            # 加载战术规则库
+            tactics_file = PROJECT_ROOT / "data" / "tactics_rules.yaml"
+            if tactics_file.exists():
+                try:
+                    import yaml
+                    tdata = yaml.safe_load(tactics_file.read_text(encoding='utf-8'))
+                    if tdata and isinstance(tdata, dict):
+                        rules = tdata.get("rules", tdata)
+                        if rules and isinstance(rules, list):
+                            sys_prompt += f"\n【🎯 战术规则库 (已学{len(rules)}条)】\n"
+                            for r in rules[-10:]:
+                                if isinstance(r, dict):
+                                    sys_prompt += f"- {r.get('name','')}: {r.get('desc','')}\n"
+                                else:
+                                    sys_prompt += f"- {str(r)[:200]}\n"
+                except:
+                    pass
+
             if is_correction:
                 sys_prompt += (
                     "\n\n【重要】指挥官正在纠正你的行为。请仔细分析纠正内容，"
@@ -3186,6 +3213,57 @@ def on_ai_correct_behavior(data: dict):
 @app.route("/api/chat_history")
 def api_chat_history():
     return jsonify(_chat_history[-50:])
+
+@app.route("/api/daily_report")
+def api_daily_report():
+    """返回今日学习报告"""
+    from datetime import datetime as _dt, date as _date
+    today = _dt.now().strftime("%Y-%m-%d")
+    today_logs = [e for e in _learning_log if _dt.fromtimestamp(e.get("time",0)).strftime("%Y-%m-%d") == today]
+    # 训练数据
+    train_dir = PROJECT_ROOT / "data" / "faction_yolo" / "labels"
+    today_labels = []
+    if train_dir.exists():
+        for f in train_dir.glob("*.txt"):
+            try:
+                if _dt.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d") == today:
+                    today_labels.append(f.name)
+            except:
+                pass
+    # 训练模型
+    runs_dir = PROJECT_ROOT / "runs" / "detect"
+    today_models = []
+    if runs_dir.exists():
+        for d in runs_dir.iterdir():
+            try:
+                if _dt.fromtimestamp(d.stat().st_mtime).strftime("%Y-%m-%d") == today:
+                    bp = d / "weights" / "best.pt"
+                    if bp.exists():
+                        today_models.append({"name": d.name, "best_pt": str(bp), "size_mb": round(bp.stat().st_size/1024/1024, 1)})
+            except:
+                pass
+    # 战术规则
+    rules_count = 0
+    tactics_file = PROJECT_ROOT / "data" / "tactics_rules.yaml"
+    if tactics_file.exists():
+        try:
+            import yaml
+            tdata = yaml.safe_load(tactics_file.read_text(encoding='utf-8'))
+            if tdata and isinstance(tdata, dict):
+                rules = tdata.get("rules", tdata)
+                if rules and isinstance(rules, list):
+                    rules_count = len(rules)
+        except:
+            pass
+    return jsonify({
+        "date": today,
+        "learning_logs": today_logs,
+        "learning_count": len(today_logs),
+        "annotated_labels": today_labels,
+        "annotated_count": len(today_labels),
+        "trained_models": today_models,
+        "tactics_rules": rules_count,
+    })
 
 
 # ═══════════════════════════════════════════════════════════════
