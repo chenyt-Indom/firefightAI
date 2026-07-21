@@ -3563,6 +3563,13 @@ def api_train_start():
     imgsz = int(data.get("imgsz", 640))
     auto_push = data.get("auto_push_github", False)
     device = data.get("device", "cpu")
+    # 🔥 强制CPU训练 (无GPU)
+    try:
+        import torch; has_cuda = torch.cuda.is_available()
+    except: has_cuda = False
+    if not has_cuda:
+        device = "cpu"
+        socketio.emit("training_log", {"line": "ℹ️ 未检测到GPU,使用CPU训练"})
     remove_after = data.get("remove_after_train", True)
 
     dataset_path = PROJECT_ROOT / "data" / dataset_name / "data.yaml"
