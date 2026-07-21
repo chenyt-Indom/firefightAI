@@ -12064,154 +12064,53 @@ def api_emulator_screen():
 
 @app.route("/api/emulator/stream")
 def api_emulator_stream():
-    """MJPEG流式推送模拟器画面 - 使用scrcpy实现60fps"""
-    import struct, io, threading as _thr, queue as _queue, base64 as _b64
+    """MJPEG流式推送模拟器画面 - 使用ADB screencap"""
+    import struct, io, threading as _thr, queue as _queue
     from collections import deque
     
     adb_exe = _get_adb_for_emulator()
     port = _emulator_adb_port
+    dev_id = f"127.0.0.1:{port}"
     
-    # 🔥 优先使用scrcpy实现真正的60fps
-    scrcpy_exe = _find_scrcpy_exe()
-    
-    if scrcpy_exe:
-        # scrcpy模式: 硬件加速 60fps
-        def scrcpy_worker():
-            import struct
-            logger.info(f"scrcpy流启动: {scrcpy_exe}")
-            process = subprocess.Popen(
-                [scrcpy_exe, "--no-window", "--no-audio",
-                 "--max-fps", "60", "--bit-rate", "8M",
-                 "-s", f"127.0.0.1:{port}",
-                 "--video-codec=h264",
-                 "--record=-", "--render-driver=software"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-            )
-            try:
-                while capture_running[0]:
-                    header = process.stdout.read(12)
-                    if not header or len(header) < 12:
-                        break
-                    pts, _, size = struct.unpack(">QII", header[:12]) if len(header) >= 12 else (0, 0, 0)
-                    if size <= 0 or size > 10*1024*1024:
-                        continue
-                    data = process.stdout.read(size)
-                    if data:
-                        try:
-                            frame_buffer.put_nowait(data)
-                        except _queue.Full:
-                            try:
-                                frame_buffer.get_nowait()
-                                frame_buffer.put_nowait(data)
-                            except:
-                                pass
-                        stats["frames_captured"] += 1
-            except Exception as e:
-                logger.warning(f"scrcpy流异常: {e}")
-            finally:
-                process.terminate()
-        
-        cap_thread = _thr.Thread(target=scrcpy_worker, daemon=True)
-        cap_thread.start()
-    else:
-        # 回退到ADB screencap模式 (较慢)
-        STREAM_WIDTH = 960
-        STREAM_QUALITY = 55
-        TARGET_FPS = 60
-        FRAME_BUDGET = 1.0 / TARGET_FPS
-    
-    # 🔥 帧缓冲（非阻塞，跳过旧帧）
-    frame_buffer = _queue.Queue(maxsize=2)  # 只保留最新2帧
+    frame_buffer = _queue.Queue(maxsize=2)
     capture_running = [True]
-    stats = {"frames_captured": 0, "frames_sent": 0, "capture_ms": 0, "convert_ms": 0}
+    stats = {"frames_captured": 0, "errors": 0}
     
-    def _get_dev_id():
-        """获取可用的设备ID"""
-        for did in dev_ids:
-            r = subprocess.run([adb_exe, "-s", did, "shell", "echo", "ok"],
-                             capture_output=True, text=True, timeout=2)
-            if r.returncode == 0 and "ok" in r.stdout:
-                return did
-        return dev_ids[0]
-    
-    def capture_thread():
-        """独立捕获线程，不阻塞主循环"""
-        import base64 as _b64
-        dev_id = _get_dev_id()
-        last_dev_check = 0
-        
+    def adb_capture_worker():
+        """ADB screencap截图工作线程"""
+        logger.info(f"ADB截图流启动: {dev_id}")
         while capture_running[0]:
             try:
-                # 每30秒重新检测设备ID
-                now = time.perf_counter()
-                if now - last_dev_check > 30:
-                    dev_id = _get_dev_id()
-                    last_dev_check = now
-                
-                t0 = time.perf_counter()
-                
-                # 🔥 使用raw screencap（比PNG快3-5倍）
+                # 1秒3帧
+                time.sleep(0.3)
                 r = subprocess.run(
-                    [adb_exe, "-s", dev_id, "exec-out", "screencap"],
-                    capture_output=True, timeout=2
+                    [adb_exe, "-s", dev_id, "exec-out", "screencap", "-p"],
+                    capture_output=True, timeout=3
                 )
-                
-                if r.returncode != 0 or len(r.stdout) < 20:
-                    time.sleep(0.05)
-                    continue
-                
-                capture_ms = (time.perf_counter() - t0) * 1000
-                raw_data = r.stdout
-                width = struct.unpack_from("<I", raw_data, 0)[0]
-                height = struct.unpack_from("<I", raw_data, 4)[0]
-                pixels = raw_data[12:]
-                
-                # 🔥 快速转换（使用PIL缩放+JPEG压缩）
-                t1 = time.perf_counter()
-                try:
-                    from PIL import Image
-                    img = Image.frombytes("RGBA", (width, height), pixels, "raw")
-                    img_rgb = img.convert("RGB")
-                    # 缩放降低分辨率
-                    if width > STREAM_WIDTH:
-                        ratio = STREAM_WIDTH / width
-                        new_h = int(height * ratio)
-                        img_rgb = img_rgb.resize((STREAM_WIDTH, new_h), Image.LANCZOS)
-                    buf = io.BytesIO()
-                    img_rgb.save(buf, format="JPEG", quality=STREAM_QUALITY, optimize=True)
-                    frame_data = buf.getvalue()
-                except ImportError:
-                    # 无PIL时发送原始数据
-                    frame_data = pixels
-                
-                convert_ms = (time.perf_counter() - t1) * 1000
-                
-                # 放入缓冲区（非阻塞：如果缓冲区满了，丢弃旧的）
-                try:
-                    frame_buffer.put_nowait(frame_data)
-                except _queue.Full:
+                if r.returncode == 0 and len(r.stdout) > 100:
                     try:
-                        frame_buffer.get_nowait()  # 丢弃最旧的帧
-                        frame_buffer.put_nowait(frame_data)
-                    except:
-                        pass
-                
-                stats["frames_captured"] += 1
-                stats["capture_ms"] = capture_ms
-                stats["convert_ms"] = convert_ms
-                
-                # 控制捕获速率
-                elapsed = time.perf_counter() - t0
-                if elapsed < FRAME_BUDGET * 0.8:
-                    time.sleep(max(0.001, FRAME_BUDGET * 0.8 - elapsed))
-                    
+                        frame_buffer.put_nowait(r.stdout)
+                        stats["frames_captured"] += 1
+                    except _queue.Full:
+                        try: frame_buffer.get_nowait()
+                        except: pass
+                        try: frame_buffer.put_nowait(r.stdout)
+                        except: pass
             except Exception as e:
-                time.sleep(0.05)
-                continue
+                stats["errors"] += 1
+                if stats["errors"] <= 3 or stats["errors"] % 30 == 0:
+                    logger.warning(f"ADB截图异常 #{stats['errors']}: {e}")
+                time.sleep(1)
     
-    # 启动捕获线程
-    cap_thread = _thr.Thread(target=capture_thread, daemon=True)
+    def scrcpy_worker():
+        adb_capture_worker()
+    
+    cap_thread = _thr.Thread(target=adb_capture_worker, daemon=True)
     cap_thread.start()
+    STREAM_WIDTH = 960
+    STREAM_QUALITY = 55
+    TARGET_FPS = 10
+    FRAME_BUDGET = 1.0 / TARGET_FPS
     
     def generate_frames():
         last_frame_time = time.perf_counter()
