@@ -5635,6 +5635,11 @@ def _apply_patches():
     _orig_fe = gc_mod.GameController._fast_execute
     def _patched_fe(self, commands, state):
         self._cycle_start = time.time()
+        # 🔥 极速模式: 减少拖拽时间和等待
+        if not hasattr(self, '_ai_timing'):
+            self._ai_timing = {}
+        self._ai_timing['swipe_ms'] = 300  # 1000→300ms
+        self._ai_timing['post_swipe_wait'] = 0.2  # 1.2→0.2s
         return _orig_fe(self, commands, state)
     gc_mod.GameController._fast_execute = _patched_fe
     
