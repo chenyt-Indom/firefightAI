@@ -3563,13 +3563,18 @@ def api_train_start():
     imgsz = int(data.get("imgsz", 640))
     auto_push = data.get("auto_push_github", False)
     device = data.get("device", "cpu")
-    # 🔥 强制CPU训练 (无GPU)
+    # 🔥 自动检测GPU/CPU
     try:
-        import torch; has_cuda = torch.cuda.is_available()
-    except: has_cuda = False
-    if not has_cuda:
+        import torch
+        if torch.cuda.is_available():
+            device = device if device != "cpu" else "0"  # 有GPU但前端选了CPU,默认用0
+            socketio.emit("training_log", {"line": f"🖥️ GPU可用: {torch.cuda.get_device_name(0)}"})
+        else:
+            if device != "cpu":
+                socketio.emit("training_log", {"line": "⚠️ CUDA不可用,降级为CPU训练"})
+            device = "cpu"
+    except:
         device = "cpu"
-        socketio.emit("training_log", {"line": "ℹ️ 未检测到GPU,使用CPU训练"})
     remove_after = data.get("remove_after_train", True)
 
     dataset_path = PROJECT_ROOT / "data" / dataset_name / "data.yaml"
