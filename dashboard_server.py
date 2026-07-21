@@ -5499,42 +5499,43 @@ def _apply_patches():
         return False
     gc_mod.GameController._check_game_over = _patched_check_game_over
     
-    # 🔥 最高优先级: 每轮开始前检查并立即执行指挥官指令
+    # 🔥 快速决策引擎: 优势闪击/劣势固守/均衡LLM
+    import src.decision.parser as _parser_mod
+    ActionType = _parser_mod.ActionType
+    ParsedCommand = _parser_mod.ParsedCommand
     _orig_fast_decide = gc_mod.GameController._fast_decide
     _fast_cache = {}
     def _patched_fast_decide(self, state):
-        global _user_instruction
-        
-        # 🔥 快速本地决策: 跳过LLM直接下令
-        from src.state.models import Command, ParsedCommand
         a = state.ally_count
         e = state.enemy_count
+        sh, sw = state.screen_size[1], state.screen_size[0]
         
-        # 绝对优势 → 直接全线进攻
+        # 多单位: 分组并行控制
+        if a >= 4:
+            half = a // 2
+            front_ids = [u.track_id for u in state.allies[:half]]
+            back_ids = [u.track_id for u in state.allies[half:]]
+            cmds = [
+                ParsedCommand(action=ActionType.MOVE, unit_ids=front_ids,
+                    target_pixel=(int(sw*0.55), int(sh*0.35)), reason="前锋推进"),
+                ParsedCommand(action=ActionType.MOVE, unit_ids=back_ids,
+                    target_pixel=(int(sw*0.45), int(sh*0.45)), reason="后卫掩护"),
+            ]
+            return (cmds, 0)
+        
+        # 绝对优势 → 闪击
         if a > 0 and e > 0 and a >= e * 3:
-            cmd = ParsedCommand(action="move", unit_ids=[u.track_id for u in state.allies],
-                target_pixel=(int(state.screen_size[0]*0.55), int(state.screen_size[1]*0.35)),
-                reason=f"闪电战: {a}vs{e}(3x优势)")
+            cmd = ParsedCommand(action=ActionType.MOVE, unit_ids=[u.track_id for u in state.allies],
+                target_pixel=(int(sw*0.55), int(sh*0.35)), reason=f"闪电战:{a}vs{e}")
             return ([cmd], 0)
         
-        # 劣势 → 收缩防守
+        # 劣势 → 固守
         if a > 0 and e >= a * 2:
-            cmd = ParsedCommand(action="move", unit_ids=[u.track_id for u in state.allies],
-                target_pixel=(int(state.screen_size[0]*0.5), int(state.screen_size[1]*0.7)),
-                reason=f"固守: {a}vs{e}(劣势)")
+            cmd = ParsedCommand(action=ActionType.MOVE, unit_ids=[u.track_id for u in state.allies],
+                target_pixel=(int(sw*0.5), int(sh*0.7)), reason=f"固守:{a}vs{e}")
             return ([cmd], 0)
         
-        # 均衡 → 用缓存避免重复LLM调用
-        state_hash = f"{a}:{e}:{int(sum(u.x for u in state.enemies)/max(e,1))}"
-        cached = _fast_cache.get(state_hash)
-        if cached and time.time() - cached["t"] < 5:
-            return (_orig_fast_decide(self, state) or ([], 0))
-        
-        # LLM调用(仅均衡时)
-        result = _orig_fast_decide(self, state)
-        if result[0]:
-            _fast_cache[state_hash] = {"t": time.time()}
-        return result
+        return _orig_fast_decide(self, state)
     gc_mod.GameController._fast_decide = _patched_fast_decide
     
     _orig_fe = gc_mod.GameController._fast_execute
