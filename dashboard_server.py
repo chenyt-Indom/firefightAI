@@ -657,12 +657,6 @@ def _load_learning_params():
             return json.loads(pf.read_text(encoding="utf-8", errors="ignore"))
     except:
         pass
-    return {}
-
-def _save_learning_params(params):
-    pf = PROJECT_ROOT / "data" / "params" / "ai_learning_params.json"
-    pf.parent.mkdir(parents=True, exist_ok=True)
-    pf.write_text(json.dumps(params, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_config() -> dict:
@@ -2988,14 +2982,15 @@ def _adjust_parameters_from_insights(insights: list):
     _self_learning_params["learning_rate"] = round(max(0.001, min(0.1, _self_learning_params["learning_rate"])), 4)
 
 
-def _save_learning_params():
+def _save_learning_params(params=None):
     """保存学习参数到文件"""
     try:
         params_dir = PROJECT_ROOT / "data" / "params"
         params_dir.mkdir(parents=True, exist_ok=True)
         import json as _json
+        p = params if params is not None else _self_learning_params
         params_file = params_dir / "ai_learning_params.json"
-        params_file.write_text(_json.dumps(_self_learning_params, ensure_ascii=False, indent=2))
+        params_file.write_text(_json.dumps(p, ensure_ascii=False, indent=2))
     except Exception as e:
         logger.warning(f"保存学习参数失败: {e}")
 
