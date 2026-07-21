@@ -355,19 +355,23 @@ def _maybe_condense_knowledge():
         logger.debug(f"知识压缩跳过: {e}")
 
 def _sync_learning_to_github():
-    """后台自动同步学习数据到GitHub"""
+    """后台自动同步学习数据到GitHub(通过腾讯云服务器代理)"""
     import threading, subprocess
     def _sync():
         try:
             repo = PROJECT_ROOT
-            subprocess.run(["git", "-C", str(repo), "add", "data/params/learning_log.json", "data/ai_knowledge.json", "data/tactics_rules.yaml"], 
+            subprocess.run(["git", "-C", str(repo), "add", "data/params/learning_log.json", "data/ai_knowledge.json", "data/tactics_rules.yaml"],
                          capture_output=True, timeout=10)
-            subprocess.run(["git", "-C", str(repo), "commit", "-m", "学习同步: 知识库+日志+战术规则"], 
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "学习同步: 知识库+日志+战术规则"],
                          capture_output=True, timeout=10)
-            result = subprocess.run(["git", "-C", str(repo), "push", "origin", "master"], 
+            # 🔥 推送到腾讯云服务器(由服务器代推GitHub)
+            subprocess.run(["git", "-C", str(repo), "push", "origin", "master"],
                          capture_output=True, text=True, timeout=30)
-            if result.returncode == 0:
-                logger.debug("学习数据已同步到GitHub")
+            # 通知服务器推GitHub
+            try:
+                import requests
+                requests.get("http://139.199.69.88:5001/api/git/sync", timeout=10)
+            except: pass
         except Exception as e:
             logger.debug(f"GitHub同步跳过: {e}")
     t = threading.Thread(target=_sync, daemon=True)
