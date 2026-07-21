@@ -5501,23 +5501,40 @@ def _apply_patches():
     
     # 🔥 最高优先级: 每轮开始前检查并立即执行指挥官指令
     _orig_fast_decide = gc_mod.GameController._fast_decide
+    _fast_cache = {}
     def _patched_fast_decide(self, state):
         global _user_instruction
-        if _user_instruction:
-            try:
-                adb_cmd = self.adb._adb_path if hasattr(self.adb, '_adb_path') else "adb"
-                port = self.adb.port if hasattr(self.adb, 'port') else 7555
-                dev = f"127.0.0.1:{port}"
-                import subprocess as _sp
-                cmd_l = _user_instruction.lower()
-                if any(k in cmd_l for k in ["进攻","攻击","冲锋"]):
-                    _sp.run([adb_cmd, "-s", dev, "shell", "input tap 1400 300"], capture_output=True, timeout=2)
-                elif any(k in cmd_l for k in ["撤退","防守"]):
-                    _sp.run([adb_cmd, "-s", dev, "shell", "input tap 800 800"], capture_output=True, timeout=2)
-                elif any(k in cmd_l for k in ["缩小"]):
-                    for _ in range(5): _sp.run([adb_cmd, "-s", dev, "shell", "input keyevent KEYCODE_ZOOM_OUT"], capture_output=True, timeout=1)
-            except: pass
-        return _orig_fast_decide(self, state)
+        
+        # 🔥 快速本地决策: 跳过LLM直接下令
+        from src.state.models import Command, ParsedCommand
+        a = state.ally_count
+        e = state.enemy_count
+        
+        # 绝对优势 → 直接全线进攻
+        if a > 0 and e > 0 and a >= e * 3:
+            cmd = ParsedCommand(action="move", unit_ids=[u.track_id for u in state.allies],
+                target_pixel=(int(state.screen_size[0]*0.55), int(state.screen_size[1]*0.35)),
+                reason=f"闪电战: {a}vs{e}(3x优势)")
+            return ([cmd], 0)
+        
+        # 劣势 → 收缩防守
+        if a > 0 and e >= a * 2:
+            cmd = ParsedCommand(action="move", unit_ids=[u.track_id for u in state.allies],
+                target_pixel=(int(state.screen_size[0]*0.5), int(state.screen_size[1]*0.7)),
+                reason=f"固守: {a}vs{e}(劣势)")
+            return ([cmd], 0)
+        
+        # 均衡 → 用缓存避免重复LLM调用
+        state_hash = f"{a}:{e}:{int(sum(u.x for u in state.enemies)/max(e,1))}"
+        cached = _fast_cache.get(state_hash)
+        if cached and time.time() - cached["t"] < 5:
+            return (_orig_fast_decide(self, state) or ([], 0))
+        
+        # LLM调用(仅均衡时)
+        result = _orig_fast_decide(self, state)
+        if result[0]:
+            _fast_cache[state_hash] = {"t": time.time()}
+        return result
     gc_mod.GameController._fast_decide = _patched_fast_decide
     
     _orig_fe = gc_mod.GameController._fast_execute
