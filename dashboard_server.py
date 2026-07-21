@@ -151,6 +151,7 @@ _emulator_adb_port = 5556  # 内置模拟器ADB端口
 _emulator_screen_on = False
 _scrcpy_process = None
 _scrcpy_enabled = False
+_observe_mode = False  # 🔥 观察学习模式：开启后AI深度分析用户每个操作
 _adb_monitor_running = False
 _adb_last_connected = False
 
@@ -1076,12 +1077,47 @@ def api_manual_action_record():
     detail = "; ".join(detail_parts)
     add_learning_log("manual_control", f"用户操控: {action_type}", detail)
     add_knowledge("manual_control", f"用户{action_type}操作: {button_name or location}", detail, source="manual")
+    # 🔥 学习模式：AI深度学习用户操作
+    if _observe_mode:
+        _deep_learn_manual_action(action_type, detail, location, button_name, target, observations)
     
     # 如果有伤亡数据，额外记录
     if casualties:
         add_learning_log("casualties", f"伤亡报告: 友军{casualties['allies']}/敌军{casualties['enemies']}", json.dumps(casualties))
     
     return jsonify({"status": "recorded", "action": action_type})
+
+@app.route("/api/learn/observe", methods=["GET","POST"])
+def api_learn_observe():
+    """观察学习模式开关"""
+    global _observe_mode
+    if request.method == "POST":
+        data = request.get_json() or {}
+        _observe_mode = data.get("enabled", not _observe_mode)
+        add_learning_log("observe", f"观察学习模式: {'开启' if _observe_mode else '关闭'}", "")
+        return jsonify({"status": "ok", "observe_mode": _observe_mode})
+    return jsonify({"observe_mode": _observe_mode})
+
+def _deep_learn_manual_action(action_type: str, detail: str, location: dict, button_name: str, target: str, observations: str):
+    """观察模式下深度学习用户操作"""
+    import threading
+    def _analyze():
+        try:
+            context = f"指挥官{action_type}操作: {button_name or ''} "
+            if location: context += f"坐标({location.get('x','?')},{location.get('y','?')}) "
+            if target: context += f"目标:{target} "
+            if observations: context += f"观察:{observations}"
+            prompt = f"""你正在观察指挥官的操作。请快速分析并记住（只输出关键点，50字内）：
+操作: {context}
+请回答: 这个操作的意图是什么？什么情况下应该重复这个操作？
+格式: 意图:xxx | 触发条件:xxx"""
+            r = _deepseek_chat([{"role": "user", "content": prompt}], max_tokens=100, temperature=0.1, stream=False)
+            if r["success"]:
+                add_learning_log("observe", f"👀 AI观察到: {r['content'].strip()[:150]}", f"操作: {detail}")
+                add_knowledge("observe_learn", f"观察: {button_name or action_type}", r["content"].strip()[:300], source="observe")
+        except: pass
+    t = threading.Thread(target=_analyze, daemon=True)
+    t.start()
 
 @app.route("/api/learning_log/export")
 def api_learning_log_export():
@@ -7244,6 +7280,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
           <button class="btn-clear" onclick="document.getElementById('chat-file-input').click()" style="font-size:10px;padding:4px 8px" title="选择文件">&#128206;</button>
           <button class="btn-send" onclick="sendChat()">发送</button>
           <button class="btn-verify" onclick="sendCorrection()" style="font-size:11px">纠正AI</button>
+          <button id="btn-observe" class="btn-verify" onclick="toggleObserveMode()" style="font-size:11px;background:#7c4dff;color:#fff">👀 注意学习</button>
           <button class="btn-clear" onclick="clearChat()">清空</button>
         </div>
       </div>
@@ -8118,6 +8155,13 @@ function clearChat(){
   if(!socket||!socket.connected){return;}
   socket.emit('ai_chat_clear');
   document.getElementById('chat-messages').innerHTML='<div class="chat-msg assistant"><div class="avatar">AI</div><div class="bubble">对话已清空。</div></div>';
+}
+function toggleObserveMode(){
+  fetch('/api/learn/observe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(r=>r.json()).then(d=>{
+    var btn=document.getElementById('btn-observe');
+    if(d.observe_mode){btn.textContent='👀 学习中...';btn.style.background='#e53935'}
+    else{btn.textContent='👀 注意学习';btn.style.background='#7c4dff'}
+  });
 }
 function addChatMessage(role,text){
   var msgs=document.getElementById('chat-messages');
