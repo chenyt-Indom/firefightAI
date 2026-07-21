@@ -5932,6 +5932,26 @@ def _on_cycle_event(event: dict):
 
     action_display = " + ".join(actions_text) if actions_text else action
     reason_display = reason_text.rstrip("; ") if reason_text else decision
+
+    # 🔥 行为评分加成：单位调动+1分，推蓝线+2分
+    bonus_keywords = {
+        "move": ["move", "attack", "调动", "移动", "推进", "推进到", "swipe", "drag", "推", "选", "select", "deploy"],
+        "frontline": ["frontline", "蓝线", "前线", "push", "推进线", "突破"]
+    }
+    combined_text = (action + decision + action_display + reason_display).lower()
+    bonus = 0
+    for kw in bonus_keywords["move"]:
+        if kw in combined_text:
+            bonus += 1
+            break
+    for kw in bonus_keywords["frontline"]:
+        if kw in combined_text:
+            bonus += 2
+            break
+    if bonus > 0:
+        score = max(0, score) + bonus
+        add_learning_log("self_improve", f"✅ 行为得分 +{bonus}", f"动作: {action_display[:80]}")
+
     new_total = get_state().get("total_score", 0) + score
 
     thinking = f"第{cycle}轮: {analysis[:200]}\n决策: {reason_display[:200]}\n"
