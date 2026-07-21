@@ -1167,7 +1167,7 @@ def _git_run(cmd: list, timeout: int = 15, cwd: str = None) -> tuple:
     """安全执行git命令，防止认证挂起。返回 (returncode, stdout, stderr)"""
     try:
         r = subprocess.run(cmd, cwd=cwd or str(PROJECT_ROOT),
-                          capture_output=True, text=True,
+                          capture_output=True, text=True, encoding="utf-8", errors="replace",
                           env=_git_env(), timeout=timeout)
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
