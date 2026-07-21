@@ -148,7 +148,7 @@ class TacticalCommander:
                 {"role": "user", "content": user_message[:4000]}
             ], "max_tokens": self.max_tokens or 384, "temperature": self.temperature or 0.3}
             
-            for at in range(3):
+            for at in range(1):  # 主备各1次,不重试
                 try:
                     t0 = time.time()
                     resp = _req.post(f"{api_base.rstrip('/')}/chat/completions",

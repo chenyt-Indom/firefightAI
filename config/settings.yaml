@@ -43,9 +43,9 @@ llm:
   max_tokens: 1024
   model: deepseek-chat
   provider: deepseek
-  retry_count: 2
+  retry_count: 0
   temperature: 0.3
-  timeout: 6
+  timeout: 8
 
 # ── 实战学习系统 ──
 learning:
