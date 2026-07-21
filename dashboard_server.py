@@ -3562,8 +3562,7 @@ def api_train_start():
     epochs = int(data.get("epochs", 50))
     imgsz = int(data.get("imgsz", 640))
     auto_push = data.get("auto_push_github", False)
-    device = data.get("device", "cpu")
-    # 🔥 自动检测GPU/CPU
+    device = "0"  # 🔥 RTX 5070 Ti, 直接用GPU
     try:
         import torch
         if torch.cuda.is_available():
