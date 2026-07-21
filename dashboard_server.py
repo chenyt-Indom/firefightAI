@@ -5361,7 +5361,11 @@ def _on_cycle_event(event: dict):
             logger.debug(f"预测异常(非致命): {e}")
     
     socketio.emit("cycle_update", get_state())
-    socketio.emit("ai_thinking_update", {"thinking": thinking, "cycle": cycle, "analysis": analysis, "reason": reason_display, "prediction_accuracy": _predictor.get_accumulated_wisdom().get("accuracy", 0) if _predictor else 0})
+    try:
+        w = _predictor.get_accumulated_wisdom() if _predictor else None
+        pa = w.get("accuracy", 0) if isinstance(w, dict) else 0
+    except: pa = 0
+    socketio.emit("ai_thinking_update", {"thinking": thinking, "cycle": cycle, "analysis": analysis, "reason": reason_display, "prediction_accuracy": pa})
 
 # ═══ 自动缩放管理 + 速度优化 ═══
 _zoom_state = {"last_zoom_out": 0, "is_zoomed_in": False, "enemy_not_found_count": 0}
