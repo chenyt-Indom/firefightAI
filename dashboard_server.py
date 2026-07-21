@@ -389,9 +389,9 @@ def _auto_tune_params_from_training():
         if models_dir.exists():
             model_count = len([d for d in models_dir.iterdir() if d.is_dir()])
             if model_count > 3:
-                _self_learning_params["aggressiveness"] = min(0.9, _self_learning_params.get("aggressiveness", 0.5) + 0.03)
+                _self_learning_params["tactical_aggressiveness"] = min(0.9, _self_learning_params.get("tactical_aggressiveness", 0.5) + 0.03)
                 _self_learning_params["exploration_rate"] = max(0.1, _self_learning_params.get("exploration_rate", 0.3) - 0.02)
-                add_learning_log("self_improve", f"多轮训练优化: 攻击性={_self_learning_params['aggressiveness']:.2f}, 探索率={_self_learning_params['exploration_rate']:.2f}", f"已训练{model_count}个模型")
+                add_learning_log("self_improve", f"多轮训练优化: 攻击性={_self_learning_params['tactical_aggressiveness']:.2f}, 探索率={_self_learning_params['exploration_rate']:.2f}", f"已训练{model_count}个模型")
     except Exception as e:
         logger.debug(f"自动调参跳过: {e}")
 
