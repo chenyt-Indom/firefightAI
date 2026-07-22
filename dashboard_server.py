@@ -278,7 +278,6 @@ def add_learning_log(category: str, message: str, detail: str = ""):
     update_state(learning_log=_learning_log[-50:])
     socketio.emit("learning_log_update", {"entry": entry, "total": len(_learning_log)})
     _save_learning_log()  # 🔥 实时持久化到磁盘
-    _sync_learning_to_github()  # 后台同步到GitHub
     _maybe_condense_knowledge()  # 超过阈值自动压缩为长期记忆
 
 
@@ -494,7 +493,6 @@ def api_replay_analyze():
                 add_learning_log("replay", f"📺 战斗复盘 (评分{score}): {result.get('整体评价','')[:100]}", 
                                f"改进: {str(suggestion)[:200]}\n可复用: {str(reusable)[:200]}")
                 add_knowledge("replay_analysis", f"战斗复盘分析", f"模式:{str(pattern)[:200]}\n改进:{str(suggestion)[:200]}\n战术:{str(reusable)[:200]}", source="replay")
-                _sync_learning_to_github()
                 return jsonify({"status": "ok", "analysis": result})
             except:
                 return jsonify({"status": "partial", "raw": r["content"][:500]})
@@ -549,7 +547,6 @@ def _save_correction_rule(correction: str, ai_response: str):
         if similar_count >= 2:
             socketio.emit("硬规则升级", {"rule": rule_name, "count": similar_count+1, "msg": f"该规则被纠正{similar_count+1}次，已自动升级为硬规则"})
         
-        _sync_learning_to_github()
     except Exception as e:
         logger.debug(f"自动沉淀规则跳过: {e}")
 
@@ -1286,7 +1283,7 @@ def api_learning_log_train():
                 params["swipe_duration"] = max(300, params.get("swipe_duration", 1000) - 8)
                 params["batch_execution"] = True
                 if params["total_learnings"] % 10 == 0:
-                    analysis_lines.append(f"⚡ 操作加速: tap={params['tap_delay']:.3f}s swipe={params['swipe_duration']:.0f}ms")
+                    analysis_lines.append(f"⚡ 操作加速: tap={params.get('tap_delay',0.2):.3f}s swipe={params.get('swipe_duration',1000):.0f}ms")
             
             if len(recent) > 10:
                 params["multitasking"] = True
@@ -1313,9 +1310,7 @@ def api_learning_log_train():
             add_knowledge("self_learn", f"训练分析 ({len(tactics_found)}战术)", analysis, "auto_train")
             
             # 自动推送到服务器和GitHub
-            _auto_push_learning_params()
-            _auto_upload_params_to_server()
-            
+                
         except Exception as e:
             logger.error(f"训练失败: {e}")
             socketio.emit("learning_log_train_result", {
@@ -2413,6 +2408,36 @@ def verify_deepseek_api() -> dict:
 # 统一 DeepSeek API 调用（使用 requests 避免 openai 库的 jiter.dll 被 Windows 拦截）
 # ═══════════════════════════════════════════════════════════════
 
+def _glm_chat(messages: list, max_tokens: int = 800, temperature: float = 0.1, stream: bool = True, timeout: int = 30) -> dict:
+    """调用 GLM-4-Flash API 聊天（主力AI，接入知识库）"""
+    import requests as req
+    cfg = load_config()
+    llm_cfg = cfg["llm"]
+    api_base = llm_cfg.get("fallback_api_base", "https://open.bigmodel.cn/api/paas/v4")
+    api_key = llm_cfg.get("fallback_api_key", llm_cfg.get("api_key", ""))
+    try:
+        max_tokens = int(max_tokens)
+        temperature = float(temperature)
+    except (TypeError, ValueError):
+        max_tokens = 800
+        temperature = 0.1
+    try:
+        resp = req.post(
+            f"{api_base}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": "glm-4-flash", "messages": messages, "max_tokens": max_tokens, "temperature": temperature, "stream": stream},
+            timeout=(6, timeout),
+        )
+        resp.raise_for_status()
+        if stream:
+            return {"success": True, "response": resp, "stream": True}
+        else:
+            data = resp.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return {"success": True, "content": content, "stream": False}
+    except Exception as e:
+        return {"success": False, "error": str(e)[:200]}
+
 def _deepseek_chat(messages: list, max_tokens: int = 800, temperature: float = 0.1, stream: bool = True, timeout: int = 30) -> dict:
     """调用 DeepSeek API 聊天，返回 {"success": bool, "content": str, "error": str}"""
     import requests as req
@@ -2515,7 +2540,10 @@ def on_ai_chat(data: dict):
     
     # 🔥 是否附带实时战场截图
     screenshot_b64 = data.get("screenshot", "")
-    include_vision = data.get("include_vision", False) and bool(screenshot_b64)
+    include_vision = bool(screenshot_b64)
+    if not include_vision and "截图" in message:
+        include_vision = True
+    logger.debug(f"AI聊天: msg={message[:50]}, include_vision={include_vision}, screenshot_len={len(screenshot_b64)}")
     
     # 🔥 是否为键鼠操控指令
     control_action = data.get("control_action", {})  # {type: "tap/swipe/key/type", x, y, key, text}
@@ -2565,6 +2593,7 @@ def on_ai_chat(data: dict):
     emit("ai_chat_start", {"message": message, "has_vision": include_vision})
 
     def do_chat():
+        nonlocal include_vision, screenshot_b64
         try:
             cfg = load_config()
             llm_cfg = cfg["llm"]
@@ -2722,6 +2751,18 @@ def on_ai_chat(data: dict):
 
             # 🔥 如果有截图，构建vision消息
             user_content = message + context
+            if not screenshot_b64 and include_vision:
+                # 消息里提到截图但没有图片数据 → 后端自动截图（复用已有截图逻辑）
+                logger.info(f"后端自动截图触发")
+                try:
+                    with app.test_client() as tc:
+                        r = tc.get("/api/control/screenshot")
+                        d = r.get_json() or {}
+                        if d.get("screenshot") and not d.get("error"):
+                            screenshot_b64 = d["screenshot"]
+                            logger.info(f"自动截图成功: {len(screenshot_b64)} chars")
+                except Exception as e2:
+                    logger.warning(f"自动截图失败: {e2}")
             if include_vision and screenshot_b64:
                 # 使用vision格式：先发送截图分析请求，再发送文字
                 user_content = [
@@ -2735,10 +2776,10 @@ def on_ai_chat(data: dict):
                     }
                 ]
                 # 使用vision-capable模型
-                result = _deepseek_vision_chat(messages, user_content, max_tokens=1200, temperature=0.1, stream=True)
+                result = _deepseek_vision_chat(messages, user_content, max_tokens=1024, temperature=0.1, stream=False)
             else:
                 messages.append({"role": "user", "content": user_content})
-                result = _deepseek_chat(messages, max_tokens=800, temperature=0.1, stream=True)
+                result = _glm_chat(messages, max_tokens=800, temperature=0.1, stream=True)
 
             if not result["success"]:
                 socketio.emit("ai_chat_error", {"error": result["error"]})
@@ -2747,7 +2788,12 @@ def on_ai_chat(data: dict):
             def emit_token(data):
                 socketio.emit("ai_chat_token", data)
 
-            full_response = _deepseek_stream_to_end(result["response"], emit_token)
+            if result.get("stream"):
+                full_response = _deepseek_stream_to_end(result["response"], emit_token)
+            else:
+                full_response = result.get("content", "")
+                if full_response:
+                    emit_token({"token": full_response, "done": False, "full": full_response})
             
             # 🔥 解析AI响应中的操控指令
             control_actions = _extract_control_actions(full_response)
@@ -2812,29 +2858,19 @@ def on_ai_chat_clear():
 # ═══════════════════════════════════════════════════════════════
 
 def _deepseek_vision_chat(messages: list, user_content, max_tokens: int = 1200, temperature: float = 0.1, stream: bool = True, timeout: int = 60) -> dict:
-    """调用DeepSeek API进行视觉聊天（支持截图分析）"""
+    """调用 GLM-4V-Flash 视觉模型分析截图"""
     import requests as req
     cfg = load_config()
     llm_cfg = cfg["llm"]
-    
-    # 构建vision消息
-    vision_messages = list(messages)  # 复制system prompt等
+    api_base = "https://open.bigmodel.cn/api/paas/v4"
+    api_key = llm_cfg.get("fallback_api_key", llm_cfg.get("api_key", ""))
+    vision_messages = list(messages)
     vision_messages.append({"role": "user", "content": user_content})
-    
     try:
         resp = req.post(
-            f"{llm_cfg['api_base']}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {llm_cfg['api_key']}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": llm_cfg.get("vision_model", llm_cfg.get("model", "deepseek-chat")),
-                "messages": vision_messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "stream": stream,
-            },
+            f"{api_base}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": "glm-4v-flash", "messages": vision_messages, "max_tokens": max_tokens, "temperature": temperature, "stream": stream},
             timeout=(10, timeout),
         )
         resp.raise_for_status()
@@ -2845,8 +2881,7 @@ def _deepseek_vision_chat(messages: list, user_content, max_tokens: int = 1200, 
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             return {"success": True, "content": content, "stream": False}
     except Exception as e:
-        # 如果vision模型不支持，回退到普通chat（去掉图片部分）
-        logger.warning(f"Vision API调用失败，回退到普通模式: {e}")
+        logger.warning(f"GLM-4V API调用失败: {e}")
         text_parts = []
         if isinstance(user_content, list):
             for part in user_content:
@@ -2854,8 +2889,31 @@ def _deepseek_vision_chat(messages: list, user_content, max_tokens: int = 1200, 
                     text_parts.append(part["text"])
         fallback_msg = "\n".join(text_parts) if text_parts else str(user_content)
         messages.append({"role": "user", "content": fallback_msg})
-        return _deepseek_chat(messages, max_tokens, temperature, stream, timeout)
+        return _glm_chat(messages, max_tokens, temperature, stream, timeout)
 
+
+@app.route("/api/check/glm4v")
+def api_check_glm4v():
+    """检查 GLM-4V 视觉模型连接状态"""
+    import requests as req
+    try:
+        cfg = load_config()
+        llm = cfg["llm"]
+        api_base = llm.get("fallback_api_base", "https://open.bigmodel.cn/api/paas/v4")
+        api_key = llm.get("fallback_api_key", "")
+        if not api_key:
+            return jsonify({"status": "error", "message": "未配置API Key"})
+        # 真实调用 glm-4v-flash
+        resp = req.post(f"{api_base}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": "glm-4v-flash", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5},
+            timeout=10)
+        if resp.status_code == 200:
+            txt = resp.json().get("choices",[{}])[0].get("message",{}).get("content","")
+            return jsonify({"status": "ok", "model": "glm-4v-flash", "has_vision": True, "model_list": ["glm-4v-flash"], "msg": f"已连接,响应:"+txt[:50]})
+        return jsonify({"status": "error", "message": f"HTTP {resp.status_code}"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)[:100]})
 
 def _parse_control_command(message: str) -> dict:
     """解析自然语言中的键鼠操控指令"""
@@ -3226,7 +3284,6 @@ def _execute_self_learning_cycle():
 
         # 自动推送到GitHub和服务器
         _auto_push_learning_params()
-        _auto_upload_params_to_server()
         
         # 🔥 AI自主评估并调参 (温度/学习率/攻击性/置信度)
         import threading
@@ -4463,7 +4520,6 @@ def _auto_save_search(query: str, summary: str):
         (WEB_KNOWLEDGE_DIR / filename).write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
         add_learning_log("web_search", f"搜索结果已自动保存: {filename}", f"查询: {query[:50]}")
         add_knowledge("web_search", query[:80], summary[:200], source="DeepSeek")
-        _sync_learning_to_github()
     except Exception as e:
         logger.debug(f"自动保存搜索结果跳过: {e}")
 
@@ -5683,6 +5739,22 @@ def on_check_all_connections():
             return f"offline:{str(e)[:30]}"
     results["deepseek"] = _get_cached_or_fetch("deepseek", _check_deepseek, _CACHE_TTL["deepseek"])
 
+    # GLM-4V 视觉模型
+    def _check_glm():
+        try:
+            import requests
+            cfg = load_config()
+            api_base = cfg["llm"].get("fallback_api_base", "https://open.bigmodel.cn/api/paas/v4")
+            api_key = cfg["llm"].get("fallback_api_key", "")
+            r = requests.post(f"{api_base}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": "glm-4v-flash", "messages": [{"role":"user","content":"ping"}], "max_tokens": 5},
+                timeout=10)
+            return "online" if r.status_code == 200 else f"error:{r.status_code}"
+        except:
+            return "offline"
+    results["glm4v"] = _get_cached_or_fetch("glm4v", _check_glm, _CACHE_TTL.get("deepseek", 60))
+
     # ADB - 实时检测（ADB检测很快，不需要缓存）
     try:
         cfg = load_config()
@@ -6085,7 +6157,7 @@ def _optimize_execution_speed(cycle: int, cycle_time_ms: float):
         if cycle_time_ms > 2000:
             params["tap_delay"] = max(0.05, params.get("tap_delay", 0.2) - 0.01)
             params["swipe_duration"] = max(300, params.get("swipe_duration", 1000) - 30)
-            logger.debug(f"⚡ 加速: tap_delay={params['tap_delay']:.3f}, swipe={params['swipe_duration']}")
+            logger.debug(f"⚡ 加速: tap_delay={params.get('tap_delay',0.2):.3f}, swipe={params.get('swipe_duration',1000)}")
             _save_learning_params(params)
         
         # 如果连续3轮又快又准(<800ms)，可以放慢一点提高精度
@@ -7178,6 +7250,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
 <div class="header">
   <h1>Firefight AI v5.1</h1>
   <div style="display:flex;gap:8px;align-items:center">
+    <span class="conn-mini" id="conn-glm">GLM</span>
     <span class="conn-mini" id="conn-adb">ADB</span>
     <span class="conn-mini" id="conn-api">API</span>
     <span class="conn-mini" id="conn-gh">GitHub</span>
@@ -7328,12 +7401,21 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
   <div class="conn-grid">
     <!-- DeepSeek API -->
     <div class="conn-card">
-      <div class="conn-name">DeepSeek API</div>
+      <div class="conn-name">DeepSeek (联网搜索)</div>
       <div class="conn-status unknown" id="conn-deepseek-status">未检查</div>
       <div id="conn-deepseek-detail" style="font-size:10px;color:#888"></div>
       <div class="conn-actions">
         <button class="btn-verify" onclick="verifyAPI()">验证</button>
         <button class="btn-verify" onclick="checkBalance()" style="font-size:10px;padding:4px 8px">余额</button>
+      </div>
+    </div>
+    <!-- GLM-4V 视觉 -->
+    <div class="conn-card">
+      <div class="conn-name">GLM-4-Flash (主力AI+视觉)</div>
+      <div class="conn-status unknown" id="conn-glm-status">未检查</div>
+      <div id="conn-glm-detail" style="font-size:10px;color:#888"></div>
+      <div class="conn-actions">
+        <button class="btn-verify" onclick="checkGLM4V()">检查连接</button>
       </div>
     </div>
     <!-- ADB -->
@@ -7935,6 +8017,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
 <div class="tab-content" id="tab-settings">
   <div class="panel"><h3>API 验证</h3>
     <div class="conn-card" style="margin-bottom:8px"><div class="conn-name">DeepSeek API</div><div class="conn-status" id="api-deepseek-status">未检查</div><div id="api-deepseek-detail" style="font-size:10px;color:#888"></div></div>
+    <div class="conn-card" style="margin-bottom:8px"><div class="conn-name">GLM-4V 视觉模型</div><div class="conn-status" id="api-glm-status">未检查</div><div id="api-glm-detail" style="font-size:10px;color:#888"></div></div>
     <button class="btn-verify" onclick="verifyAPI()">验证 API 连通性</button>
   </div>
   <div class="panel" style="margin-top:14px"><h3>版本信息</h3>
@@ -8411,10 +8494,11 @@ _on('rebuild_error',function(d){document.getElementById('rebuild-status').innerH
 _on('all_connections_status',function(d){updateConnMinis(d);updateConnCards(d)});
 
 function updateConnMinis(d){
-  var api=(d.deepseek||d.api)==='online';var adb=(d.adb||'')==='connected'||(d.adb||'')==='other_device';var gh=(d.github||'')==='online'||(d.github||'')==='configured';var srv=(d.server||'')==='online'&&d.server_deployed;
+  var api=(d.deepseek||d.api)==='online';var adb=(d.adb||'')==='connected'||(d.adb||'')==='other_device';var gh=(d.github||'')==='online'||(d.github||'')==='configured';var srv=(d.server||'')==='online'&&d.server_deployed;var glm=(d.glm4v||'')==='online';
   setMini('conn-api',api?'online':'offline','API');
   setMini('conn-adb',adb?'online':'offline','ADB');
   setMini('conn-gh',gh?'online':'offline','GH');
+  setMini('conn-glm',glm?'online':'offline','GLM');
   setMini('conn-srv',srv?'online':'offline','SRV');
   updateReadinessIndicator(api,adb,gh,srv);
 }
@@ -8433,6 +8517,7 @@ function updateReadinessIndicator(apiOk,adbOk,ghOk,srvOk){
 }
 function updateConnCards(d){
   setConnCard('conn-deepseek-status','conn-deepseek-detail',d.deepseek||d.api,'DeepSeek');
+  setConnCard('conn-glm-status','conn-glm-detail',d.glm4v,'GLM-4V');
   setConnCard('conn-adb-status','conn-adb-detail',d.adb,'ADB');
   setConnCard('conn-github-status','conn-github-detail',d.github,'GitHub');
   setConnCard('conn-server-status','conn-server-detail',d.server,'Server');
@@ -8472,6 +8557,14 @@ function reconnectADB(){fetch('/api/adb/reconnect',{method:'POST',headers:{'Cont
   document.getElementById('conn-adb-status').className='conn-status '+(d.status==='connected'?'online':'offline');
   document.getElementById('conn-adb-detail').textContent=d.output||'';
 })}
+function checkGLM4V(){fetch('/api/check/glm4v').then(r=>r.json()).then(d=>{
+  var s=document.getElementById('conn-glm-status');
+  var det=document.getElementById('conn-glm-detail');
+  if(d.status==='ok'){s.textContent='已连接(glm-4v-flash)';s.className='conn-status online';det.textContent=d.msg;setMini('conn-glm','online','GLM')}
+  else{s.textContent='失败';s.className='conn-status offline';det.textContent=d.message;setMini('conn-glm','offline','GLM')}
+  var apiEl=document.getElementById('api-glm-status');if(apiEl){apiEl.textContent=s.textContent;apiEl.className=s.className}
+  var apiDl=document.getElementById('api-glm-detail');if(apiDl){apiDl.textContent=d.msg||d.message||''}
+}).catch(function(e){document.getElementById('conn-glm-status').textContent='失败';document.getElementById('conn-glm-status').className='conn-status offline';document.getElementById('conn-glm-detail').textContent='网络错误';setMini('conn-glm','offline','GLM')})}
 function checkGitHub(){fetch('/api/github/status').then(r=>r.json()).then(d=>{
   var el=document.getElementById('conn-github-status');
   var dl=document.getElementById('conn-github-detail');
@@ -9634,6 +9727,8 @@ function verifyAPI(){fetch('/api/verify_api_http').then(r=>r.json()).then(d=>{
   if(dl){dl.textContent='延迟: '+(ds.latency_ms||'?')+'ms | 模型: '+(ds.models||[]).slice(0,3).join(', ')}
   setMini('conn-api',ds.status==='online'?'online':'offline','API');
   setConnCard('conn-deepseek-status','conn-deepseek-detail',ds.status,'DeepSeek');
+  // 也检查 GLM
+  checkGLM4V();
 })}
 
 // ── GPU 检测 ──
