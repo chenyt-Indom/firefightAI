@@ -2543,6 +2543,11 @@ def on_ai_chat(data: dict):
     include_vision = bool(screenshot_b64)
     if not include_vision and "截图" in message:
         include_vision = True
+
+    # 🔥 注入上次截图分析结果到上下文
+    global _last_screenshot_analysis
+    if not include_vision and _last_screenshot_analysis:
+        context += f"\n[上次截图分析] {_last_screenshot_analysis[:500]}"
     logger.debug(f"AI聊天: msg={message[:50]}, include_vision={include_vision}, screenshot_len={len(screenshot_b64)}")
     
     # 🔥 是否为键鼠操控指令
@@ -2599,19 +2604,21 @@ def on_ai_chat(data: dict):
             llm_cfg = cfg["llm"]
 
             sys_prompt = (
-                "你是 Firefight AI 战术指挥系统的 AI 助手。你具备以下能力：\n"
-                "1. 分析战场截图并给出战术建议（当用户发送截图时）\n"
+                "你是 Firefight AI 战术指挥系统的 AI 助手（GLM文本模型）。\n"
+                "当用户发送截图时，系统会通过 GLM-4V 视觉模型分析画面，并把分析结果以[上次截图分析]的形式注入到你的上下文中。\n"
+                "你的能力：\n"
+                "1. 基于[上次截图分析]回答关于战场画面的问题（不要再说你看不到图）\n"
                 "2. 分析战场局势并给出战术建议\n"
-                "3. 解释你的决策逻辑\n"
-                "4. 回答关于游戏机制、单位、战术的问题\n"
-                "5. 帮助指挥官制定作战计划\n"
-                "6. 接受指挥官的行为纠正并调整策略\n"
+                "3. 解释决策逻辑\n"
+                "4. 回答游戏机制、单位、战术问题\n"
+                "5. 制定作战计划\n"
+                "6. 接受行为纠正并调整策略\n"
                 "7. 指导键鼠操控：当你需要执行具体操作时，用【操控:类型,参数】格式输出\n"
                 "   例如：【操控:tap,500,300】=点击坐标(500,300)\n"
                 "         【操控:swipe,100,200,500,600】=从(100,200)滑动到(500,600)\n"
                 "         【操控:key,back】=按返回键\n"
                 "         【操控:type,输入文字】=输入文字\n\n"
-                "请用中文回答，保持专业、简洁。如果涉及战术决策，请分步骤说明你的思考过程。"
+                "重要：上下文中的[上次截图分析]就是当前画面，你必须基于它回答！不要再回复'我无法查看图片'。"
             )
 
             # 🔥 持续记忆注入：全量学习摘要 + 今日详情 + 战术规则
@@ -2772,7 +2779,7 @@ def on_ai_chat(data: dict):
                     },
                     {
                         "type": "text",
-                        "text": f"【实时战场截图】请分析当前截图中显示的战场情况，包括：\n1. 识别屏幕上的单位位置和血量\n2. 当前战况评估\n3. 建议的下一步操作\n\n用户消息: {message}{context}"
+                        "text": f"【实时战场截图】请仔细分析当前截图中所有可见元素，包括但不限于：\n1. 所有可见的单位位置、类型、数量、血量、阵营\n2. 所有可见的旗帜/标志/图标（包括美国国旗、敌方旗帜等任何标志性元素）\n3. 建筑、障碍物、特殊地形\n4. 当前战况评估和敌我态势\n5. 建议的下一步操作\n\n【重要】你必须描述你看到的所有内容，包括小细节和标记。如果看到任何旗帜/标志，请明确指出。\n\n用户消息: {message}{context}"
                     }
                 ]
                 # 使用vision-capable模型
@@ -2805,6 +2812,11 @@ def on_ai_chat(data: dict):
             
             socketio.emit("ai_chat_token", {"token": "", "done": True, "full": full_response})
             _chat_history.append({"role": "assistant", "content": full_response, "time": time.time()})
+
+            # 🔥 保存截图分析结果为上下文，供后续文本对话使用
+            global _last_screenshot_analysis
+            if include_vision:
+                _last_screenshot_analysis = full_response[:600]
 
             # 如果是行为纠正，触发AI学习并沉淀为规则
             if is_correction:
@@ -2873,6 +2885,9 @@ def _deepseek_vision_chat(messages: list, user_content, max_tokens: int = 1200, 
             json={"model": "glm-4v-flash", "messages": vision_messages, "max_tokens": max_tokens, "temperature": temperature, "stream": stream},
             timeout=(10, timeout),
         )
+        # 自动重试 429 限流
+        if resp.status_code == 429:
+            import time as _t; _t.sleep(2); resp = req.post(f"{api_base}/chat/completions", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json={"model": "glm-4v-flash", "messages": vision_messages, "max_tokens": max_tokens, "temperature": temperature, "stream": stream}, timeout=(10, timeout))
         resp.raise_for_status()
         if stream:
             return {"success": True, "response": resp, "stream": True}

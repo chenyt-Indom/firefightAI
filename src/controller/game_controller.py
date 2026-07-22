@@ -678,9 +678,9 @@ class GameController:
         if total_moves > 0 and hasattr(self, 'commander'):
             move_time_per_unit = elapsed / total_moves if total_moves > 0 else 0
             if move_time_per_unit > 2000:  # 单单位超2s → 加速
-                if not hasattr(self, '_ai_timing'):
+                if not hasattr(self, '_ai_timing') or not isinstance(self._ai_timing, dict):
                     self._ai_timing = {'tap_delay': 0.2, 'swipe_ms': 1000}
-                self._ai_timing['tap_delay'] = max(0.1, self._ai_timing['tap_delay'] * 0.9)
+                self._ai_timing['tap_delay'] = max(0.1, self._ai_timing.get('tap_delay', 0.2) * 0.9)
                 self._ai_timing['swipe_ms'] = max(500, self._ai_timing['swipe_ms'] - 50)
                 logger.info(f"AI自调时序: tap={self._ai_timing['tap_delay']:.2f}s, swipe={self._ai_timing['swipe_ms']}ms")
 
