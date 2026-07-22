@@ -2086,6 +2086,85 @@ def api_github_upload_file():
             return jsonify({"status": "saved", "filename": filename, "warning": "自动推送失败，文件已本地保存"})
     return jsonify({"status": "saved", "filename": filename})
 
+# 🔥 多机同步端点
+@app.route("/api/sync/all", methods=["POST"])
+def api_sync_all():
+    """一键同步：保存→Git推送→服务器合并→安装包"""
+    import subprocess as _sp, zipfile, json
+    results = {"saved": True, "github": False, "server": False, "installer": False}
+    try:
+        _save_all_state()
+        repo = str(PROJECT_ROOT)
+        _sp.run(["git", "-C", repo, "add", "data/params/", "data/ai_knowledge.json", "data/tactics_rules.yaml"], capture_output=True, timeout=10)
+        r = _sp.run(["git", "-C", repo, "commit", "-m", f"前端同步 {datetime.now().strftime('%Y%m%d_%H%M%S')}"], capture_output=True, text=True, timeout=10)
+        if r.returncode <= 1:
+            r = _sp.run(["git", "-C", repo, "push", "origin", "master"], capture_output=True, text=True, timeout=30)
+            results["github"] = r.returncode == 0
+        try:
+            import requests as _req
+            _req.get("http://139.199.69.88:5001/api/git/sync", timeout=15)
+            results["server"] = True
+        except: pass
+        installer = PROJECT_ROOT / "static" / "FirefightAI_Installer.zip"
+        installer.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(installer, 'w', zipfile.ZIP_DEFLATED) as z:
+            for f in ["dashboard_server.py","启动控制面板.bat"]:
+                fp = PROJECT_ROOT / f
+                if fp.exists(): z.write(fp, fp.name)
+            for g in (PROJECT_ROOT / "data").glob("*.json"):
+                z.write(g, f"data/{g.name}")
+            for h in (PROJECT_ROOT / "data" / "params").glob("*.json"):
+                z.write(h, f"data/params/{h.name}")
+        results["installer"] = True
+        return jsonify({"status": "ok", "results": results})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)[:200]}), 500
+
+# 🔥 服务器端多机合并：不同机器上传的学习日志自动去重合并
+@app.route("/api/sync/merge", methods=["POST"])
+def api_sync_merge():
+    """服务器接收多机学习数据并智能合并（去重）+更新安装包"""
+    import json as _json
+    data = request.get_json() or {}
+    merged = 0
+    try:
+        src_log = data.get("learning_log", [])
+        src_kb = data.get("knowledge", [])
+        # 加载本地数据
+        local_log = []
+        if _LEARNING_LOG_FILE.exists():
+            local_log = _json.loads(_LEARNING_LOG_FILE.read_text(encoding="utf-8"))
+        local_kb = []
+        if _KNOWLEDGE_FILE.exists():
+            local_kb = _json.loads(_KNOWLEDGE_FILE.read_text(encoding="utf-8"))
+        # 去重合并学习日志
+        existing_ids = set(e.get("message","")[:50] for e in local_log)
+        for e in src_log:
+            key = e.get("message","")[:50]
+            if key not in existing_ids:
+                local_log.append(e); existing_ids.add(key); merged += 1
+        _LEARNING_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _LEARNING_LOG_FILE.write_text(_json.dumps(local_log[-500:], ensure_ascii=False, indent=2), encoding="utf-8")
+        # 去重合并知识库
+        kb_ids = set(k.get("id","") for k in local_kb)
+        for k in src_kb:
+            if k.get("id") and k["id"] not in kb_ids:
+                local_kb.append(k); kb_ids.add(k["id"]); merged += 1
+        _KNOWLEDGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _KNOWLEDGE_FILE.write_text(_json.dumps(local_kb[-200:], ensure_ascii=False, indent=2), encoding="utf-8")
+        # 重建安装包
+        import zipfile
+        installer = PROJECT_ROOT / "static" / "FirefightAI_Installer.zip"
+        with zipfile.ZipFile(installer, 'w', zipfile.ZIP_DEFLATED) as z:
+            for g in (PROJECT_ROOT / "data").glob("*.json"):
+                if g.exists(): z.write(g, f"data/{g.name}")
+            for h in (PROJECT_ROOT / "data" / "params").glob("*.json"):
+                if h.exists(): z.write(h, f"data/params/{h.name}")
+        add_system_log("sync", f"多机合并: {merged}条新数据", f"日志{len(local_log)}条, 知识{len(local_kb)}条")
+        return jsonify({"status": "ok", "merged": merged, "total_log": len(local_log), "total_kb": len(local_kb)})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)[:200]}), 500
+
 
 # ═══════════════════════════════════════════════════════════════
 # 腾讯云服务器部署
@@ -8109,6 +8188,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
           <button class="btn-send" onclick="sendChat()">发送</button>
           <button class="btn-verify" onclick="sendCorrection()" style="font-size:11px">纠正AI</button>
           <button id="btn-observe" class="btn-verify" onclick="toggleObserveMode()" style="font-size:11px;background:#7c4dff;color:#fff">👀 注意学习</button>
+          <button class="btn-verify" onclick="syncAll()" style="font-size:11px;background:#009688;color:#fff">☁ 同步+上传</button>
           <button class="btn-verify" onclick="fullMapScan()" style="font-size:11px;background:#00bcd4;color:#fff">🗺 全图扫描</button>
           <button class="btn-verify" onclick="fusionAnalyze()" style="font-size:11px;background:#ff5722;color:#fff">🔬 YOLO+GLM 融合</button>
           <button id="btn-record" class="btn-verify" onclick="toggleRecording()" style="font-size:11px;background:#e91e63;color:#fff">📹 录屏分析</button>
