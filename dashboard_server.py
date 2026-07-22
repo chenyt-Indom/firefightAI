@@ -7988,18 +7988,17 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
 .chat-input-area textarea{flex:1;padding:10px;border:1px solid #252a33;border-radius:8px;background:#1a1f2b;color:#d0d0d0;font-size:13px;outline:none;resize:none;height:55px}
 .chat-input-area textarea:focus{border-color:#58a5f3}
 /* ======== 实时战场 ======== */
-#bf{display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:9999;background:#000;flex-direction:column}
+#bf{display:none;position:fixed;inset:0;z-index:9999;background:#000;flex-direction:column}
 #bf.on{display:flex}
-#bf img{flex:1;object-fit:contain;min-height:0}
-#bf .bf-top{display:flex;gap:6px;padding:6px 10px;background:rgba(0,0,0,.85);align-items:center;flex-shrink:0}
-#bf .bf-top input{flex:1;padding:7px 10px;border:1px solid #444;border-radius:4px;background:#1a1a1a;color:#fff;font-size:13px;outline:none}
-#bf .bf-top button{padding:6px 14px;border:none;border-radius:4px;cursor:pointer;font-size:12px;color:#fff;white-space:nowrap}
-#bf .bf-send{background:#1f6feb}#bf .bf-exit{background:#c0392b}#bf .bf-clear{background:#555}
-#bf .bf-chat{max-height:200px;overflow-y:auto;padding:4px 10px;background:rgba(0,0,0,.85);font-size:11px;flex-shrink:0;border-top:1px solid #333}
-#bf .bf-chat .m{margin:2px 0;padding:3px 6px;border-radius:4px;max-width:80%;word-break:break-word}
-#bf .bf-chat .m.u{background:#1a3a5c;margin-left:auto;color:#bdd}
-#bf .bf-chat .m.a{background:#1a3a2c;color:#bdb}
-#bf .bf-chat .m.s{color:#888;text-align:center;font-style:italic}
+#bf img{flex:1;object-fit:contain}
+#bf canvas{position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair}
+#bf .bar{display:flex;gap:4px;padding:4px 8px;background:rgba(0,0,0,.9);align-items:center;flex-wrap:wrap}
+#bf .bar input{flex:1;min-width:120px;padding:6px 8px;border:1px solid #444;border-radius:4px;background:#1a1a1a;color:#fff;font-size:12px}
+#bf .bar button{padding:4px 10px;border:none;border-radius:3px;cursor:pointer;font-size:11px;color:#fff}
+#bf .bf-chat{max-height:120px;overflow-y:auto;padding:4px 8px;font-size:10px;background:rgba(0,0,0,.8);border-top:1px solid #333}
+#bf .bf-chat .m{margin:1px 0;padding:2px 5px;border-radius:3px;max-width:85%}
+#bf .bf-chat .u{background:#1a3a5c;margin-left:auto;color:#bdd}
+#bf .bf-chat .a{background:#1a3a2c;color:#bdb}
 /* Thinking */
 .thinking-box{background:#0a0e14;border:1px solid #252a33;border-radius:8px;padding:12px;min-height:80px;max-height:220px;overflow-y:auto;font-size:11px;font-family:'Consolas',monospace;white-space:pre-wrap;line-height:1.5}
 .thinking-box .highlight{color:#ff9800}.thinking-box .step{color:#58a5f3}
@@ -11919,38 +11918,39 @@ fetch('/api/command/score').then(r=>r.json()).then(d=>{
 </div>
 
 <div id="bf">
-  <div class="bf-top">
-    <span style="color:#fff;font-weight:600;margin-right:8px">⚔</span>
-    <input id="bf-cmd" placeholder="输入指令（如:点击(500,300) / 滑动(100,200,500,600) / 攻击左侧敌军）...">
-    <button class="bf-send" onclick="BFSend()">发送</button>
-    <button class="bf-clear" onclick="BFClear()">清屏</button>
-    <button class="bf-exit" onclick="BFOff()">✖ 退出</button>
+  <div class="bar">
+    <span style="color:#ff5722;font-weight:600;margin-right:6px">⚔</span>
+    <button onclick="BFMark('point')" id="bf-tool-point">📍</button>
+    <button onclick="BFMark('line')" id="bf-tool-line" class="active">📏</button>
+    <button onclick="BFMark('box')" id="bf-tool-box">⬜</button>
+    <button onclick="BFUndo()">↩</button>
+    <button onclick="BFZoom('in')">🔍+</button>
+    <button onclick="BFZoom('out')">🔍-</button>
+    <input id="bf-cmd" placeholder="标注后输入指令">
+    <button onclick="BFSend()" style="background:#1f6feb">📤</button>
+    <button onclick="BFOff()" style="background:#c0392b">✖</button>
   </div>
-  <img id="bf-img" src="" draggable="false">
+  <div style="flex:1;position:relative;display:flex;align-items:center;justify-content:center">
+    <img id="bf-img" src="" draggable="false">
+    <canvas id="bf-canvas"></canvas>
+  </div>
   <div class="bf-chat" id="bf-chat"></div>
 </div>
-
 <script>
-var _bfOn=false,_bfDt=0,_bfDx=0,_bfDy=0;
-function BFOn(){var b=document.getElementById('bf');b.classList.add('on');_bfOn=true;fetch('/api/scrcpy/launch',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(function(){setTimeout(function(){document.getElementById('bf-img').src='/api/emulator/stream?t='+Date.now()},2000)});document.getElementById('bf-cmd').focus()}
-function BFOff(){document.getElementById('bf').classList.remove('on');_bfOn=false}
-function BFClear(){document.getElementById('bf-chat').innerHTML=''}
-function BFMsg(role,txt){var d=document.getElementById('bf-chat'),m=document.createElement('div');m.className='m '+role;m.textContent=txt;d.appendChild(m);d.scrollTop=d.scrollHeight}
-function BFSend(){
-  var v=document.getElementById('bf-cmd').value.trim();if(!v)return;document.getElementById('bf-cmd').value='';
-  BFMsg('u',v);
-  fetch('/api/control/screenshot').then(r=>r.json()).then(d=>{
-    socket.emit('ai_chat',{message:v,screenshot:d.screenshot||'',include_vision:true});
-    socket.once('ai_chat_token',function onT(t){if(t.done){BFMsg('a',(t.full||'').slice(0,300));socket.off('ai_chat_token',onT)}});
-  });
-}
-// Mirror touch: tap/drag on image → ADB
-document.addEventListener('DOMContentLoaded',function(){
-  var img=document.getElementById('bf-img');
-  img.addEventListener('mousedown',function(e){if(!_bfOn)return;var r=img.getBoundingClientRect();_bfDx=Math.round(e.clientX-r.left);_bfDy=Math.round(e.clientY-r.top);_bfDt=Date.now()});
-  img.addEventListener('mouseup',function(e){if(!_bfOn)return;var r=img.getBoundingClientRect(),dur=Date.now()-_bfDt,ex=Math.round(e.clientX-r.left),ey=Math.round(e.clientY-r.top);var a=dur<200?'tap':'swipe';fetch('/api/emulator/touch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(a==='tap'?{action:'tap',x:_bfDx,y:_bfDy}:{action:'swipe',x:_bfDx,y:_bfDy,x2:ex,y2:ey,duration:dur})});BFMsg('s',a+' ('+_bfDx+','+_bfDy+')')});
-});
-document.addEventListener('keydown',function(e){if(e.key==='Escape'&&_bfOn){BFOff();e.preventDefault()}});
+var _bfRefresh=null,_bfTool="line",_bfMarks=[],_bfTmps=[],_bfDraw=false,_bfSX=0,_bfSY=0;
+function BFOn(){document.getElementById("bf").classList.add("on");BFStart();document.getElementById("bf-cmd").focus()}
+function BFOff(){document.getElementById("bf").classList.remove("on");clearInterval(_bfRefresh);_bfRefresh=null}
+function BFStart(){if(_bfRefresh)return;_bfMarks=[];BFClearCanvas();_bfRefresh=setInterval(function(){fetch("/api/control/screenshot").then(function(r){return r.json()}).then(function(d){if(d.screenshot){var i=document.getElementById("bf-img");i.src="data:image/jpeg;base64,"+d.screenshot;i.onload=function(){var c=document.getElementById("bf-canvas");c.width=i.naturalWidth;c.height=i.naturalHeight;BFDraw()}}})},600)}
+function BFMark(t){_bfTool=t;["point","line","box"].forEach(function(x){document.getElementById("bf-tool-"+x).classList.remove("active")});document.getElementById("bf-tool-"+t).classList.add("active")}
+function BFZoom(d){fetch("/api/emulator/touch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"zoom_"+d})})}
+function BFUndo(){_bfMarks.pop();BFClearCanvas();BFDraw()}
+function BFClearCanvas(){var c=document.getElementById("bf-canvas"),ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height)}
+function BFDraw(){var c=document.getElementById("bf-canvas"),ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height);_bfMarks.concat(_bfTmps).forEach(function(m){ctx.strokeStyle="#ff0";ctx.lineWidth=3;ctx.fillStyle="rgba(255,255,0,.3)";var x=m.x*c.width,y=m.y*c.height;if(m.type=="point"){ctx.beginPath();ctx.arc(x,y,6,0,2*Math.PI);ctx.fill();ctx.stroke()}else if(m.type=="line"&&m.x2){var x2=m.x2*c.width,y2=m.y2*c.height;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x2,y2);ctx.stroke();ctx.fillStyle="#ff0";ctx.beginPath();ctx.arc(x2,y2,5,0,2*Math.PI);ctx.fill()}else if(m.type=="box"){ctx.strokeRect(x,y,m.w*c.width,m.h*c.height)}})}
+var c2=document.getElementById("bf-canvas");
+c2.addEventListener("mousedown",function(e){_bfDraw=true;var r=c2.getBoundingClientRect();_bfSX=(e.clientX-r.left)/r.width;_bfSY=(e.clientY-r.top)/r.height});
+c2.addEventListener("mousemove",function(e){if(!_bfDraw)return;var r=c2.getBoundingClientRect(),ex=(e.clientX-r.left)/r.width,ey=(e.clientY-r.top)/r.height;_bfTmps=[{type:_bfTool,x:_bfSX,y:_bfSY,x2:ex,y2:ey,w:ex-_bfSX,h:ey-_bfSY,color:"#ff0"}];BFDraw()});
+c2.addEventListener("mouseup",function(e){if(!_bfDraw)return;_bfDraw=false;var r=c2.getBoundingClientRect(),ex=(e.clientX-r.left)/r.width,ey=(e.clientY-r.top)/r.height;if(_bfTool=="point"){_bfMarks.push({type:"point",x:_bfSX,y:_bfSY})}else if(_bfTool=="line"){if(Math.abs(ex-_bfSX)>0.005||Math.abs(ey-_bfSY)>0.005)_bfMarks.push({type:"line",x:_bfSX,y:_bfSY,x2:ex,y2:ey})}else if(_bfTool=="box"){if(Math.abs(ex-_bfSX)>0.005)_bfMarks.push({type:"box",x:_bfSX,y:_bfSY,w:ex-_bfSX,h:ey-_bfSY})}_bfTmps=[];BFDraw()});
+function BFSend(){var v=document.getElementById("bf-cmd").value.trim();if(!v)return;document.getElementById("bf-cmd").value="";fetch("/api/control/screenshot").then(function(r){return r.json()}).then(function(d){var b64=d.screenshot||"";if(_bfMarks.length>0){var img=document.getElementById("bf-img"),fc=document.createElement("canvas");fc.width=img.naturalWidth;fc.height=img.naturalHeight;var ctx=fc.getContext("2d"),fi=new Image();fi.onload=function(){ctx.drawImage(fi,0,0);ctx.strokeStyle="#ff0";ctx.lineWidth=Math.max(2,fc.width*0.003);_bfMarks.forEach(function(m){var x=m.x*fc.width,y=m.y*fc.height;if(m.type=="point"){ctx.beginPath();ctx.arc(x,y,15,0,2*Math.PI);ctx.fillStyle="rgba(255,255,0,.3)";ctx.fill();ctx.stroke()}else if(m.type=="line"){ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(m.x2*fc.width,m.y2*fc.height);ctx.stroke()}else if(m.type=="box"){ctx.strokeRect(x,y,m.w*fc.width,m.h*fc.height)}});b64=fc.toDataURL("image/jpeg",0.7).split(",")[1]};fi.src="data:image/jpeg;base64,"+b64}setTimeout(function(){socket.emit("ai_chat",{message:(_bfMarks.length>0?"[标注] ":"")+v,screenshot:b64,include_vision:true});var d2=document.getElementById("bf-chat"),m2=document.createElement("div");m2.className="m u";m2.textContent=(_bfMarks.length>0?"[标注] ":"")+v;d2.appendChild(m2);d2.scrollTop=d2.scrollHeight;var once=true;var h=function(t){if(t.done&&once){once=false;var dm=document.createElement("div");dm.className="m a";dm.textContent=(t.full||"").slice(0,500);d2.appendChild(dm);d2.scrollTop=d2.scrollHeight;socket.off("ai_chat_token",h)}};socket.on("ai_chat_token",h)},_bfMarks.length>0?500:0);_bfMarks=[];BFClearCanvas()})}
 </script>
 
 </body>
