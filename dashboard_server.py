@@ -2688,14 +2688,69 @@ def on_ai_chat(data: dict):
     if is_weather or is_news:
         try:
             import requests as _req
-            search_results = _search_bing(message[:100], _req)  # Bing优先（国内可用）
-            if not search_results:
-                search_results = _search_duckduckgo(message[:100], _req)
-            if search_results:
-                snippets = "\n".join([f"{r.get('title','')}: {r.get('snippet','')[:200]}" for r in search_results[:5]])
-                r = _deepseek_chat([{"role": "user", "content": f"用中文总结以下搜索结果的3-5条要点:\n查询:{message[:80]}\n{snippets}"}], max_tokens=500, temperature=0.1, stream=False)
-                if r["success"]:
-                    injected_context = f"\n[联网搜索结果] {r['content'][:600]}"
+            from datetime import datetime as _dt_now
+            now_str = _dt_now.now().strftime("%Y-%m-%d %H:%M")
+            if is_weather:
+                city_map = {"北京":"beijing","上海":"shanghai","广州":"guangzhou","深圳":"shenzhen","汕头":"shantou","成都":"chengdu","重庆":"chongqing","杭州":"hangzhou","南京":"nanjing","西安":"xian","天津":"tianjin","苏州":"suzhou","长沙":"changsha","武汉":"wuhan","昆明":"kunming","青岛":"qingdao","厦门":"xiamen","济南":"jinan","哈尔滨":"harbin","沈阳":"shenyang","大连":"dalian","珠海":"zhuhai","东莞":"dongguan","佛山":"foshan","郑州":"zhengzhou","福州":"fuzhou","合肥":"hefei","南昌":"nanchang","贵阳":"guiyang","兰州":"lanzhou","南宁":"nanning","海口":"haikou","拉萨":"lhasa","银川":"yinchuan","西宁":"xining","乌鲁木齐":"urumqi","石家庄":"shijiazhuang","太原":"taiyuan","呼和浩特":"hohhot","长春":"changchun","无锡":"wuxi","宁波":"ningbo","温州":"wenzhou"}
+                city = "beijing"
+                import re as _re
+                # 🔥 先去除时间词前缀，再匹配城市名
+                time_prefixes = ["明天上午","后天晚上","明天下午","明天晚上","后天上午","今天上午","今天下午","今天晚上","明天","后天","前天","今天","昨日","明日","今晚","明晚","今早"]
+                clean_msg = message
+                for tp in sorted(time_prefixes, key=len, reverse=True):
+                    if clean_msg.startswith(tp):
+                        clean_msg = clean_msg[len(tp):]
+                        break
+                m = _re.search(r'([\u4e00-\u9fa5]{2,3})\s*(?:天气|气温|温度|下雨|晴)', clean_msg)
+                if m:
+                    found = m.group(1)
+                    city = city_map.get(found, found)
+                # 关键：识别是今天/明天，决定用当前还是预报
+                is_forecast = any(kw in message for kw in ["明天","后天","明日","下周","未来"])
+                # 🔥 同时跑 wttr.in 和 Bing 天气搜索
+                try:
+                    wr = _req.get(f"https://wttr.in/{city}?format=j1", timeout=8)
+                    if wr.status_code==200 and wr.text.strip() and wr.text.strip().startswith("{"):
+                        wd=wr.json()
+                        if is_forecast:
+                            fc = wd.get("weather", [{}])[1 if "明天" in message or "明日" in message else 2]
+                            if fc:
+                                hourly = fc.get("hourly", [{}])
+                                minT = fc.get("mintempC","?"); maxT = fc.get("maxtempC","?")
+                                desc = "?"
+                                for h in hourly:
+                                    if h.get("time","") in ("1200","1300"):
+                                        desc = h.get("weatherDesc",[{}])[0].get("value","?") if h.get("weatherDesc") else "?"
+                                        break
+                                date = fc.get("date","?")
+                                injected_context = f"\n[天气预报 {date}] {city}: {desc}, {minT}°C~{maxT}°C\n"
+                        else:
+                            c=wd.get("current_condition",[{}])[0]
+                            desc = c.get('weatherDesc',[{}])[0].get('value','?') if c.get('weatherDesc') else '?'
+                            obs_time = c.get('observation_time','') or _dt_now.now().strftime('%H:%M')
+                            injected_context = f"\n[实时天气 {obs_time}] {city}: {desc}, {c.get('temp_C','?')}°C, 湿度{c.get('humidity','?')}%, 风速{c.get('windspeedKmph','?')}km/h\n"
+                except Exception as _we:
+                    logger.warning(f"wttr.in 失败: {_we}")
+                # 补充：Bing 天气搜索（无论 wttr.in 成败都跑）
+                if is_weather:
+                    try:
+                        time_kw = "明天" if "明天" in message or "明日" in message else ("后天" if "后天" in message else "今天")
+                        wsr = _search_bing(f"{city} {time_kw} 天气 温度 湿度", _req)
+                        if wsr:
+                            wsn = "\n".join([f"{r.get('title','')}: {r.get('snippet','')[:200]}" for r in wsr[:3]])
+                            wr2 = _deepseek_chat([{"role": "user", "content": f"用中文一句话总结{city} {time_kw}天气(当前{now_str}):\n{wsn}"}], max_tokens=80, temperature=0.1, stream=False)
+                            if wr2["success"]:
+                                injected_context = (injected_context or "") + f"\n[天气(搜索) {now_str}] {wr2['content'][:150]}\n"
+                    except: pass
+            if not injected_context or is_news:
+                search_query = message[:100]
+                if is_news: search_query = f"最新新闻 今日热点 {message[:60]}"
+                search_results = _search_bing(search_query, _req)
+                if not search_results: search_results = _search_duckduckgo(search_query, _req)
+                if search_results:
+                    snippets = "\n".join([f"{r.get('title','')}: {r.get('snippet','')[:200]}" for r in search_results[:5]])
+                    r = _deepseek_chat([{"role": "user", "content": f"用中文总结以下搜索结果(当前时间{datetime.now().strftime('%Y-%m-%d %H:%M')})，列出3-5条要点并标注发布时间:\n查询:{search_query}\n{snippets}"}], max_tokens=500, temperature=0.1, stream=False)
+                    if r["success"]: injected_context += f"\n[联网搜索 {datetime.now().strftime('%H:%M')}] {r['content'][:600]}"
         except Exception as _e:
             logger.warning(f"自动搜索失败: {_e}")
     
@@ -2729,12 +2784,37 @@ def on_ai_chat(data: dict):
         socketio.emit("ai_chat_token", {"token": "", "done": True, "full": "✅ 观察学习模式已开启！AI 将深度分析你的每个操作。"})
         return
     
+    # 🔥 检测"加入知识库"指令
+    add_kb_keywords = ["加入知识库", "加到知识库", "保存到知识库", "记录到知识库", "学进知识库"]
+    is_add_kb = any(kw in message for kw in add_kb_keywords)
+    if is_add_kb:
+        kb_content = message
+        for kw in add_kb_keywords:
+            kb_content = kb_content.replace(kw, "").strip()
+        if kb_content:
+            # 智能分类
+            if any(kw in kb_content for kw in ["战术", "策略", "位置", "移动", "进攻", "防守"]): category = "tactics"
+            elif any(kw in kb_content for kw in ["修正", "纠正", "错误", "避免"]): category = "correction"
+            else: category = "manual"
+            title = kb_content[:60]
+            add_knowledge(category, title, kb_content, source="user_chat")
+            add_learning_log("knowledge", f"📚 加入知识库: {title[:50]}", f"分类: {category}")
+            socketio.emit("ai_chat_token", {"token": "", "done": True, "full": f"✅ 已加入知识库 [{category}]: {title}\n\n刷新知识库页面可看到。\n📂 文件: data/ai_knowledge.json"})
+            return
+
     if is_log_request:
         log_content = message
         for kw in log_keywords:
             log_content = log_content.replace(kw, "").strip()
         if not log_content:
             log_content = message
+        if not log_content:
+            return
+        category = "ai_chat"
+        if "战术" in log_content or "策略" in log_content:
+            category = "tactics"
+        elif "bug" in log_content.lower() or "错误" in log_content or "修复" in log_content:
+            category = "bug_fix"
         
         category = "ai_chat"
         if "战术" in log_content or "策略" in log_content:
@@ -2810,7 +2890,14 @@ def on_ai_chat(data: dict):
             from datetime import datetime as _dt, timedelta as _td
             now = _dt.now()
             today = now.strftime("%Y-%m-%d")
-            
+
+            # 天气/新闻指令：必须使用注入的真实数据
+            sys_prompt += f"\n【当前真实时间】{datetime.now().strftime('%Y-%m-%d %H:%M:%S %A')}（这是准确时间，请用此回答关于日期/时间的问题，**不要**用训练数据中的旧时间）\n"
+            sys_prompt += "\n当用户问天气/新闻时，**必须**直接引用消息中的[实时天气]或[联网搜索]数据，**不要**说'我无法查询'。如果数据缺失，可建议用其他工具。\n"
+            # 把天气数据也注入到系统提示（双重保险）
+            if injected_context and "天气" in injected_context:
+                sys_prompt += "\n" + injected_context
+
             # 累积学习统计
             total_logs = len(_learning_log)
             all_cats = {}
