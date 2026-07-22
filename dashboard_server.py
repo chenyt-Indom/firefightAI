@@ -7990,15 +7990,20 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
 /* ======== 实时战场 ======== */
 #bf{display:none;position:fixed;inset:0;z-index:9999;background:#000;flex-direction:column}
 #bf.on{display:flex}
-#bf img{flex:1;object-fit:contain;max-width:95vw;max-height:90vh}
+#bf img{flex:1;object-fit:contain;max-width:calc(100vw - 40px);max-height:calc(100vh - 60px)}
 #bf canvas{position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair}
 #bf .bar{display:flex;gap:4px;padding:4px 8px;background:rgba(0,0,0,.9);align-items:center;flex-wrap:wrap}
 #bf .bar input{flex:1;min-width:120px;padding:6px 8px;border:1px solid #444;border-radius:4px;background:#1a1a1a;color:#fff;font-size:12px}
 #bf .bar button{padding:4px 10px;border:none;border-radius:3px;cursor:pointer;font-size:11px;color:#fff}
-#bf .bf-chat{max-height:120px;overflow-y:auto;padding:4px 8px;font-size:10px;background:rgba(0,0,0,.8);border-top:1px solid #333}
-#bf .bf-chat .m{margin:1px 0;padding:2px 5px;border-radius:3px;max-width:85%}
-#bf .bf-chat .u{background:#1a3a5c;margin-left:auto;color:#bdd}
-#bf .bf-chat .a{background:#1a3a2c;color:#bdb}
+#bf .bf-float{position:absolute;top:8px;right:8px;z-index:10001;padding:6px 12px;background:rgba(0,0,0,.8);color:#fff;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:12px}
+#bf .bf-panel{position:absolute;top:0;right:0;bottom:0;width:360px;background:rgba(0,0,0,.92);z-index:10000;display:flex;flex-direction:column;transform:translateX(100%);transition:transform .3s}
+#bf .bf-panel.open{transform:translateX(0)}
+#bf .bf-panel input{width:100%;padding:8px;border:none;border-bottom:1px solid #444;background:#1a1a1a;color:#fff;font-size:13px;box-sizing:border-box}
+#bf .bf-panel button{padding:8px 14px;border:none;cursor:pointer;font-size:12px;color:#fff;width:100%}
+#bf .bf-panel .bf-chat{flex:1;overflow-y:auto;padding:6px;font-size:11px}
+#bf .bf-panel .bf-chat .m{margin:2px 0;padding:3px 6px;border-radius:4px}
+#bf .bf-panel .bf-chat .u{background:#1a3a5c;margin-left:auto;color:#bdd}
+#bf .bf-panel .bf-chat .a{background:#1a3a2c;color:#bdb}
 /* Thinking */
 .thinking-box{background:#0a0e14;border:1px solid #252a33;border-radius:8px;padding:12px;min-height:80px;max-height:220px;overflow-y:auto;font-size:11px;font-family:'Consolas',monospace;white-space:pre-wrap;line-height:1.5}
 .thinking-box .highlight{color:#ff9800}.thinking-box .step{color:#58a5f3}
@@ -11919,22 +11924,25 @@ fetch('/api/command/score').then(r=>r.json()).then(d=>{
 
 <div id="bf">
   <div class="bar">
-    <span style="color:#ff5722;font-weight:600;margin-right:6px">⚔</span>
-    <button onclick="BFMark('point')" id="bf-tool-point">📍</button>
-    <button onclick="BFMark('line')" id="bf-tool-line" class="active">📏</button>
-    <button onclick="BFMark('box')" id="bf-tool-box">⬜</button>
-    <button onclick="BFUndo()">↩</button>
-    <button onclick="BFZoom('in')">🔍+</button>
-    <button onclick="BFZoom('out')">🔍-</button>
-    <input id="bf-cmd" placeholder="标注后输入指令">
-    <button onclick="BFSend()" style="background:#1f6feb">📤</button>
-    <button onclick="BFOff()" style="background:#c0392b">✖</button>
+    <button onclick="BFMark('point')" id="bf-tool-point">Point</button>
+    <button onclick="BFMark('line')" id="bf-tool-line" class="active">Line</button>
+    <button onclick="BFMark('box')" id="bf-tool-box">Box</button>
+    <button onclick="BFUndo()">Undo</button>
+    <button onclick="BFClearAll()" style="background:#555">Clear</button>
+    <button onclick="BFZoom('in')">Zoom+</button>
+    <button onclick="BFZoom('out')">Zoom-</button>
+    <button onclick="BFOff()" style="background:#c0392b;margin-left:auto">Exit</button>
+    <button class="bf-float" onclick="document.getElementById('bf-chat-panel').classList.toggle('open')">Chat</button>
   </div>
-  <div style="flex:1;position:relative;display:flex;align-items:center;justify-content:center">
+  <div style="flex:1;position:relative">
     <img id="bf-img" src="" draggable="false">
     <canvas id="bf-canvas"></canvas>
+    <div class="bf-panel" id="bf-chat-panel">
+      <input id="bf-cmd" placeholder="Type command...">
+      <button onclick="BFSend()" style="background:#1f6feb">Send</button>
+      <div class="bf-chat" id="bf-chat"></div>
+    </div>
   </div>
-  <div class="bf-chat" id="bf-chat"></div>
 </div>
 <script>
 var _bfRefresh=null,_bfTool="line",_bfMarks=[],_bfTmps=[],_bfDraw=false,_bfSX=0,_bfSY=0;
@@ -11944,6 +11952,7 @@ function BFStart(){if(_bfRefresh)return;_bfMarks=[];BFClearCanvas();_bfRefresh=s
 function BFMark(t){_bfTool=t;["point","line","box"].forEach(function(x){document.getElementById("bf-tool-"+x).classList.remove("active")});document.getElementById("bf-tool-"+t).classList.add("active")}
 function BFZoom(d){fetch("/api/emulator/touch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"zoom_"+d})})}
 function BFUndo(){_bfMarks.pop();BFClearCanvas();BFDraw()}
+function BFClearAll(){_bfMarks=[];BFClearCanvas();BFDraw()}
 function BFClearCanvas(){var c=document.getElementById("bf-canvas"),ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height)}
 function BFDraw(){var c=document.getElementById("bf-canvas"),ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height);_bfMarks.concat(_bfTmps).forEach(function(m){ctx.strokeStyle="#ff0";ctx.lineWidth=3;ctx.fillStyle="rgba(255,255,0,.3)";var x=m.x*c.width,y=m.y*c.height;if(m.type=="point"){ctx.beginPath();ctx.arc(x,y,6,0,2*Math.PI);ctx.fill();ctx.stroke()}else if(m.type=="line"&&m.x2){var x2=m.x2*c.width,y2=m.y2*c.height;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x2,y2);ctx.stroke();ctx.fillStyle="#ff0";ctx.beginPath();ctx.arc(x2,y2,5,0,2*Math.PI);ctx.fill()}else if(m.type=="box"){ctx.strokeRect(x,y,m.w*c.width,m.h*c.height)}})}
 var c2=document.getElementById("bf-canvas");
