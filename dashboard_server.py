@@ -7990,7 +7990,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
 /* ======== 实时战场 ======== */
 #bf{display:none;position:fixed;inset:0;z-index:9999;background:#000;flex-direction:column}
 #bf.on{display:flex}
-#bf img{flex:1;object-fit:contain}
+#bf img{flex:1;object-fit:contain;max-width:95vw;max-height:90vh}
 #bf canvas{position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair}
 #bf .bar{display:flex;gap:4px;padding:4px 8px;background:rgba(0,0,0,.9);align-items:center;flex-wrap:wrap}
 #bf .bar input{flex:1;min-width:120px;padding:6px 8px;border:1px solid #444;border-radius:4px;background:#1a1a1a;color:#fff;font-size:12px}
