@@ -1551,9 +1551,15 @@ def api_version_reload():
 
 def _git_env() -> dict:
     """返回安全的git环境变量，防止认证弹窗导致进程挂起"""
-    env = os.environ.copy()
+    import os as _os
+    env = _os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GIT_SSH_COMMAND"] = "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+    # 优先使用配置的SSH密钥
+    ssh_key = PROJECT_ROOT / ".ssh" / "id_rsa"
+    if ssh_key.exists():
+        env["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+    else:
+        env["GIT_SSH_COMMAND"] = "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10"
     env.pop("GIT_ASKPASS", None)
     return env
 
@@ -1811,8 +1817,16 @@ def api_github_status():
         except:
             pass
 
-    # 🔥 如果以上都失败，直接读取.git/config文件
-    if not has_remote:
+    # 🔥 如果以上都失败，直接HTTPS探测GitHub API（不需要SSH）
+    def _check_github_api():
+        try:
+            import requests
+            r = requests.get("https://api.github.com/zen", timeout=5)
+            if r.status_code == 200: return "online"
+            r = requests.get("https://github.com", timeout=5)
+            return "online" if r.status_code in (200, 301, 302) else "offline"
+        except:
+            return "offline"
         try:
             git_config = PROJECT_ROOT / ".git" / "config"
             if git_config.exists():
@@ -1826,21 +1840,14 @@ def api_github_status():
         except:
             pass
 
-    # ── 检测GitHub连通性（优先SSH, 回退HTTPS）──
+    # ── 检测GitHub连通性（HTTPS only，避免SSH卡顿）──
     def _check_github_api():
         try:
-            # 🔥 优先用 git ls-remote 通过SSH检测
-            r = subprocess.run(
-                ["git", "ls-remote", "--exit-code", "origin", "HEAD"],
-                cwd=str(PROJECT_ROOT), capture_output=True, text=True,
-                env=_git_env(), timeout=10
-            )
-            if r.returncode == 0:
-                return "online"
-            # 回退HTTPS
             import requests
-            r = requests.get("https://api.github.com", timeout=5)
-            return "online" if r.status_code == 200 else "error"
+            r = requests.get("https://api.github.com/zen", timeout=5)
+            if r.status_code == 200: return "online"
+            r = requests.get("https://github.com", timeout=5)
+            return "online" if r.status_code in (200, 301, 302) else "offline"
         except:
             return "offline"
     api_status = _get_cached_or_fetch("github", _check_github_api, _CACHE_TTL["github"])
@@ -2784,25 +2791,42 @@ def on_ai_chat(data: dict):
                 if m:
                     found = m.group(1)
                     city = city_map.get(found, found)
-                # 关键：识别是今天/明天，决定用当前还是预报
-                is_forecast = any(kw in message for kw in ["明天","后天","明日","下周","未来"])
+                # 关键：识别是今天/明天/一周，决定用当前还是预报
+                is_forecast = any(kw in message for kw in ["明天","后天","明日","下周","未来","一周","7天","这几天"])
+                want_week = any(kw in message for kw in ["一周","7天","七天","下周"])
                 # 🔥 同时跑 wttr.in 和 Bing 天气搜索
                 try:
                     wr = _req.get(f"https://wttr.in/{city}?format=j1", timeout=8)
                     if wr.status_code==200 and wr.text.strip() and wr.text.strip().startswith("{"):
                         wd=wr.json()
                         if is_forecast:
-                            fc = wd.get("weather", [{}])[1 if "明天" in message or "明日" in message else 2]
-                            if fc:
-                                hourly = fc.get("hourly", [{}])
-                                minT = fc.get("mintempC","?"); maxT = fc.get("maxtempC","?")
-                                desc = "?"
-                                for h in hourly:
-                                    if h.get("time","") in ("1200","1300"):
-                                        desc = h.get("weatherDesc",[{}])[0].get("value","?") if h.get("weatherDesc") else "?"
-                                        break
-                                date = fc.get("date","?")
-                                injected_context = f"\n[天气预报 {date}] {city}: {desc}, {minT}°C~{maxT}°C\n"
+                            days_all = wd.get("weather", [{}])
+                            if want_week and len(days_all) >= 4:
+                                # 🔥 一周预报：拼接多天
+                                parts = []
+                                for i, fc in enumerate(days_all[1:5]):  # 1-4天
+                                    if not fc: continue
+                                    d_min = fc.get("mintempC","?"); d_max = fc.get("maxtempC","?")
+                                    d_date = fc.get("date","?")
+                                    desc = "?"
+                                    for h in fc.get("hourly",[{}]):
+                                        if h.get("time","") in ("1200","1300"):
+                                            desc = h.get("weatherDesc",[{}])[0].get("value","?") if h.get("weatherDesc") else "?"
+                                            break
+                                    day_name = ["","明天","后天","大后天","第4天"][i] if i < 4 else f"+{i}"
+                                    parts.append(f"{day_name}({d_date}): {desc} {d_min}~{d_max}°C")
+                                injected_context = f"\n[一周预报 {city}]\n  " + "\n  ".join(parts) + "\n"
+                            else:
+                                fc = days_all[1 if "明天" in message or "明日" in message else 2] if len(days_all) > 1 else None
+                                if fc:
+                                    minT = fc.get("mintempC","?"); maxT = fc.get("maxtempC","?")
+                                    desc = "?"
+                                    for h in fc.get("hourly",[{}]):
+                                        if h.get("time","") in ("1200","1300"):
+                                            desc = h.get("weatherDesc",[{}])[0].get("value","?") if h.get("weatherDesc") else "?"
+                                            break
+                                    date = fc.get("date","?")
+                                    injected_context = f"\n[天气预报 {date}] {city}: {desc}, {minT}°C~{maxT}°C\n"
                         else:
                             c=wd.get("current_condition",[{}])[0]
                             desc = c.get('weatherDesc',[{}])[0].get('value','?') if c.get('weatherDesc') else '?'
@@ -2972,6 +2996,11 @@ def on_ai_chat(data: dict):
 
             # 天气/新闻指令：必须使用注入的真实数据
             sys_prompt += f"\n【当前真实时间】{datetime.now().strftime('%Y-%m-%d %H:%M:%S %A')}（这是准确时间，请用此回答关于日期/时间的问题，**不要**用训练数据中的旧时间）\n"
+            # 列出最近7天日期供AI直接读取
+            from datetime import timedelta as _td
+            today = datetime.now()
+            days_str = " ".join([f"{(today+_td(days=i)).strftime('%m-%d')}={(today+_td(days=i)).strftime('%A')}" for i in range(7)])
+            sys_prompt += f"【日期速查】今天={today.strftime('%Y-%m-%d %A')}; 接下来7天: {days_str}\n"
             sys_prompt += "\n当用户问天气/新闻时，**必须**直接引用消息中的[实时天气]或[联网搜索]数据，**不要**说'我无法查询'。如果数据缺失，可建议用其他工具。\n"
             # 把天气数据也注入到系统提示（双重保险）
             if injected_context and "天气" in injected_context:
@@ -3034,6 +3063,16 @@ def on_ai_chat(data: dict):
                 memory_section += f"\n\n📅 今日({today})已学 {len(today_logs)} 条："
                 for e in today_logs[-10:]:
                     memory_section += f"\n  • [{e.get('category','')}] {e.get('message','')[:150]}"
+
+            # 🔥 列出最近10条学习内容（用户问"学了什么"时可列举）
+            memory_section += f"\n\n📚 最近10条学习记录："
+            for e in _learning_log[-10:]:
+                ts = e.get('time','')
+                msg = e.get('message','')[:120]
+                cat = e.get('category','')
+                det = e.get('detail','')[:80]
+                memory_section += f"\n  [{ts}] [{cat}] {msg}"
+                if det: memory_section += f" | {det}"
             
             # 昨日对比（展示持续性）
             if yesterday_logs:
@@ -4996,7 +5035,15 @@ def api_upload_images():
             (labels_dir / (Path(img_name).stem + ".txt")).touch()
             uploaded.append(img_name)
     data_yaml = dataset_dir / "data.yaml"
-    if not data_yaml.exists():
+    # 🔥 每次训练前强制修正 data.yaml 的 path 为本机路径
+    if data_yaml.exists():
+        try:
+            import yaml as _y
+            cfg = _y.safe_load(data_yaml.read_text(encoding='utf-8')) or {}
+            cfg['path'] = str(dataset_dir.absolute())
+            data_yaml.write_text(_y.dump(cfg, allow_unicode=True), encoding='utf-8')
+        except: pass
+    elif not data_yaml.exists():
         data_yaml.write_text(f"path: {dataset_dir}\ntrain: images\nval: images\n\nnc: 2\nnames: ['tank', 'infantry']\n")
     add_system_log("training", f"上传{len(uploaded)}张图片到数据集 {dataset_name}", "")
     return jsonify({"uploaded": uploaded, "dataset": dataset_name})
