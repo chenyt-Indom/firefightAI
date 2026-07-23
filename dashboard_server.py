@@ -130,7 +130,9 @@ _command_score = 0  # 指挥得分
 _recording = False  # 录屏状态
 _recording_frames = []  # 录屏帧缓存
 _chat_model = "glm"  # 当前聊天模型: glm/deepseek
-_detect_mode = "fusion"  # 检测模式: yolo / glm / fusion
+_detect_mode = "glm"  # 检测模式: yolo / glm / fusion (默认GLM-4V)
+_recent_tactics: list[str] = []  # 最近使用的战术(防重复)
+_last_battle_result: str = ""  # 上轮战斗结果(feedback)
 
 # ── GPU 状态 ──
 _gpu_info: dict = {"cuda_available": False, "gpus": [], "pytorch_cuda": False, "pytorch_version": "", "message": ""}
@@ -2858,11 +2860,11 @@ def on_ai_chat(data: dict):
         except Exception as _e:
             logger.warning(f"自动搜索失败: {_e}")
     
-    # 🔥 是否附带实时战场截图
+    # 🔥 每轮对话都附带最新战场截图（始终实时分析）
     screenshot_b64 = data.get("screenshot", "")
     include_vision = bool(screenshot_b64)
-    if not include_vision and "截图" in message:
-        include_vision = True
+    if not include_vision:
+        include_vision = True  # 🔥 强制每轮对话都带截图
 
     # 🔥 注入上次截图分析结果到上下文
     global _last_screenshot_analysis
@@ -3145,6 +3147,23 @@ def on_ai_chat(data: dict):
             if review_knowledge:
                 sys_prompt += "\n" + review_knowledge
 
+            # 🔥 注入完整知识库：要求AI必须以知识库为准，无记录则明确说明
+            kb_items = [k for k in _ai_knowledge_base if k.get("category") not in ("correction", "tactical_lesson")][-20:]
+            if kb_items:
+                sys_prompt += "\n\n【📚 知识库 - 这是事实来源，必须参考】\n"
+                sys_prompt += "⚠ 回答用户问题时：\n"
+                sys_prompt += "1. 优先使用知识库中已有的信息作答\n"
+                sys_prompt += "2. 如果知识库里有相关内容但不够完整，先引用知识库再补充你的分析\n"
+                sys_prompt += "3. 如果知识库中**完全没有**相关信息，必须明确说「知识库中无此信息，以下为我的分析」\n"
+                sys_prompt += "4. **禁止凭空编造**知识库里没有的战术/数据/经验！\n"
+                for k in kb_items:
+                    title = k.get('title', '')[:80]
+                    content = k.get('content', '')[:200]
+                    cat = k.get('category', '')
+                    sys_prompt += f"• [{cat}] {title}: {content}\n"
+            else:
+                sys_prompt += "\n\n【📚 知识库】当前知识库为空，回答用户问题时请明确说明「知识库暂无数据」。\n"
+
             # 构建消息列表
             messages = [{"role": "system", "content": sys_prompt + review_knowledge}]
             
@@ -3156,17 +3175,47 @@ def on_ai_chat(data: dict):
             # 🔥 如果有截图，构建vision消息
             user_content = message + context + injected_context
             if not screenshot_b64 and include_vision:
-                # 消息里提到截图但没有图片数据 → 后端自动截图（复用已有截图逻辑）
-                logger.info(f"后端自动截图触发")
+                # 🔥 直接截屏（PIL ImageGrab，不经过ADB，最可靠）
+                logger.info(f"截屏触发")
                 try:
-                    with app.test_client() as tc:
-                        r = tc.get("/api/control/screenshot")
-                        d = r.get_json() or {}
-                        if d.get("screenshot") and not d.get("error"):
-                            screenshot_b64 = d["screenshot"]
-                            logger.info(f"自动截图成功: {len(screenshot_b64)} chars")
+                    from PIL import ImageGrab
+                    img = ImageGrab.grab()
+                    # 缩放限制宽度1024
+                    w, h = img.size
+                    if w > 1024:
+                        ratio = 1024 / w
+                        img = img.resize((1024, int(h * ratio)), Image.LANCZOS)
+                    import io as _io
+                    buf = _io.BytesIO()
+                    img.save(buf, format="JPEG", quality=50, optimize=True)
+                    screenshot_b64 = base64.b64encode(buf.getvalue()).decode()
+                    logger.info(f"截屏成功: {img.size}, {len(screenshot_b64)} chars")
                 except Exception as e2:
-                    logger.warning(f"自动截图失败: {e2}")
+                    logger.warning(f"截屏失败: {e2}")
+                    # 回退到ADB
+                    try:
+                        adb_exe_v = _get_adb_for_emulator()
+                        for dev_v in [f"127.0.0.1:{_emulator_adb_port}", "127.0.0.1:7555"]:
+                            try:
+                                rv = subprocess.run([adb_exe_v, "-s", dev_v, "exec-out", "screencap"],
+                                                  capture_output=True, timeout=5)
+                                if rv.returncode == 0 and len(rv.stdout) >= 100:
+                                    import struct as _st
+                                    w = _st.unpack_from("<I", rv.stdout, 0)[0]
+                                    h = _st.unpack_from("<I", rv.stdout, 4)[0]
+                                    img = Image.frombytes("RGBA", (w, h), rv.stdout[12:], "raw").convert("RGB")
+                                    if w > 1024:
+                                        ratio = 1024 / w
+                                        img = img.resize((1024, int(h * ratio)), Image.LANCZOS)
+                                    buf = _io.BytesIO()
+                                    img.save(buf, format="JPEG", quality=55, optimize=True)
+                                    screenshot_b64 = base64.b64encode(buf.getvalue()).decode()
+                                    logger.info(f"ADB回退截图成功: {w}x{h}")
+                                    break
+                            except Exception:
+                                continue
+                    except Exception as _e3:
+                        logger.warning(f"ADB回退也失败: {_e3}")
             if include_vision and screenshot_b64:
                 # 🔥 BF标注模式：只看标记执行操控，不分析
                 is_bf_mark = message.startswith("[标注指令]")
@@ -3197,30 +3246,50 @@ def on_ai_chat(data: dict):
                     ]
                     result = _deepseek_vision_chat(messages, user_content, max_tokens=512, temperature=0.1, stream=False)
                 else:
-                    # 使用vision格式：先发送截图分析请求，再发送文字
+                    # 🔥 战术多样性：注入历史战术，禁止重复
+                    tactics_history = ""
+                    if _recent_tactics:
+                        tactics_history = "【🚫 最近已用战术(禁止重复)】\n"
+                        for t in _recent_tactics[-5:]:
+                            tactics_history += f"  ❌ {t}\n"
+                        tactics_history += "请采用**不同**战术！\n\n"
+                    if _last_battle_result:
+                        tactics_history += f"【📊 上轮反馈】{_last_battle_result}\n\n"
+
                     user_content = [
                         {
                             "type": "image_url",
                             "image_url": {"url": f"data:image/jpeg;base64,{screenshot_b64}"}
                         },
-                 {
-                        "type": "text",
-                        "text": f"【实时战场截图】仔细观察画面。\n\n"
-                        f"🚨 重要：画面可能只有地形/UI/路径/标记，**不一定有单位**！\n"
-                        f"🚨 **绝对禁止编造**画面上没有的单位（NOAK、ZTZ-99A2、Tank crew等）！\n"
-                        f"🚨 没看到单位就**直接说「画面中未见单位，只有地形/道路/UI元素」**，不要凭空补全数量！\n\n"
-                        f"🚨 真实存在的单位一定有**白色英文标注**（NOAK、ZTZ-99A2、Tank crew等），没标注的就是无名残骸或背景！\n"
-                        f"🚨 严禁猜测！画面模糊/看不清就说「无法辨认」，绝不能瞎写「8辆」「4辆」这种具体数字！\n\n"
-                        f"如实输出：\n"
-                        f"1. 你**实际看到**的内容（地形/建筑/标注/单位/UI）\n"
-                        f"2. 有白色标注的单位（标注什么写什么）\n"
-                        f"3. 没有标注的就是「无标注残骸」或「背景元素」\n"
-                        f"4. 战术建议\n\n"
-                        f"用户消息: {message}{context}"
-                    }
+                        {
+                            "type": "text",
+                            "text": f"{tactics_history}"
+                            f"【实时战场截图】请按以下格式详细分析，不要跳项：\n\n"
+                            f"━━━ 敌我态势 ━━━\n"
+                            f"🔵 识别规则：\n"
+                            f"   - 右下角的编号数字 = **己方单位**编号(红色=已摧毁)\n"
+                            f"   - 单位标签(如NOAK/ZTZ-99A2) ≠ 敌我标识，只是单位型号\n"
+                            f"   - 标注「People's Liberation Army of China」= **当前选中**的单位名称，不是全部\n"
+                            f"   - 观察画面颜色/队标来区分阵营\n"
+                            f"   - 被击杀红色消息列出的是**被杀单位**\n\n"
+                            f"🔵 己方(右下角编号对应)：列出型号+数量+编号\n"
+                            f"🔴 敌方：列出型号+数量+位置\n"
+                            f"⚪ 已摧毁(红色编号)：列出\n\n"
+                            f"━━━ 单位详情 ━━━\n"
+                            f"每个单位：型号/名称、大致坐标、状态(存活/残血/被击毁)\n\n"
+                            f"━━━ 战场评估 ━━━\n"
+                            f"兵力对比、地形优势、威胁评估\n\n"
+                            f"━━━ 决策方案 ━━━\n"
+                            f"给出2-3个可选方案(每个方案1-2句)，标注推荐度⭐\n"
+                            f"方案需包含具体操控指令[操控:tap,X,Y]或[操控:swipe,X1,Y1,X2,Y2]\n"
+                            f"⚠ 每个方案必须是**不同战术**(不能重复历史)！如包抄/强攻/诱敌/远程/压制\n\n"
+                            f"⚠ 只描述真实看到的，没看到就说「未发现」\n"
+                            f"⚠ 坐标用整数像素值(基于截图分辨率)\n\n"
+                            f"用户消息: {message}{context}"
+                        }
                     ]
                 # 使用vision-capable模型
-                result = _deepseek_vision_chat(messages, user_content, max_tokens=1024, temperature=0.1, stream=False)
+                result = _deepseek_vision_chat(messages, user_content, max_tokens=1024, temperature=0.4, stream=False)
             else:
                 messages.append({"role": "user", "content": user_content})
                 if _chat_model == "deepseek":
@@ -3335,18 +3404,30 @@ def _deepseek_vision_chat(messages: list, user_content, max_tokens: int = 1200, 
     llm_cfg = cfg["llm"]
     api_base = "https://open.bigmodel.cn/api/paas/v4"
     api_key = llm_cfg.get("fallback_api_key", llm_cfg.get("api_key", ""))
-    vision_messages = list(messages)
+    # 🔥 只保留 system prompt + 最近2轮对话，避免请求体过大
+    vision_messages = [messages[0]] if messages else []  # system prompt
+    vision_messages += messages[-4:] if len(messages) > 4 else messages[1:]  # 最近2轮
+    # 🔥 截断 system prompt 到合理长度
+    if vision_messages and vision_messages[0]["role"] == "system":
+        sp = vision_messages[0]["content"]
+        if len(sp) > 3000:
+            vision_messages[0]["content"] = sp[:3000] + "\n...(系统提示已截断)"
     vision_messages.append({"role": "user", "content": user_content})
     try:
         resp = req.post(
             f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": "glm-4v-flash", "messages": vision_messages, "max_tokens": max_tokens, "temperature": temperature, "stream": stream},
+            json={"model": "glm-4v-plus", "messages": vision_messages, "max_tokens": max_tokens, "temperature": temperature, "stream": stream},
             timeout=(10, timeout),
         )
+        # 🔥 打印400详情
+        if resp.status_code == 400:
+            import sys as _sys
+            body_size = len(json.dumps({"model": "glm-4v-plus", "messages": vision_messages, "max_tokens": max_tokens}, ensure_ascii=False))
+            logger.error(f"GLM-4V 400: body={body_size/1024:.0f}KB err={resp.text[:300]}")
         # 自动重试 429 限流
         if resp.status_code == 429:
-            import time as _t; _t.sleep(2); resp = req.post(f"{api_base}/chat/completions", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json={"model": "glm-4v-flash", "messages": vision_messages, "max_tokens": max_tokens, "temperature": temperature, "stream": stream}, timeout=(10, timeout))
+            import time as _t; _t.sleep(10); resp = req.post(f"{api_base}/chat/completions", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json={"model": "glm-4v-plus", "messages": vision_messages, "max_tokens": max_tokens, "temperature": temperature, "stream": stream}, timeout=(10, timeout))
         resp.raise_for_status()
         if stream:
             return {"success": True, "response": resp, "stream": True}
@@ -3377,14 +3458,14 @@ def api_check_glm4v():
         api_key = llm.get("fallback_api_key", "")
         if not api_key:
             return jsonify({"status": "error", "message": "未配置API Key"})
-        # 真实调用 glm-4v-flash
+        # 真实调用 glm-4v-plus
         resp = req.post(f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": "glm-4v-flash", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5},
+            json={"model": "glm-4v-plus", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5},
             timeout=10)
         if resp.status_code == 200:
             txt = resp.json().get("choices",[{}])[0].get("message",{}).get("content","")
-            return jsonify({"status": "ok", "model": "glm-4v-flash", "has_vision": True, "model_list": ["glm-4v-flash"], "msg": f"已连接,响应:"+txt[:50]})
+            return jsonify({"status": "ok", "model": "glm-4v-plus", "has_vision": True, "model_list": ["glm-4v-plus"], "msg": f"已连接,响应:"+txt[:50]})
         return jsonify({"status": "error", "message": f"HTTP {resp.status_code}"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)[:100]})
@@ -3494,6 +3575,11 @@ def _execute_control_action(action: dict, message: str = ""):
             socketio.emit("ai_chat_token", {"token": "", "done": True, "full": f"[操控] {status_msg}"})
             add_learning_log("control", f"执行操控: {action_type}", str(action))
             socketio.emit("control_action_executed", {"action": action, "success": True})
+            # 🔥 记录战术到历史
+            _recent_tactics.append(f"{action_type}({json.dumps(action, ensure_ascii=False)[:80]})")
+            if len(_recent_tactics) > 10:
+                _recent_tactics = _recent_tactics[-10:]
+            # 🔥 弹出确认对话框
             # 🔥 弹出确认对话框
             socketio.emit("command_confirm", {"action": action, "message": f"AI已执行: {action_type} {action.get('x','')}{action.get('y','')}{action.get('direction','')}{action.get('key','')}{action.get('text','')}"})
         else:
@@ -3728,9 +3814,11 @@ def api_command_score():
     completed = data.get("completed", False)
     if completed:
         _command_score += 10
+        _last_battle_result = "上轮操作成功 +10分"
         add_learning_log("reward", f"✅ 任务完成 +10", f"总分:{_command_score}")
     else:
         _command_score -= 5
+        _last_battle_result = "上轮操作失败 -5分，需调整"
         add_learning_log("reward", f"❌ 任务失败 -5", f"总分:{_command_score}")
     # 持久化得分
     try:
@@ -3810,7 +3898,7 @@ def api_vision_fusion():
                 import requests as _req
                 cfg = load_config()
                 api_key = cfg["llm"].get("fallback_api_key", cfg["llm"].get("api_key", ""))
-                body = {"model": "glm-4v-flash", "messages": [
+                body = {"model": "glm-4v-plus", "messages": [
                     {"role": "user", "content": [
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
                         {"type": "text", "text": "列出画面中所有可见的敌我单位/旗帜/UI元素，每个一行，英文输出。只描述实际看到的内容，无标注的被击毁单位称为destroyed_unit:位置。如：NOAK:center, destroyed_unit:top-left, flag:top-right"}
@@ -3893,7 +3981,7 @@ def api_record_stop():
     
     for i, frm in enumerate(key_frames):
         try:
-            body = {"model": "glm-4v-flash", "messages": [
+            body = {"model": "glm-4v-plus", "messages": [
                 {"role": "user", "content": [
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frm}"}},
                     {"type": "text", "text": "列出画面中实际看到的单位（引用标注名称或无标注被击毁单位）+位置，英文输出。不要编造型号。"}
@@ -6662,7 +6750,7 @@ def on_check_all_connections():
             api_key = cfg["llm"].get("fallback_api_key", "")
             r = requests.post(f"{api_base}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": "glm-4v-flash", "messages": [{"role":"user","content":"ping"}], "max_tokens": 5},
+                json={"model": "glm-4v-plus", "messages": [{"role":"user","content":"ping"}], "max_tokens": 5},
                 timeout=10)
             return "online" if r.status_code == 200 else f"error:{r.status_code}"
         except:
@@ -8318,7 +8406,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
           <button class="btn-verify" onclick="fullMapScan()" style="font-size:11px;background:#00bcd4;color:#fff">🗺 全图扫描</button>
           <button class="btn-verify" onclick="BFOn()" style="font-size:11px;background:#ff5722;color:#fff">📺 实时战场</button>
           <button class="btn-verify" onclick="fusionAnalyze()" style="font-size:11px;background:#ff5722;color:#fff">🔬 YOLO+GLM 融合</button>
-          <button id="btn-detect" class="btn-verify" onclick="toggleDetect()" style="font-size:11px;background:#2e7d32;color:#fff">👁 YOLO+GLM</button>
+          <button id="btn-detect" class="btn-verify" onclick="toggleDetect()" style="font-size:11px;background:#4a148c;color:#fff">👁 GLM-4V</button>
           <button id="btn-record" class="btn-verify" onclick="toggleRecording()" style="font-size:11px;background:#e91e63;color:#fff">📹 录屏分析</button>
           <button id="btn-model" class="btn-verify" onclick="toggleModel()" style="font-size:11px;background:#4a148c;color:#fff">🧠 GLM</button>
           <button class="btn-clear" onclick="clearChat()">清空</button>
@@ -9262,10 +9350,10 @@ function toggleDetect(){
   var btn=document.getElementById('btn-detect');
   fetch('/api/detect/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(r=>r.json()).then(d=>{
     var labels={yolo:'👁 YOLO',glm:'👁 GLM-4V',fusion:'👁 YOLO+GLM'};
-    btn.textContent=labels[d.mode]||d.label;btn.style.background=d.mode==='yolo'?'#ff9800':'#2e7d32';
+    var colors={yolo:'#ff9800',glm:'#4a148c',fusion:'#2e7d32'};
+    btn.textContent=labels[d.mode];btn.style.background=colors[d.mode];
     addChatMessage('system','👁 检测切换为: '+d.label);
-  }).catch(function(){addChatMessage('system','❌ 切换失败')});
-}
+  });}
 function addChatMessage(role,text,msgId){
   var msgs=document.getElementById('chat-messages');
   var avatar=role==='user'?'你':'AI';
@@ -9581,7 +9669,7 @@ function reconnectADB(){fetch('/api/adb/reconnect',{method:'POST',headers:{'Cont
 function checkGLM4V(){fetch('/api/check/glm4v').then(r=>r.json()).then(d=>{
   var s=document.getElementById('conn-glm-status');
   var det=document.getElementById('conn-glm-detail');
-  if(d.status==='ok'){s.textContent='已连接(glm-4v-flash)';s.className='conn-status online';det.textContent=d.msg;setMini('conn-glm','online','GLM')}
+  if(d.status==='ok'){s.textContent='已连接(glm-4v-plus)';s.className='conn-status online';det.textContent=d.msg;setMini('conn-glm','online','GLM')}
   else{s.textContent='失败';s.className='conn-status offline';det.textContent=d.message;setMini('conn-glm','offline','GLM')}
   var apiEl=document.getElementById('api-glm-status');if(apiEl){apiEl.textContent=s.textContent;apiEl.className=s.className}
   var apiDl=document.getElementById('api-glm-detail');if(apiDl){apiDl.textContent=d.msg||d.message||''}
