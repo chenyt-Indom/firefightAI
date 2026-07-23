@@ -130,6 +130,7 @@ _command_score = 0  # 指挥得分
 _recording = False  # 录屏状态
 _recording_frames = []  # 录屏帧缓存
 _chat_model = "glm"  # 当前聊天模型: glm/deepseek
+_detect_mode = "fusion"  # 检测模式: yolo / glm / fusion
 
 # ── GPU 状态 ──
 _gpu_info: dict = {"cuda_available": False, "gpus": [], "pytorch_cuda": False, "pytorch_version": "", "message": ""}
@@ -2873,7 +2874,7 @@ def on_ai_chat(data: dict):
     control_action = data.get("control_action", {})  # {type: "tap/swipe/key/type", x, y, key, text}
 
     # 🔥 检测是否为"记录到学习日志"指令
-    log_keywords = ["记录到学习日志", "添加到学习日志", "学习日志记录", "记录这条", "记录到日志", "记住这条", "记下这条"]
+    log_keywords = ["记录到学习日志", "添加到学习日志", "学习日志记录", "记录这条", "记录到日志", "记住这条", "记下这条", "教练纠错", "AI教练"]
     is_log_request = any(kw in message for kw in log_keywords)
 
     # 🔥 检测"开启观察学习"指令
@@ -3167,31 +3168,60 @@ def on_ai_chat(data: dict):
                 except Exception as e2:
                     logger.warning(f"自动截图失败: {e2}")
             if include_vision and screenshot_b64:
-                # 使用vision格式：先发送截图分析请求，再发送文字
-                user_content = [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{screenshot_b64}"}
-                    },
-                    {
-                        "type": "text",
-                        "text": f"【实时战场截图】请仔细分析当前截图中所有可见元素。\n\n"
-                        f"⚠⚠⚠ 重要规则（务必遵守，否则会失败）：\n"
-                        f"1. **只描述画面上**你**实际看到**的单位、旗帜、文字。**绝不编造**画面上没有的内容！\n"
-                        f"2. 画面上的中文/英文单位名称（如NOAK、ZTZ-99A2、Tank crew）都是真实标注，请**准确引用**，不要自己起名如T-72/M1A2等。\n"
-                        f"3. 如果画面上看不到某类型单位，**直接说没看到**，不要凭空推测。\n"
-                        f"4. 被击毁的单位：通常**没有名字标注**，只有黑烟、火焰、残骸。\n"
-                        f"   若看到这样的无标注残骸，描述为「被击毁的单位」+ 位置，**不要猜具体型号**（如T-72/M1A2等）。\n"
-                        f"   若有名字标注的存活单位，直接引用标注（如NOAK、ZTZ-99A2）。若无名标注，只说「被击毁的敌方/我方单位」。\n\n"
-                        f"分析内容：\n"
-                        f"1. 屏幕上**真实存在**的单位类型+数量（不要猜）\n"
-                        f"2. 可见的旗帜/标志/图标（精确位置）\n"
-                        f"3. 可见的中文/英文标注文字（直接引用）\n"
-                        f"4. 战况评估（基于真实看到的内容）\n"
-                        f"5. 下一步建议\n\n"
-                        f"用户消息: {message}{context}"
-                    }
-                ]
+                # 🔥 BF标注模式：只看标记执行操控，不分析
+                is_bf_mark = message.startswith("[标注指令]")
+                if is_bf_mark:
+                    # 🔥 直接提取标注坐标，不依赖AI看图定位
+                    import re as _bf_re
+                    # 从message中提取坐标：(X,Y) 或 (X1,Y1)->(X2,Y2)
+                    direct_actions = []
+                    for lm in _bf_re.finditer(r'点\d+=\((\d+),(\d+)\)', message):
+                        direct_actions.append({"type": "tap", "x": int(lm.group(1)), "y": int(lm.group(2))})
+                    for lm in _bf_re.finditer(r'线\d+:\((\d+),(\d+)\)->\((\d+),(\d+)\)', message):
+                        direct_actions.append({"type": "swipe", "x1": int(lm.group(1)), "y1": int(lm.group(2)), "x2": int(lm.group(3)), "y2": int(lm.group(4))})
+                    
+                    if direct_actions:
+                        logger.info(f"BF直接执行标注: {len(direct_actions)}个动作")
+                        for action in direct_actions:
+                            _execute_control_action(action)
+
+                    # 同时让AI看图确认（用于学习，即使直接执行了也发送视觉请求）
+                    user_content = [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{screenshot_b64}"}},
+                        {"type": "text", "text": f"⚠ 操控指令模式！\n"
+                         f"图上黄色线/点是用户标注。标注的坐标已经在消息中给出（X,Y像素坐标），请直接使用，不要自己猜坐标！\n"
+                         f"- 线=移动单位，起=单位位置，终=目标位置\n"
+                         f"- 点=点击位置\n"
+                         f"输出现有标注对应的操控指令（每行一个【操控:tap,X,Y】或【操控:swipe,X1,Y1,X2,Y2】），同时简要说明你看到画面上有什么单位。\n"
+                         f"用户消息: {message}"}
+                    ]
+                    result = _deepseek_vision_chat(messages, user_content, max_tokens=512, temperature=0.1, stream=False)
+                else:
+                    # 使用vision格式：先发送截图分析请求，再发送文字
+                    user_content = [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{screenshot_b64}"}
+                        },
+                        {
+                            "type": "text",
+                            "text": f"【实时战场截图】请仔细分析当前截图中所有可见元素。\n\n"
+                            f"⚠⚠⚠ 重要规则（务必遵守，否则会失败）：\n"
+                            f"1. **只描述画面上**你**实际看到**的单位、旗帜、文字。**绝不编造**画面上没有的内容！\n"
+                            f"2. 画面上的中文/英文单位名称（如NOAK、ZTZ-99A2、Tank crew）都是真实标注，请**准确引用**，不要自己起名如T-72/M1A2等。\n"
+                            f"3. 如果画面上看不到某类型单位，**直接说没看到**，不要凭空推测。\n"
+                            f"4. 被击毁的单位：通常**没有名字标注**，只有黑烟、火焰、残骸。\n"
+                            f"   若看到这样的无标注残骸，描述为「被击毁的单位」+ 位置，**不要猜具体型号**（如T-72/M1A2等）。\n"
+                            f"   若有名字标注的存活单位，直接引用标注（如NOAK、ZTZ-99A2）。若无名标注，只说「被击毁的敌方/我方单位」。\n\n"
+                            f"分析内容：\n"
+                            f"1. 屏幕上**真实存在**的单位类型+数量（不要猜）\n"
+                            f"2. 可见的旗帜/标志/图标（精确位置）\n"
+                            f"3. 可见的中文/英文标注文字（直接引用）\n"
+                            f"4. 战况评估（基于真实看到的内容）\n"
+                            f"5. 下一步建议\n\n"
+                            f"用户消息: {message}{context}"
+                        }
+                    ]
                 # 使用vision-capable模型
                 result = _deepseek_vision_chat(messages, user_content, max_tokens=1024, temperature=0.1, stream=False)
             else:
@@ -3728,6 +3758,7 @@ def api_get_score():
 def api_vision_fusion():
     """YOLO + GLM-4V 融合识别：截图 → YOLO检测 + GLM-4V分析 → 合并保存学习"""
     import base64 as _b64, struct as _st, io as _io, subprocess as _sp, time as _time
+    global _detect_mode
     try:
         # 1. 截图
         adb_exe = _get_adb_for_emulator()
@@ -3744,45 +3775,57 @@ def api_vision_fusion():
         img.save(buf, format="JPEG", quality=70)
         img_b64 = _b64.b64encode(buf.getvalue()).decode()
         
-        # 2. YOLO检测
+        # 2. 检测（根据 _detect_mode 选择）
         yolo_results = []
-        try:
-            from ultralytics import YOLO
-            model_path = PROJECT_ROOT / "runs" / "detect" / "runs" / "detect" / "screen_ui36" / "weights" / "best.pt"
-            if model_path.exists():
-                model = YOLO(str(model_path))
-                dets = model(img, verbose=False)
-                for det in dets:
-                    if det.boxes:
-                        for box in det.boxes:
-                            cls_id = int(box.cls[0])
-                            conf = float(box.conf[0])
-                            xyxy = box.xyxy[0].tolist()
-                            name = det.names.get(cls_id, f"cls_{cls_id}")
-                            yolo_results.append({"class": name, "confidence": round(conf, 3), "xyxy": [round(x, 1) for x in xyxy]})
-        except Exception as ye:
-            logger.warning(f"YOLO检测失败: {ye}")
-            yolo_results = [{"error": str(ye)[:100]}]
+        if _detect_mode in ("yolo", "fusion"):
+            try:
+                from ultralytics import YOLO
+                model_path = PROJECT_ROOT / "runs" / "detect" / "runs" / "detect" / "screen_ui36" / "weights" / "best.pt"
+                if model_path.exists():
+                    import torch as _torch
+                    _yolo_device = 0 if _torch.cuda.is_available() else "cpu"
+                    try:
+                        model = YOLO(str(model_path))
+                        dets = model(img, verbose=False, device=_yolo_device)
+                    except Exception as _cuda_err:
+                        if "no kernel image" in str(_cuda_err).lower() or "cudaerror" in str(_cuda_err).lower():
+                            logger.warning(f"CUDA不可用，回退CPU推理: {_cuda_err}")
+                            model = YOLO(str(model_path))
+                            dets = model(img, verbose=False, device="cpu")
+                        else:
+                            raise
+                    for det in dets:
+                        if det.boxes:
+                            for box in det.boxes:
+                                cls_id = int(box.cls[0])
+                                conf = float(box.conf[0])
+                                xyxy = box.xyxy[0].tolist()
+                                name = det.names.get(cls_id, f"cls_{cls_id}")
+                                yolo_results.append({"class": name, "confidence": round(conf, 3), "xyxy": [round(x, 1) for x in xyxy]})
+            except Exception as ye:
+                logger.warning(f"YOLO检测失败: {ye}")
+                yolo_results = [{"error": str(ye)[:100]}]
         
-        # 3. GLM-4V 分析
+        # 3. GLM-4V 分析 (根据 _detect_mode 选择)
         glm_result = ""
-        try:
-            import requests as _req
-            cfg = load_config()
-            api_key = cfg["llm"].get("fallback_api_key", cfg["llm"].get("api_key", ""))
-            body = {"model": "glm-4v-flash", "messages": [
-                {"role": "user", "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-                    {"type": "text", "text": "列出画面中所有可见的敌我单位/旗帜/UI元素，每个一行，英文输出。只描述实际看到的内容，无标注的被击毁单位称为destroyed_unit:位置。如：NOAK:center, destroyed_unit:top-left, flag:top-right"}
-                ]}
-            ], "max_tokens": 300, "stream": False}
-            r = _req.post("https://open.bigmodel.cn/api/paas/v4/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"}, json=body, timeout=20)
-            if r.status_code == 200:
-                glm_result = r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-        except Exception as ge:
-            logger.warning(f"GLM-4V融合分析失败: {ge}")
-            glm_result = f"GLM error: {str(ge)[:100]}"
+        if _detect_mode in ("glm", "fusion"):
+            try:
+                import requests as _req
+                cfg = load_config()
+                api_key = cfg["llm"].get("fallback_api_key", cfg["llm"].get("api_key", ""))
+                body = {"model": "glm-4v-flash", "messages": [
+                    {"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                        {"type": "text", "text": "列出画面中所有可见的敌我单位/旗帜/UI元素，每个一行，英文输出。只描述实际看到的内容，无标注的被击毁单位称为destroyed_unit:位置。如：NOAK:center, destroyed_unit:top-left, flag:top-right"}
+                    ]}
+                ], "max_tokens": 300, "stream": False}
+                r = _req.post("https://open.bigmodel.cn/api/paas/v4/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}"}, json=body, timeout=20)
+                if r.status_code == 200:
+                    glm_result = r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+            except Exception as ge:
+                logger.warning(f"GLM-4V融合分析失败: {ge}")
+                glm_result = f"GLM error: {str(ge)[:100]}"
         
         # 4. 合并保存
         fusion = {"time": _time.time(), "yolo": yolo_results, "glm": glm_result, "resolution": f"{w}x{h}"}
@@ -3889,6 +3932,27 @@ def api_model_switch():
     else:
         _chat_model = "deepseek" if _chat_model == "glm" else "glm"
     return jsonify({"model": _chat_model, "models": {"glm": "GLM-4-Flash", "deepseek": "DeepSeek-V3"}})
+
+@app.route("/api/detect/switch", methods=["POST"])
+def api_detect_switch():
+    """切换检测模式: yolo / glm / fusion"""
+    global _detect_mode
+    data = request.get_json() or {}
+    mode = data.get("mode", "")
+    modes = {"yolo": "YOLO", "glm": "GLM-4V", "fusion": "YOLO+GLM"}
+    if mode in modes:
+        _detect_mode = mode
+    else:
+        # 循环切换
+        order = ["fusion", "yolo", "glm"]
+        idx = order.index(_detect_mode) if _detect_mode in order else 0
+        _detect_mode = order[(idx + 1) % 3]
+    return jsonify({"mode": _detect_mode, "label": modes[_detect_mode]})
+
+@app.route("/api/detect/mode", methods=["GET"])
+def api_detect_mode():
+    """获取当前检测模式"""
+    return jsonify({"mode": _detect_mode})
 
 @app.route("/api/feedback", methods=["POST"])
 def api_feedback():
@@ -8257,6 +8321,7 @@ button{padding:10px 22px;border:none;border-radius:8px;font-size:13px;font-weigh
           <button class="btn-verify" onclick="fullMapScan()" style="font-size:11px;background:#00bcd4;color:#fff">🗺 全图扫描</button>
           <button class="btn-verify" onclick="BFOn()" style="font-size:11px;background:#ff5722;color:#fff">📺 实时战场</button>
           <button class="btn-verify" onclick="fusionAnalyze()" style="font-size:11px;background:#ff5722;color:#fff">🔬 YOLO+GLM 融合</button>
+          <button id="btn-detect" class="btn-verify" onclick="toggleDetect()" style="font-size:11px;background:#2e7d32;color:#fff">👁 YOLO+GLM</button>
           <button id="btn-record" class="btn-verify" onclick="toggleRecording()" style="font-size:11px;background:#e91e63;color:#fff">📹 录屏分析</button>
           <button id="btn-model" class="btn-verify" onclick="toggleModel()" style="font-size:11px;background:#4a148c;color:#fff">🧠 GLM</button>
           <button class="btn-clear" onclick="clearChat()">清空</button>
@@ -9193,8 +9258,16 @@ function toggleModel(){
   fetch('/api/model/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:cur})}).then(r=>r.json()).then(d=>{
     if(d.model==='glm'){btn.textContent='🧠 GLM';btn.style.background='#4a148c'}
     else{btn.textContent='🔵 DeepSeek';btn.style.background='#1976d2'}
-    addChatMessage('system','🤖 切换为: '+(d.model==='glm'?'GLM-4-Flash':'DeepSeek-V3'));
+    addChatMessage('system','🤖 对话切换为: '+(d.model==='glm'?'GLM-4-Flash':'DeepSeek-V3'));
   });
+}
+function toggleDetect(){
+  var btn=document.getElementById('btn-detect');
+  fetch('/api/detect/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(r=>r.json()).then(d=>{
+    var labels={yolo:'👁 YOLO',glm:'👁 GLM-4V',fusion:'👁 YOLO+GLM'};
+    btn.textContent=labels[d.mode]||d.label;btn.style.background=d.mode==='yolo'?'#ff9800':'#2e7d32';
+    addChatMessage('system','👁 检测切换为: '+d.label);
+  }).catch(function(){addChatMessage('system','❌ 切换失败')});
 }
 function addChatMessage(role,text,msgId){
   var msgs=document.getElementById('chat-messages');
@@ -11960,7 +12033,7 @@ var c2=document.getElementById("bf-canvas");
 c2.addEventListener("mousedown",function(e){_bfDraw=true;var r=c2.getBoundingClientRect();_bfSX=(e.clientX-r.left)/r.width;_bfSY=(e.clientY-r.top)/r.height});
 c2.addEventListener("mousemove",function(e){if(!_bfDraw)return;var r=c2.getBoundingClientRect(),ex=(e.clientX-r.left)/r.width,ey=(e.clientY-r.top)/r.height;_bfTmps=[{type:_bfTool,x:_bfSX,y:_bfSY,x2:ex,y2:ey,w:ex-_bfSX,h:ey-_bfSY,color:"#ff0"}];BFDraw()});
 c2.addEventListener("mouseup",function(e){if(!_bfDraw)return;_bfDraw=false;var r=c2.getBoundingClientRect(),ex=(e.clientX-r.left)/r.width,ey=(e.clientY-r.top)/r.height;if(_bfTool=="point"){_bfMarks.push({type:"point",x:_bfSX,y:_bfSY})}else if(_bfTool=="line"){if(Math.abs(ex-_bfSX)>0.005||Math.abs(ey-_bfSY)>0.005)_bfMarks.push({type:"line",x:_bfSX,y:_bfSY,x2:ex,y2:ey})}else if(_bfTool=="box"){if(Math.abs(ex-_bfSX)>0.005)_bfMarks.push({type:"box",x:_bfSX,y:_bfSY,w:ex-_bfSX,h:ey-_bfSY})}_bfTmps=[];BFDraw()});
-function BFSend(){var v=document.getElementById("bf-cmd").value.trim();if(!v)return;document.getElementById("bf-cmd").value="";fetch("/api/control/screenshot").then(function(r){return r.json()}).then(function(d){var b64=d.screenshot||"";if(_bfMarks.length>0){var img=document.getElementById("bf-img"),fc=document.createElement("canvas");fc.width=img.naturalWidth;fc.height=img.naturalHeight;var ctx=fc.getContext("2d"),fi=new Image();fi.onload=function(){ctx.drawImage(fi,0,0);ctx.strokeStyle="#ff0";ctx.lineWidth=Math.max(2,fc.width*0.003);_bfMarks.forEach(function(m){var x=m.x*fc.width,y=m.y*fc.height;if(m.type=="point"){ctx.beginPath();ctx.arc(x,y,15,0,2*Math.PI);ctx.fillStyle="rgba(255,255,0,.3)";ctx.fill();ctx.stroke()}else if(m.type=="line"){ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(m.x2*fc.width,m.y2*fc.height);ctx.stroke()}else if(m.type=="box"){ctx.strokeRect(x,y,m.w*fc.width,m.h*fc.height)}});b64=fc.toDataURL("image/jpeg",0.7).split(",")[1]};fi.src="data:image/jpeg;base64,"+b64}setTimeout(function(){socket.emit("ai_chat",{message:(_bfMarks.length>0?"[标注] ":"")+v,screenshot:b64,include_vision:true});var d2=document.getElementById("bf-chat"),m2=document.createElement("div");m2.className="m u";m2.textContent=(_bfMarks.length>0?"[标注] ":"")+v;d2.appendChild(m2);d2.scrollTop=d2.scrollHeight;var once=true;var h=function(t){if(t.done&&once){once=false;var dm=document.createElement("div");dm.className="m a";dm.textContent=(t.full||"").slice(0,500);d2.appendChild(dm);d2.scrollTop=d2.scrollHeight;socket.off("ai_chat_token",h)}};socket.on("ai_chat_token",h)},_bfMarks.length>0?500:0);_bfMarks=[];BFClearCanvas()})}
+function BFSend(){var v=document.getElementById("bf-cmd").value.trim();if(!v)return;document.getElementById("bf-cmd").value="";fetch("/api/control/screenshot").then(function(r){return r.json()}).then(function(d){var b64=d.screenshot||"";if(_bfMarks.length>0){var img=document.getElementById("bf-img"),fc=document.createElement("canvas");fc.width=img.naturalWidth;fc.height=img.naturalHeight;var ctx=fc.getContext("2d"),fi=new Image();fi.onload=function(){ctx.drawImage(fi,0,0);ctx.strokeStyle="#ff0";ctx.lineWidth=Math.max(2,fc.width*0.003);_bfMarks.forEach(function(m){var x=m.x*fc.width,y=m.y*fc.height;if(m.type=="point"){ctx.beginPath();ctx.arc(x,y,15,0,2*Math.PI);ctx.fillStyle="rgba(255,255,0,.3)";ctx.fill();ctx.stroke()}else if(m.type=="line"){ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(m.x2*fc.width,m.y2*fc.height);ctx.stroke()}else if(m.type=="box"){ctx.strokeRect(x,y,m.w*fc.width,m.h*fc.height)}});b64=fc.toDataURL("image/jpeg",0.7).split(",")[1]};fi.src="data:image/jpeg;base64,"+b64}var msg="[标注指令] 黄线=单位移动路径(起=单位,终=目标),黄点=点击位置,黄框=区域。禁止分析,只输出【操控:tap,X,Y】或【操控:swipe,X1,Y1,X2,Y2】。";_bfMarks.forEach(function(m,i){if(m.type=="point")msg+=" 点"+(i+1)+"=("+Math.round(m.x*fc.width)+","+Math.round(m.y*fc.height)+")";else if(m.type=="line")msg+=" 线"+(i+1)+":("+Math.round(m.x*fc.width)+","+Math.round(m.y*fc.height)+")->("+Math.round(m.x2*fc.width)+","+Math.round(m.y2*fc.height)+")";});msg+=" 指令:"+v;setTimeout(function(){socket.emit("ai_chat",{message:msg,screenshot:b64,include_vision:true});var d2=document.getElementById("bf-chat"),m2=document.createElement("div");m2.className="m u";m2.textContent="[标注] "+v;d2.appendChild(m2);d2.scrollTop=d2.scrollHeight;var once=true;var h=function(t){if(t.done&&once){once=false;var dm=document.createElement("div");dm.className="m a";dm.textContent=(t.full||"").slice(0,500);d2.appendChild(dm);d2.scrollTop=d2.scrollHeight;socket.off("ai_chat_token",h)}};socket.on("ai_chat_token",h);setTimeout(function(){if(d2.lastChild&&d2.lastChild.className==="m a"&&d2.lastChild.textContent.length<5){var fallback="AI无响应,执行兜底: ";_savedMarks.forEach(function(m){var img=document.getElementById("bf-img");if(m.type=="point"){var x=Math.round(m.x*img.naturalWidth),y=Math.round(m.y*img.naturalHeight);fetch("/api/emulator/touch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"tap",x:x,y:y})});fallback+="tap("+x+","+y+") "}else if(m.type=="line"){var x1=Math.round(m.x*img.naturalWidth),y1=Math.round(m.y*img.naturalHeight),x2=Math.round(m.x2*img.naturalWidth),y2=Math.round(m.y2*img.naturalHeight);fetch("/api/emulator/touch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"swipe",x:x1,y:y1,x2:x2,y2:y2,duration:300})});fallback+="swipe("+x1+","+y1+")->("+x2+","+y2+") "}});var dm=document.createElement("div");dm.className="m s";dm.textContent=fallback;d2.appendChild(dm)}},8000)},_bfMarks.length>0?500:0);var _savedMarks=_bfMarks.slice();_bfMarks=[];BFClearCanvas()})}
 </script>
 
 </body>
